@@ -3,7 +3,7 @@
 import networkx as nx
 import pytest
 
-from slurp.scorer import _tokenize, score_nodes
+from slurp.scorer import _tokenize, score_nodes, score_nodes_detailed
 
 
 # ---------------------------------------------------------------------------
@@ -289,3 +289,51 @@ class TestCodeFileTypeBoost:
         scores = score_nodes(G, "auth service")
         for nid, s in scores.items():
             assert 0.0 <= s <= 1.0, f"{nid}: {s}"
+
+
+# ---------------------------------------------------------------------------
+# score_nodes_detailed — component exposure
+# ---------------------------------------------------------------------------
+
+
+class TestScoreNodesDetailed:
+    def test_returns_three_dicts(self, sample_graph):
+        result = score_nodes_detailed(sample_graph, "auth")
+        assert len(result) == 3
+        final, structural, semantic = result
+        assert isinstance(final, dict)
+        assert isinstance(structural, dict)
+        assert isinstance(semantic, dict)
+
+    def test_all_three_cover_same_nodes(self, sample_graph):
+        final, structural, semantic = score_nodes_detailed(sample_graph, "auth")
+        assert set(final) == set(structural) == set(semantic) == set(sample_graph.nodes)
+
+    def test_final_scores_match_score_nodes(self, sample_graph):
+        final, _, _ = score_nodes_detailed(sample_graph, "auth flow")
+        plain = score_nodes(sample_graph, "auth flow")
+        for nid in sample_graph.nodes:
+            assert abs(final[nid] - plain[nid]) < 1e-12
+
+    def test_structural_scores_between_0_and_1(self, sample_graph):
+        _, structural, _ = score_nodes_detailed(sample_graph, "auth")
+        for nid, s in structural.items():
+            assert 0.0 <= s <= 1.0, f"{nid} structural={s}"
+
+    def test_semantic_scores_between_0_and_1(self, sample_graph):
+        _, _, semantic = score_nodes_detailed(sample_graph, "auth")
+        for nid, s in semantic.items():
+            assert 0.0 <= s <= 1.0, f"{nid} semantic={s}"
+
+    def test_empty_graph_returns_three_empty_dicts(self):
+        final, structural, semantic = score_nodes_detailed(nx.DiGraph(), "auth")
+        assert final == {} and structural == {} and semantic == {}
+
+    def test_semantic_nonzero_for_matching_query(self, sample_graph):
+        _, _, semantic = score_nodes_detailed(sample_graph, "authenticate credentials")
+        assert semantic["authenticate_user"] > 0.0
+
+    def test_structural_nonzero_for_connected_nodes(self, sample_graph):
+        _, structural, _ = score_nodes_detailed(sample_graph, "auth")
+        # hash_password is pointed to by authenticate_user — has incoming edges → PR > 0.
+        assert structural["hash_password"] > 0.0

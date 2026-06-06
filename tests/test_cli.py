@@ -166,17 +166,69 @@ class TestFormatFlag:
 
 
 class TestExplainFlag:
-    def test_explain_shows_scores(self, sample_graph_json):
+    def test_explain_exits_zero(self, sample_graph_json):
         result = _runner().invoke(
             cli,
-            ["auth", "--graph", str(sample_graph_json), "--explain"],
+            ["auth", "--graph", str(sample_graph_json), "--explain", "--no-audit"],
         )
         assert result.exit_code == 0
-        assert "score:" in result.output
 
-    def test_without_explain_no_scores_in_markdown(self, sample_graph_json):
+    def test_explain_shows_score_breakdown_table(self, sample_graph_json):
         result = _runner().invoke(
-            cli, ["auth", "--graph", str(sample_graph_json), "--format", "markdown"]
+            cli,
+            ["auth", "--graph", str(sample_graph_json), "--explain", "--no-audit"],
+        )
+        assert result.exit_code == 0
+        assert "Score Breakdown" in result.output
+
+    def test_explain_table_has_structural_column(self, sample_graph_json):
+        result = _runner().invoke(
+            cli,
+            ["auth", "--graph", str(sample_graph_json), "--explain", "--no-audit"],
+        )
+        assert "Structural" in result.output
+
+    def test_explain_table_has_semantic_column(self, sample_graph_json):
+        result = _runner().invoke(
+            cli,
+            ["auth", "--graph", str(sample_graph_json), "--explain", "--no-audit"],
+        )
+        assert "Semantic" in result.output
+
+    def test_explain_table_has_rank_column(self, sample_graph_json):
+        result = _runner().invoke(
+            cli,
+            ["auth", "--graph", str(sample_graph_json), "--explain", "--no-audit"],
+        )
+        assert "Rank" in result.output
+
+    def test_explain_markdown_still_present(self, sample_graph_json):
+        result = _runner().invoke(
+            cli,
+            ["auth", "--graph", str(sample_graph_json), "--explain", "--no-audit"],
+        )
+        assert "## Relevant Nodes" in result.output
+
+    def test_explain_table_contains_node_labels(self, sample_graph_json):
+        result = _runner().invoke(
+            cli,
+            ["authenticate user", "--graph", str(sample_graph_json),
+             "--explain", "--no-audit", "--min-score", "0.0"],
+        )
+        assert "authenticate_user" in result.output
+
+    def test_without_explain_no_score_breakdown(self, sample_graph_json):
+        result = _runner().invoke(
+            cli, ["auth", "--graph", str(sample_graph_json), "--format", "markdown",
+                  "--no-audit"]
+        )
+        assert result.exit_code == 0
+        assert "Score Breakdown" not in result.output
+
+    def test_scores_not_embedded_in_markdown(self, sample_graph_json):
+        result = _runner().invoke(
+            cli, ["auth", "--graph", str(sample_graph_json), "--format", "markdown",
+                  "--no-audit"]
         )
         assert result.exit_code == 0
         assert "score:" not in result.output
@@ -318,7 +370,7 @@ class TestAuditCommand:
         result = _runner().invoke(cli, ["audit"])
         assert "No audit entries" in result.output
 
-    def test_audit_shows_total_query_count(
+    def test_audit_shows_query_history_table(
         self, sample_graph_json, tmp_path, monkeypatch
     ):
         monkeypatch.chdir(tmp_path)
@@ -327,7 +379,39 @@ class TestAuditCommand:
             runner.invoke(cli, [q, "--graph", str(sample_graph_json)])
         result = runner.invoke(cli, ["audit"])
         assert result.exit_code == 0
-        assert "3" in result.output
+        assert "Query History" in result.output
+
+    def test_audit_table_shows_all_queries(
+        self, sample_graph_json, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        runner = _runner()
+        for q in ["auth", "jwt", "password"]:
+            runner.invoke(cli, [q, "--graph", str(sample_graph_json)])
+        result = runner.invoke(cli, ["audit"])
+        assert result.exit_code == 0
+        # All three queries appear in the table
+        assert "auth" in result.output
+        assert "jwt" in result.output
+
+    def test_audit_shows_top_nodes_table(
+        self, sample_graph_json, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        runner = _runner()
+        runner.invoke(cli, ["auth", "--graph", str(sample_graph_json)])
+        result = runner.invoke(cli, ["audit"])
+        assert result.exit_code == 0
+        assert "Most Selected" in result.output
+
+    def test_audit_table_has_savings_column(
+        self, sample_graph_json, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        runner = _runner()
+        runner.invoke(cli, ["auth", "--graph", str(sample_graph_json)])
+        result = runner.invoke(cli, ["audit"])
+        assert "Savings" in result.output
 
     def test_audit_top_nodes_flag(self, sample_graph_json, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -353,7 +437,7 @@ class TestAuditCommand:
             cli, ["audit", "--audit-dir", str(custom_dir)]
         )
         assert result.exit_code == 0
-        assert "1" in result.output
+        assert "Query History" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -758,3 +842,93 @@ class TestBuildHtmlMaxNodes:
         G, stats, scores = _make_graph_n(10)
         html = build_html(G, stats, scores, "test", max_nodes=50)
         assert "showing top" not in html
+
+
+# ---------------------------------------------------------------------------
+# --ignore-file flag
+# ---------------------------------------------------------------------------
+
+
+class TestIgnoreFile:
+    def test_ignore_file_flag_accepted(self, sample_graph_json, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(
+            cli,
+            ["auth", "--graph", str(sample_graph_json),
+             "--ignore-file", str(tmp_path / "nonexistent.slurpignore"),
+             "--no-audit"],
+        )
+        assert result.exit_code == 0
+
+    def test_missing_ignore_file_is_no_op(self, sample_graph_json, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        r_no_ignore = _runner().invoke(
+            cli,
+            ["auth", "--graph", str(sample_graph_json),
+             "--format", "json", "--no-audit", "--min-score", "0.0"],
+        )
+        r_missing = _runner().invoke(
+            cli,
+            ["auth", "--graph", str(sample_graph_json),
+             "--format", "json", "--no-audit", "--min-score", "0.0",
+             "--ignore-file", str(tmp_path / "does_not_exist.slurpignore")],
+        )
+        assert r_no_ignore.exit_code == 0
+        assert r_missing.exit_code == 0
+        assert json.loads(r_no_ignore.output)["nodes"] == json.loads(r_missing.output)["nodes"]
+
+    def test_ignore_type_excludes_nodes_of_that_type(
+        self, sample_graph_json, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        ignore_file = tmp_path / ".slurpignore"
+        ignore_file.write_text("type:class\n")
+        result = _runner().invoke(
+            cli,
+            ["auth", "--graph", str(sample_graph_json),
+             "--format", "json", "--no-audit", "--min-score", "0.0",
+             "--ignore-file", str(ignore_file)],
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        types = [n.get("type") for n in data["nodes"]]
+        assert "class" not in types
+
+    def test_ignore_file_reduces_node_count(
+        self, sample_graph_json, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        ignore_file = tmp_path / ".slurpignore"
+        ignore_file.write_text("type:class\n")
+        r_with = _runner().invoke(
+            cli,
+            ["auth", "--graph", str(sample_graph_json),
+             "--format", "json", "--no-audit", "--min-score", "0.0",
+             "--ignore-file", str(ignore_file)],
+        )
+        r_without = _runner().invoke(
+            cli,
+            ["auth", "--graph", str(sample_graph_json),
+             "--format", "json", "--no-audit", "--min-score", "0.0",
+             "--ignore-file", str(tmp_path / "empty.slurpignore")],  # non-existent → no filter
+        )
+        assert r_with.exit_code == 0
+        assert r_without.exit_code == 0
+        count_with = json.loads(r_with.output)["stats"]["nodes_total"]
+        count_without = json.loads(r_without.output)["stats"]["nodes_total"]
+        assert count_with < count_without
+
+    def test_default_slurpignore_in_cwd_is_auto_loaded(
+        self, sample_graph_json, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".slurpignore").write_text("type:class\n")
+        result = _runner().invoke(
+            cli,
+            ["auth", "--graph", str(sample_graph_json),
+             "--format", "json", "--no-audit", "--min-score", "0.0"],
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        types = [n.get("type") for n in data["nodes"]]
+        assert "class" not in types

@@ -121,23 +121,16 @@ def _tfidf_scores(G: nx.DiGraph, query: str) -> dict[str, float]:
     return scores
 
 
-def score_nodes(G: nx.DiGraph, query: str) -> dict[str, float]:
-    """Returns {node_id: score} with scores normalized between 0 and 1.
-
-    Combines two signals:
-    - Structural (40%): PageRank normalized by the max value in the graph.
-    - Semantic  (60%): TF-IDF cosine similarity between query and node text.
-
-    Args:
-        G: Directed graph with node attributes (label, description).
-        query: Free-text query string.
+def _compute_scores(
+    G: nx.DiGraph,
+    query: str,
+) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
+    """Core scoring logic shared by score_nodes and score_nodes_detailed.
 
     Returns:
-        Dict mapping every node ID to a score in [0.0, 1.0].
+        Tuple of (final, pr_norm, tfidf) where pr_norm and tfidf are the
+        raw component values (0–1) before the 0.4/0.6 weighting.
     """
-    if G.number_of_nodes() == 0:
-        return {}
-
     # --- Structural component ---
     pagerank = _pagerank(G)
     max_pr = max(pagerank.values())
@@ -157,4 +150,45 @@ def score_nodes(G: nx.DiGraph, query: str) -> dict[str, float]:
         if G.nodes[nid].get("file_type") == "code":
             score = min(1.0, score + 0.3)
         result[nid] = score
-    return result
+
+    return result, pr_norm, tfidf
+
+
+def score_nodes(G: nx.DiGraph, query: str) -> dict[str, float]:
+    """Returns {node_id: score} with scores normalized between 0 and 1.
+
+    Combines two signals:
+    - Structural (40%): PageRank normalized by the max value in the graph.
+    - Semantic  (60%): TF-IDF cosine similarity between query and node text.
+
+    Args:
+        G: Directed graph with node attributes (label, description).
+        query: Free-text query string.
+
+    Returns:
+        Dict mapping every node ID to a score in [0.0, 1.0].
+    """
+    if G.number_of_nodes() == 0:
+        return {}
+    final, _, _ = _compute_scores(G, query)
+    return final
+
+
+def score_nodes_detailed(
+    G: nx.DiGraph,
+    query: str,
+) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
+    """Like score_nodes but also returns the structural and semantic components.
+
+    Args:
+        G: Directed graph with node attributes (label, description).
+        query: Free-text query string.
+
+    Returns:
+        Tuple of (final_scores, structural_scores, semantic_scores).
+        structural_scores: normalized PageRank values (0–1, before 0.4 weight).
+        semantic_scores: TF-IDF cosine similarities (0–1, before 0.6 weight).
+    """
+    if G.number_of_nodes() == 0:
+        return {}, {}, {}
+    return _compute_scores(G, query)
