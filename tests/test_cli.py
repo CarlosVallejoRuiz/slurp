@@ -1,12 +1,16 @@
 """Tests for slurp/cli.py."""
 
 import json
+import re
 from pathlib import Path
+from urllib.parse import urlparse, unquote
 
+import networkx as nx
 import pytest
 from click.testing import CliRunner
 
 from slurp.cli import cli
+from slurp.viz import build_html
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -412,3 +416,345 @@ class TestIntegration:
         small_count = len(json.loads(r_small.output)["nodes"])
         large_count = len(json.loads(r_large.output)["nodes"])
         assert small_count <= large_count
+
+
+# ---------------------------------------------------------------------------
+# --viz flag
+# ---------------------------------------------------------------------------
+
+
+def _viz_html(monkeypatch, sample_graph_json, query="auth", extra_args=None) -> tuple[str, list]:
+    """Run CLI with --viz, return (html_content, opened_urls)."""
+    opened: list[str] = []
+    monkeypatch.setattr("webbrowser.open", lambda url: opened.append(url))
+    args = [query, "--graph", str(sample_graph_json), "--viz", "--no-audit"]
+    if extra_args:
+        args += extra_args
+    _runner().invoke(cli, args)
+    if not opened:
+        return "", opened
+    path = Path(unquote(urlparse(opened[0]).path))
+    html = path.read_text(encoding="utf-8") if path.exists() else ""
+    return html, opened
+
+
+class TestVizFlag:
+    def test_viz_calls_webbrowser_open(self, sample_graph_json, monkeypatch):
+        _, opened = _viz_html(monkeypatch, sample_graph_json)
+        assert len(opened) == 1
+
+    def test_viz_exit_code_zero(self, sample_graph_json, monkeypatch):
+        opened: list[str] = []
+        monkeypatch.setattr("webbrowser.open", lambda url: opened.append(url))
+        result = _runner().invoke(
+            cli, ["auth", "--graph", str(sample_graph_json), "--viz", "--no-audit"]
+        )
+        assert result.exit_code == 0
+
+    def test_viz_creates_html_file(self, sample_graph_json, monkeypatch):
+        opened: list[str] = []
+        monkeypatch.setattr("webbrowser.open", lambda url: opened.append(url))
+        _runner().invoke(
+            cli, ["auth", "--graph", str(sample_graph_json), "--viz", "--no-audit"]
+        )
+        assert opened
+        path = Path(unquote(urlparse(opened[0]).path))
+        assert path.exists()
+        assert path.suffix == ".html"
+
+    def test_viz_url_is_file_uri(self, sample_graph_json, monkeypatch):
+        _, opened = _viz_html(monkeypatch, sample_graph_json)
+        assert opened[0].startswith("file://")
+
+    def test_viz_html_contains_vis_network_cdn(self, sample_graph_json, monkeypatch):
+        html, _ = _viz_html(monkeypatch, sample_graph_json)
+        assert "vis-network" in html
+
+    def test_viz_html_contains_query(self, sample_graph_json, monkeypatch):
+        html, _ = _viz_html(monkeypatch, sample_graph_json, query="jwt authentication")
+        assert "jwt authentication" in html
+
+    def test_viz_html_contains_node_data(self, sample_graph_json, monkeypatch):
+        html, _ = _viz_html(monkeypatch, sample_graph_json, query="auth")
+        # At least one node from the sample graph must appear in the embedded JSON
+        assert "authenticate_user" in html or "JWTMiddleware" in html
+
+    def test_viz_html_contains_stats_nodes(self, sample_graph_json, monkeypatch):
+        html, _ = _viz_html(monkeypatch, sample_graph_json)
+        assert "nodes" in html.lower()
+
+    def test_viz_html_contains_tokens_stat(self, sample_graph_json, monkeypatch):
+        html, _ = _viz_html(monkeypatch, sample_graph_json)
+        assert "tokens" in html.lower()
+
+    def test_viz_html_contains_coverage_pct(self, sample_graph_json, monkeypatch):
+        html, _ = _viz_html(monkeypatch, sample_graph_json)
+        assert "coverage" in html.lower()
+
+    def test_viz_still_prints_markdown_to_stdout(self, sample_graph_json, monkeypatch):
+        monkeypatch.setattr("webbrowser.open", lambda url: None)
+        result = _runner().invoke(
+            cli, ["auth", "--graph", str(sample_graph_json), "--viz", "--no-audit"]
+        )
+        assert "## Relevant Nodes" in result.output
+
+    def test_without_viz_no_browser_open(self, sample_graph_json, monkeypatch):
+        opened: list[str] = []
+        monkeypatch.setattr("webbrowser.open", lambda url: opened.append(url))
+        _runner().invoke(
+            cli, ["auth", "--graph", str(sample_graph_json), "--no-audit"]
+        )
+        assert len(opened) == 0
+
+    def test_viz_html_is_valid_html5(self, sample_graph_json, monkeypatch):
+        html, _ = _viz_html(monkeypatch, sample_graph_json)
+        assert "<!DOCTYPE html>" in html
+        assert "<html" in html
+        assert "</html>" in html
+
+    def test_viz_html_escapes_xss_in_query(self, sample_graph_json, monkeypatch):
+        html, _ = _viz_html(monkeypatch, sample_graph_json, query='<script>alert(1)</script>')
+        assert "<script>alert(1)</script>" not in html
+        assert "&lt;script&gt;" in html
+
+    def test_viz_html_has_dark_background(self, sample_graph_json, monkeypatch):
+        html, _ = _viz_html(monkeypatch, sample_graph_json)
+        # Dark theme colour appears in CSS
+        assert "#0d1117" in html
+
+    def test_viz_html_embeds_edge_relations(self, sample_graph_json, monkeypatch):
+        html, _ = _viz_html(monkeypatch, sample_graph_json, query="auth")
+        # The sample graph has "calls" and "depends_on" relations
+        assert "calls" in html or "depends_on" in html
+
+    def test_viz_html_has_savings_badge(self, sample_graph_json, monkeypatch):
+        html, _ = _viz_html(monkeypatch, sample_graph_json, query="auth")
+        assert "Saved" in html
+
+    def test_viz_html_savings_badge_has_percentage(self, sample_graph_json, monkeypatch):
+        html, _ = _viz_html(monkeypatch, sample_graph_json, query="auth")
+        # Badge format: "Saved ~X tokens (Y%)"
+        assert "tokens" in html and "%" in html
+
+    def test_viz_html_isolated_field_in_node_data(self, sample_graph_json, monkeypatch):
+        html, _ = _viz_html(monkeypatch, sample_graph_json, query="auth")
+        # Every node object must carry the isolated flag
+        assert '"isolated"' in html
+
+    def test_viz_html_updated_physics_spring_length(self, sample_graph_json, monkeypatch):
+        html, _ = _viz_html(monkeypatch, sample_graph_json, query="auth")
+        assert "springLength:80" in html or "springLength: 80" in html
+
+    def test_viz_html_updated_physics_stabilization(self, sample_graph_json, monkeypatch):
+        html, _ = _viz_html(monkeypatch, sample_graph_json, query="auth")
+        assert "iterations:500" in html or "iterations: 500" in html
+
+    def test_viz_html_stabilization_enabled(self, sample_graph_json, monkeypatch):
+        html, _ = _viz_html(monkeypatch, sample_graph_json, query="auth")
+        assert "onlyDynamicEdges:false" in html or "onlyDynamicEdges: false" in html
+
+    def test_viz_html_freeze_after_stabilization(self, sample_graph_json, monkeypatch):
+        html, _ = _viz_html(monkeypatch, sample_graph_json, query="auth")
+        # net.once('stabilized', ...) disables physics after layout settles
+        assert "stabilized" in html
+        assert "physics" in html and "enabled" in html
+
+    def test_viz_html_node_font_size_13(self, sample_graph_json, monkeypatch):
+        html, _ = _viz_html(monkeypatch, sample_graph_json, query="auth")
+        assert "size:13" in html or "size: 13" in html
+
+    def test_viz_html_node_font_stroke(self, sample_graph_json, monkeypatch):
+        html, _ = _viz_html(monkeypatch, sample_graph_json, query="auth")
+        assert "strokeWidth:3" in html or "strokeWidth: 3" in html
+        assert "strokeColor" in html
+
+    def test_viz_html_node_chosen_false(self, sample_graph_json, monkeypatch):
+        html, _ = _viz_html(monkeypatch, sample_graph_json, query="auth")
+        assert "chosen: false" in html or "chosen:false" in html
+
+    def test_viz_html_no_top_badge_when_under_limit(self, sample_graph_json, monkeypatch):
+        # sample_graph has 7 nodes — well under default max_nodes=50
+        html, _ = _viz_html(monkeypatch, sample_graph_json, query="auth")
+        assert "showing top" not in html
+
+
+# ---------------------------------------------------------------------------
+# --min-score flag
+# ---------------------------------------------------------------------------
+
+
+class TestMinScoreFlag:
+    def test_min_score_flag_accepted(self, sample_graph_json, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(
+            cli,
+            ["authenticate user", "--graph", str(sample_graph_json),
+             "--min-score", "0.0", "--no-audit"],
+        )
+        assert result.exit_code == 0
+
+    def test_min_score_zero_selects_at_least_as_many_as_strict(
+        self, sample_graph_json, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        r_loose = _runner().invoke(
+            cli,
+            ["authenticate user", "--graph", str(sample_graph_json),
+             "--min-score", "0.0", "--format", "json", "--no-audit"],
+        )
+        r_strict = _runner().invoke(
+            cli,
+            ["authenticate user", "--graph", str(sample_graph_json),
+             "--min-score", "0.9", "--format", "json", "--no-audit"],
+        )
+        assert r_loose.exit_code == 0
+        assert r_strict.exit_code == 0
+        assert len(json.loads(r_loose.output)["nodes"]) >= len(json.loads(r_strict.output)["nodes"])
+
+    def test_high_min_score_selects_fewer_nodes(
+        self, sample_graph_json, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        r_low = _runner().invoke(
+            cli,
+            ["authenticate user jwt", "--graph", str(sample_graph_json),
+             "--min-score", "0.0", "--format", "json", "--no-audit"],
+        )
+        r_high = _runner().invoke(
+            cli,
+            ["authenticate user jwt", "--graph", str(sample_graph_json),
+             "--min-score", "0.9", "--format", "json", "--no-audit"],
+        )
+        assert r_low.exit_code == 0
+        assert r_high.exit_code == 0
+        assert len(json.loads(r_low.output)["nodes"]) >= len(json.loads(r_high.output)["nodes"])
+
+    def test_impossible_min_score_produces_empty_result(
+        self, sample_graph_json, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(
+            cli,
+            ["authenticate", "--graph", str(sample_graph_json),
+             "--min-score", "1.1", "--format", "json", "--no-audit"],
+        )
+        assert result.exit_code == 0
+        assert len(json.loads(result.output)["nodes"]) == 0
+
+    def test_min_score_appears_in_help(self):
+        result = _runner().invoke(cli, ["--help"])
+        assert result.exit_code == 0
+
+    def test_min_score_default_is_0_15_in_help(self):
+        result = _runner().invoke(cli, ["run", "--help"])
+        assert "0.15" in result.output
+
+
+# ---------------------------------------------------------------------------
+# build_html — max_nodes parameter
+# ---------------------------------------------------------------------------
+
+
+def _make_graph_n(n: int) -> tuple[nx.DiGraph, dict, dict[str, float]]:
+    """Build an n-node subgraph with descending scores (node_0 = highest)."""
+    G = nx.DiGraph()
+    scores: dict[str, float] = {}
+    for i in range(n):
+        nid = f"node_{i}"
+        G.add_node(nid, label=f"Node {i}", description="")
+        scores[nid] = (n - i) / n
+    stats = {
+        "nodes_selected": n,
+        "nodes_total": n * 2,
+        "tokens_used": n * 50,
+        "tokens_budget": 4000,
+        "coverage_pct": 50.0,
+    }
+    return G, stats, scores
+
+
+def _extract_nodes_json(html: str) -> list:
+    start = html.index("var RN = ") + len("var RN = ")
+    end = html.index(";\nvar RE = ")
+    return json.loads(html[start:end])
+
+
+def _extract_edges_json(html: str) -> list:
+    start = html.index("var RE = ") + len("var RE = ")
+    end = html.index(";\n\nvar vn = ")
+    return json.loads(html[start:end])
+
+
+class TestBuildHtmlMaxNodes:
+    def test_default_max_nodes_is_50(self):
+        G, stats, scores = _make_graph_n(100)
+        html = build_html(G, stats, scores, "test")
+        nodes_data = _extract_nodes_json(html)
+        assert len(nodes_data) == 50
+
+    def test_max_nodes_truncates_to_specified_limit(self):
+        G, stats, scores = _make_graph_n(30)
+        html = build_html(G, stats, scores, "test", max_nodes=10)
+        nodes_data = _extract_nodes_json(html)
+        assert len(nodes_data) == 10
+
+    def test_max_nodes_keeps_highest_scoring_nodes(self):
+        G, stats, scores = _make_graph_n(20)
+        html = build_html(G, stats, scores, "test", max_nodes=5)
+        nodes_data = _extract_nodes_json(html)
+        kept_ids = {n["id"] for n in nodes_data}
+        for i in range(5):
+            assert f"node_{i}" in kept_ids, f"node_{i} should be in top-5"
+
+    def test_max_nodes_no_truncation_when_under_limit(self):
+        G, stats, scores = _make_graph_n(10)
+        html = build_html(G, stats, scores, "test", max_nodes=50)
+        nodes_data = _extract_nodes_json(html)
+        assert len(nodes_data) == 10
+
+    def test_max_nodes_filters_edges_to_hidden_nodes(self):
+        G = nx.DiGraph()
+        scores: dict[str, float] = {}
+        for i in range(10):
+            nid = f"n{i}"
+            G.add_node(nid, label=f"N{i}", description="")
+            scores[nid] = 1.0 - i * 0.1
+        G.add_edge("n0", "n9", relation="calls")  # n9 will be hidden
+        G.add_edge("n0", "n1", relation="calls")  # n1 stays visible
+        stats = {
+            "nodes_selected": 10, "nodes_total": 10,
+            "tokens_used": 500, "tokens_budget": 1000, "coverage_pct": 100.0,
+        }
+        html = build_html(G, stats, scores, "test", max_nodes=2)
+        edges_data = _extract_edges_json(html)
+        for e in edges_data:
+            assert not (e["from"] == "n0" and e["to"] == "n9"), (
+                "edge to hidden node n9 should be dropped"
+            )
+
+    def test_stats_header_unchanged_after_truncation(self):
+        G, stats, scores = _make_graph_n(100)
+        html = build_html(G, stats, scores, "test", max_nodes=10)
+        # nodes_selected=100 must still appear in the header chip
+        assert "<strong>100</strong>" in html
+
+    def test_sample_graph_under_limit_unaffected(self, sample_graph):
+        """sample_graph has 7 nodes — well under default max_nodes=50."""
+        scores = {nid: 0.5 for nid in sample_graph.nodes}
+        stats = {
+            "nodes_selected": 7, "nodes_total": 7,
+            "tokens_used": 350, "tokens_budget": 4000, "coverage_pct": 100.0,
+        }
+        html = build_html(sample_graph, stats, scores, "auth")
+        nodes_data = _extract_nodes_json(html)
+        assert len(nodes_data) == 7
+
+    def test_top_badge_shown_when_truncated(self):
+        G, stats, scores = _make_graph_n(100)
+        html = build_html(G, stats, scores, "test", max_nodes=20)
+        assert "showing top 20" in html
+
+    def test_top_badge_absent_when_no_truncation(self):
+        G, stats, scores = _make_graph_n(10)
+        html = build_html(G, stats, scores, "test", max_nodes=50)
+        assert "showing top" not in html

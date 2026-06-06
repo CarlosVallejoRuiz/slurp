@@ -380,3 +380,86 @@ class TestEdgeCases:
         subG, stats = select_subgraph(sample_graph, scores, budget=60)
         assert 0 < stats["nodes_selected"] < sample_graph.number_of_nodes()
         assert stats["tokens_used"] <= 60
+
+
+# ---------------------------------------------------------------------------
+# select_subgraph — min_score filtering
+# ---------------------------------------------------------------------------
+
+
+class TestMinScore:
+    def test_min_score_filters_low_score_nodes(self):
+        G, _ = _simple_graph()
+        scores = {"a": 0.9, "b": 0.6, "c": 0.3}
+        subG, stats = select_subgraph(G, scores, budget=LARGE_BUDGET, min_score=0.5)
+        assert "a" in subG.nodes
+        assert "b" in subG.nodes
+        assert "c" not in subG.nodes
+        assert stats["nodes_selected"] == 2
+
+    def test_min_score_above_all_scores_selects_nothing(self):
+        G, scores = _simple_graph()
+        subG, stats = select_subgraph(G, scores, budget=LARGE_BUDGET, min_score=1.1)
+        assert stats["nodes_selected"] == 0
+        assert stats["tokens_used"] == 0
+
+    def test_min_score_zero_equivalent_to_no_filter(self):
+        G, scores = _simple_graph()
+        _, stats_default = select_subgraph(G, scores, budget=LARGE_BUDGET)
+        _, stats_zero = select_subgraph(G, scores, budget=LARGE_BUDGET, min_score=0.0)
+        assert stats_default["nodes_selected"] == stats_zero["nodes_selected"]
+        assert stats_default["tokens_used"] == stats_zero["tokens_used"]
+
+    def test_min_score_boundary_is_inclusive(self):
+        G, _ = _simple_graph()
+        scores = {"a": 0.9, "b": 0.5, "c": 0.3}
+        subG, _ = select_subgraph(G, scores, budget=LARGE_BUDGET, min_score=0.5)
+        assert "b" in subG.nodes  # score == threshold → included
+
+    def test_min_score_just_below_boundary_excluded(self):
+        G, _ = _simple_graph()
+        scores = {"a": 0.9, "b": 0.499, "c": 0.3}
+        subG, _ = select_subgraph(G, scores, budget=LARGE_BUDGET, min_score=0.5)
+        assert "b" not in subG.nodes
+
+    def test_nodes_total_reflects_full_graph_not_candidates(self):
+        G, _ = _simple_graph()
+        scores = {"a": 0.9, "b": 0.6, "c": 0.3}
+        _, stats = select_subgraph(G, scores, budget=LARGE_BUDGET, min_score=0.5)
+        assert stats["nodes_total"] == 3  # full graph has 3 nodes
+
+    def test_coverage_pct_relative_to_full_graph(self):
+        G, _ = _simple_graph()
+        scores = {"a": 0.9, "b": 0.6, "c": 0.3}
+        _, stats = select_subgraph(G, scores, budget=LARGE_BUDGET, min_score=0.5)
+        assert stats["nodes_selected"] == 2
+        assert stats["coverage_pct"] == round(2 / 3 * 100, 1)
+
+    def test_missing_score_treated_as_zero_filtered_by_min_score(self):
+        G = nx.DiGraph()
+        G.add_node("a", label="a", description="")
+        G.add_node("b", label="b", description="")
+        subG, _ = select_subgraph(G, {"a": 0.8}, budget=LARGE_BUDGET, min_score=0.1)
+        assert "a" in subG.nodes
+        assert "b" not in subG.nodes  # missing → 0.0 < 0.1
+
+    def test_neighbor_decay_boost_does_not_include_filtered_nodes(self):
+        G = nx.DiGraph()
+        G.add_node("hub", label="hub", description="")
+        G.add_node("low", label="low", description="")
+        G.add_edge("hub", "low")
+        scores = {"hub": 0.9, "low": 0.05}
+        # low is below min_score; hub's decay boost must not rescue it
+        subG, _ = select_subgraph(G, scores, budget=LARGE_BUDGET, min_score=0.1)
+        assert "hub" in subG.nodes
+        assert "low" not in subG.nodes
+
+    def test_tokens_used_never_exceeds_budget_with_min_score(self, sample_graph):
+        from slurp.scorer import score_nodes
+
+        scores = score_nodes(sample_graph, "auth")
+        for budget in [10, 50, 100, LARGE_BUDGET]:
+            _, stats = select_subgraph(
+                sample_graph, scores, budget=budget, min_score=0.05
+            )
+            assert stats["tokens_used"] <= budget

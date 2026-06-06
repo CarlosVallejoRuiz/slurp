@@ -44,8 +44,31 @@ def _pagerank(
 
 
 def _tokenize(text: str) -> list[str]:
-    """Lowercases and splits on non-alphanumeric characters (underscore included)."""
-    return re.findall(r"[a-z0-9]+", text.lower())
+    """Splits text into tokens handling snake_case, camelCase, and PascalCase.
+
+    Pipeline:
+    1. Insert spaces at camelCase/PascalCase boundaries (before lowercasing so
+       boundary info is preserved): "recalcularPlayerStats" → "recalcular Player Stats".
+    2. Lowercase and split on every non-alphanumeric character (covers snake_case,
+       hyphens, dots, spaces, etc.).
+    3. Append any original (pre-split) tokens that are not already in the result,
+       so full compound identifiers remain searchable alongside their parts.
+    """
+    # Step 1: split camelCase/PascalCase before losing case info.
+    #   "XMLParser"         → "XML Parser"    (uppercase run before capitalized word)
+    #   "recalcularPlayer"  → "recalcular Player"  (lowercase-to-uppercase boundary)
+    split = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", text)
+    split = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", split)
+
+    # Step 2: lowercase + extract alphanumeric runs (covers _ . - spaces …).
+    primary = re.findall(r"[a-z0-9]+", split.lower())
+
+    # Step 3: also extract original tokens so compound identifiers are searchable.
+    original = re.findall(r"[a-z0-9]+", text.lower())
+    seen = set(primary)
+    extras = [t for t in original if t not in seen]
+
+    return primary + extras
 
 
 def _tfidf_scores(G: nx.DiGraph, query: str) -> dict[str, float]:
@@ -125,4 +148,13 @@ def score_nodes(G: nx.DiGraph, query: str) -> dict[str, float]:
     # --- Semantic component ---
     tfidf = _tfidf_scores(G, query)
 
-    return {nid: 0.4 * pr_norm[nid] + 0.6 * tfidf[nid] for nid in G.nodes}
+    # DECISION: nodes with file_type="code" get a +0.3 boost, clamped to 1.0.
+    # Documentation files (READMEs, changelogs) compete unfairly with code in
+    # technical queries; this bias keeps architecture/API results on top.
+    result: dict[str, float] = {}
+    for nid in G.nodes:
+        score = 0.4 * pr_norm[nid] + 0.6 * tfidf[nid]
+        if G.nodes[nid].get("file_type") == "code":
+            score = min(1.0, score + 0.3)
+        result[nid] = score
+    return result

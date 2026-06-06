@@ -1,5 +1,7 @@
 """CLI entry point for Slurp."""
 
+import tempfile
+import webbrowser
 from pathlib import Path
 
 import click
@@ -73,6 +75,10 @@ def cli(ctx: click.Context) -> None:
               help="Skip writing to audit log.")
 @click.option("--neighbor-decay", "neighbor_decay", default=0.7,
               show_default=True, help="Score decay factor for neighbor nodes.")
+@click.option("--min-score", "min_score", default=0.15, show_default=True,
+              help="Minimum relevance score threshold; nodes below this are excluded.")
+@click.option("--viz", is_flag=True, default=False,
+              help="Open an interactive graph visualisation in the browser.")
 def run(
     query: str,
     graph: str | None,
@@ -82,6 +88,8 @@ def run(
     explain: bool,
     no_audit: bool,
     neighbor_decay: float,
+    min_score: float,
+    viz: bool,
 ) -> None:
     """Run a query against the graph."""
     graph_path = Path(graph) if graph else _find_graph()
@@ -97,7 +105,8 @@ def run(
 
     scores = score_nodes(G, query)
     subG, stats = select_subgraph(
-        G, scores, budget=budget, model=model, neighbor_decay=neighbor_decay
+        G, scores, budget=budget, model=model,
+        neighbor_decay=neighbor_decay, min_score=min_score,
     )
 
     output_scores = scores if explain else None
@@ -112,6 +121,16 @@ def run(
             stats=stats,
             top_nodes=top,
         )
+
+    if viz:
+        from slurp.viz import build_html
+        html = build_html(subG, stats, scores, query)
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".html", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(html)
+            viz_path = Path(f.name)
+        webbrowser.open(viz_path.as_uri())
 
 
 @cli.command()

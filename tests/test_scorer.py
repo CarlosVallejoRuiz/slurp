@@ -21,8 +21,33 @@ class TestTokenize:
     def test_splits_on_punctuation(self):
         assert _tokenize("foo.bar, baz!") == ["foo", "bar", "baz"]
 
-    def test_camel_case_kept_as_one_token(self):
-        assert _tokenize("JWTMiddleware") == ["jwtmiddleware"]
+    def test_camelcase_split_into_parts(self):
+        tokens = _tokenize("JWTMiddleware")
+        assert "jwt" in tokens
+        assert "middleware" in tokens
+
+    def test_camelcase_original_identifier_also_present(self):
+        # Full compound form kept alongside split parts for exact-match searches.
+        assert "jwtmiddleware" in _tokenize("JWTMiddleware")
+
+    def test_camelcase_lowercase_to_uppercase_boundary(self):
+        tokens = _tokenize("recalcularPlayerStats")
+        assert "recalcular" in tokens
+        assert "player" in tokens
+        assert "stats" in tokens
+
+    def test_snake_plus_camelcase_mixed_label(self):
+        tokens = _tokenize("supabase_admin_recalcularPlayerStats")
+        assert "supabase" in tokens
+        assert "admin" in tokens
+        assert "recalcular" in tokens
+        assert "player" in tokens
+        assert "stats" in tokens
+
+    def test_pascalcase_split(self):
+        tokens = _tokenize("UserModel")
+        assert "user" in tokens
+        assert "model" in tokens
 
     def test_empty_string_returns_empty(self):
         assert _tokenize("") == []
@@ -167,3 +192,100 @@ class TestCombinedScores:
         scores = score_nodes(sample_graph, "database pool connection")
         for score in scores.values():
             assert math.isfinite(score)
+
+
+# ---------------------------------------------------------------------------
+# score_nodes — camelCase label matching
+# ---------------------------------------------------------------------------
+
+
+class TestCamelCaseScoring:
+    def test_camelcase_label_scores_higher_for_matching_query(self):
+        # Simulates a real graphify label like "recalcularPlayerStats".
+        # With improved _tokenize, 'player' and 'stats' are extracted as separate
+        # tokens, so the query "player stats" matches while "dashboard_layout" does not.
+        G = nx.DiGraph()
+        G.add_node("relevant", label="recalcularPlayerStats", type="function", description="")
+        G.add_node("unrelated", label="dashboard_layout", type="function", description="")
+        scores = score_nodes(G, "player stats")
+        assert scores["relevant"] > scores["unrelated"], (
+            f"camelCase node should score higher: "
+            f"relevant={scores['relevant']:.4f}, unrelated={scores['unrelated']:.4f}"
+        )
+
+    def test_snake_camelcase_compound_matches_english_subwords(self):
+        G = nx.DiGraph()
+        G.add_node("a", label="supabase_admin_recalcularPlayerStats", description="")
+        G.add_node("b", label="dashboard_layout", description="")
+        scores = score_nodes(G, "player stats")
+        assert scores["a"] > scores["b"]
+
+    def test_pascalcase_label_matches_individual_words(self):
+        G = nx.DiGraph()
+        G.add_node("a", label="UserModel", description="")
+        G.add_node("b", label="send_email", description="")
+        scores = score_nodes(G, "user model")
+        assert scores["a"] > scores["b"]
+
+    def test_acronym_camelcase_matches_acronym_query(self):
+        # JWTMiddleware → tokens include 'jwt', so query "jwt" scores it above unrelated.
+        G = nx.DiGraph()
+        G.add_node("a", label="JWTMiddleware", description="")
+        G.add_node("b", label="PaymentService", description="")
+        scores = score_nodes(G, "jwt")
+        assert scores["a"] > scores["b"]
+
+
+# ---------------------------------------------------------------------------
+# score_nodes — file_type="code" boost
+# ---------------------------------------------------------------------------
+
+
+class TestCodeFileTypeBoost:
+    def test_code_node_scores_higher_than_untyped(self):
+        # Partial-match query: 3 terms, nodes only contain 2 → TF-IDF ≈ 0.56,
+        # base score ≈ 0.73.  Boost pushes code to 1.0, plain stays at 0.73.
+        G = nx.DiGraph()
+        G.add_node("code",  label="auth login", description="", file_type="code")
+        G.add_node("plain", label="auth login", description="")
+        scores = score_nodes(G, "auth login token")
+        assert scores["code"] > scores["plain"]
+
+    def test_code_node_scores_higher_than_document(self):
+        G = nx.DiGraph()
+        G.add_node("code", label="auth service", description="", file_type="code")
+        G.add_node("doc",  label="auth service", description="", file_type="document")
+        scores = score_nodes(G, "auth service")
+        assert scores["code"] > scores["doc"]
+
+    def test_code_boost_clamped_to_one(self):
+        G = nx.DiGraph()
+        G.add_node("a", label="auth", description="auth", file_type="code")
+        scores = score_nodes(G, "auth")
+        assert scores["a"] <= 1.0
+
+    def test_document_file_type_not_boosted(self):
+        G = nx.DiGraph()
+        G.add_node("a", label="auth", description="", file_type="document")
+        G.add_node("b", label="auth", description="", file_type="config")
+        G.add_node("c", label="auth", description="")
+        scores = score_nodes(G, "auth")
+        # None of these have file_type="code" — scores must be equal.
+        assert abs(scores["a"] - scores["b"]) < 1e-9
+        assert abs(scores["b"] - scores["c"]) < 1e-9
+
+    def test_code_boost_applies_regardless_of_query_match(self):
+        # Even with zero TF-IDF a code node should beat an untyped one
+        # because PageRank is equal (isolated nodes) and boost adds 0.3.
+        G = nx.DiGraph()
+        G.add_node("code",  label="irrelevant_func", description="", file_type="code")
+        G.add_node("plain", label="irrelevant_func", description="")
+        scores = score_nodes(G, "xyzzy")  # no TF-IDF match for either
+        assert scores["code"] > scores["plain"]
+
+    def test_scores_still_between_0_and_1_with_boost(self, sample_graph):
+        G = sample_graph.copy()
+        G.add_node("code_node", label="auth", description="auth service", file_type="code")
+        scores = score_nodes(G, "auth service")
+        for nid, s in scores.items():
+            assert 0.0 <= s <= 1.0, f"{nid}: {s}"
