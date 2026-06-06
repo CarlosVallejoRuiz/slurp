@@ -1,0 +1,31 @@
+[project]
+name = "slurp"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=0.106.0",
+    "click>=8.4.1",
+    "networkx>=3.6.1",
+    "pathspec>=1.1.1",
+    "rich>=15.0.0",
+    "tiktoken>=0.13.0",
+]
+
+[project.scripts]
+slurp = "slurp.cli:cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = true
+
+[dependency-groups]
+dev = [
+    "black>=26.5.1",
+    "pytest>=9.0.3",
+    "ruff>=0.15.16",
+]
