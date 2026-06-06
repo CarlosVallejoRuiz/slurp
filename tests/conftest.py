@@ -113,6 +113,74 @@ def sample_graph_json(tmp_path, sample_graph: nx.DiGraph):
 
 
 @pytest.fixture
+def real_graphify_json(tmp_path):
+    """Graph in real graphify format: links key, file_type, source_file, confidence."""
+    data = {
+        "directed": True,
+        "multigraph": False,
+        "graph": {},
+        "nodes": [
+            {
+                "id": "src/auth/service.py::authenticate_user",
+                "label": "authenticate_user",
+                "file_type": "function",
+                "source_file": "src/auth/service.py",
+                "importance": 9,
+            },
+            {
+                "id": "src/middleware/jwt.py::JWTMiddleware",
+                "label": "JWTMiddleware",
+                "file_type": "class",
+                "source_file": "src/middleware/jwt.py",
+                "importance": 8,
+            },
+            {
+                "id": "src/auth/utils.py::hash_password",
+                "label": "hash_password",
+                "file_type": "function",
+                "source_file": "src/auth/utils.py",
+                "importance": 6,
+            },
+            {
+                "id": "src/models/user.py::UserModel",
+                "label": "UserModel",
+                "file_type": "class",
+                "source_file": "src/models/user.py",
+                "importance": 7,
+            },
+        ],
+        "links": [
+            {
+                "source": "src/middleware/jwt.py::JWTMiddleware",
+                "target": "src/auth/service.py::authenticate_user",
+                "relation": "calls",
+                "weight": 3,
+                "confidence": 0.95,
+            },
+            {
+                "source": "src/auth/service.py::authenticate_user",
+                "target": "src/auth/utils.py::hash_password",
+                "relation": "calls",
+                "weight": 2,
+                "confidence": 0.90,
+            },
+            {
+                "source": "src/auth/service.py::authenticate_user",
+                "target": "src/models/user.py::UserModel",
+                "relation": "depends_on",
+                "weight": 2,
+                "confidence": 0.85,
+            },
+        ],
+        "hyperedges": [],
+        "built_at_commit": "abc123def456",
+    }
+    graph_file = tmp_path / "graphify_real.json"
+    graph_file.write_text(json.dumps(data))
+    return graph_file
+
+
+@pytest.fixture
 def generic_graph_json(tmp_path) -> object:
     """Graph in generic format (only id, label, source, target)."""
     data = {

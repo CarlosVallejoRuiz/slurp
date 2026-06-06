@@ -138,3 +138,150 @@ class TestLoadGraphErrors:
         G = load_graph(graph_file)
         assert G.number_of_nodes() == 1
         assert G.number_of_edges() == 0
+
+
+# ---------------------------------------------------------------------------
+# Real graphify format (links key, file_type, source_file, confidence)
+# ---------------------------------------------------------------------------
+
+
+class TestDetectFormatRealGraphify:
+    def test_links_key_detected_as_graphify(self):
+        data = {
+            "directed": True,
+            "multigraph": False,
+            "nodes": [{"id": "a", "label": "A"}],
+            "links": [],
+        }
+        assert detect_format(data) == "graphify"
+
+    def test_links_key_takes_priority_over_node_fields(self):
+        # Even with no graphify-specific node fields, links → graphify
+        data = {"nodes": [{"id": "a", "label": "A"}], "links": []}
+        assert detect_format(data) == "graphify"
+
+    def test_file_type_field_detected_as_graphify(self):
+        data = {"nodes": [{"id": "a", "label": "A", "file_type": "function"}]}
+        assert detect_format(data) == "graphify"
+
+    def test_source_file_field_detected_as_graphify(self):
+        data = {"nodes": [{"id": "a", "label": "A", "source_file": "src/a.py"}]}
+        assert detect_format(data) == "graphify"
+
+    def test_real_graphify_fixture_detected_as_graphify(self, real_graphify_json):
+        data = json.loads(real_graphify_json.read_text())
+        assert detect_format(data) == "graphify"
+
+
+class TestLoadRealGraphifyFormat:
+    def test_loads_real_graphify_json(self, real_graphify_json):
+        G = load_graph(real_graphify_json)
+        assert isinstance(G, nx.DiGraph)
+
+    def test_node_count(self, real_graphify_json):
+        G = load_graph(real_graphify_json)
+        assert G.number_of_nodes() == 4
+
+    def test_edge_count(self, real_graphify_json):
+        G = load_graph(real_graphify_json)
+        assert G.number_of_edges() == 3
+
+    def test_graph_is_directed(self, real_graphify_json):
+        G = load_graph(real_graphify_json)
+        assert G.is_directed()
+
+    def test_node_id_is_full_qualified_path(self, real_graphify_json):
+        G = load_graph(real_graphify_json)
+        assert "src/auth/service.py::authenticate_user" in G.nodes
+
+    def test_node_label_preserved(self, real_graphify_json):
+        G = load_graph(real_graphify_json)
+        node = G.nodes["src/auth/service.py::authenticate_user"]
+        assert node["label"] == "authenticate_user"
+
+    def test_node_file_type_preserved(self, real_graphify_json):
+        G = load_graph(real_graphify_json)
+        node = G.nodes["src/auth/service.py::authenticate_user"]
+        assert node["file_type"] == "function"
+
+    def test_node_source_file_preserved(self, real_graphify_json):
+        G = load_graph(real_graphify_json)
+        node = G.nodes["src/auth/service.py::authenticate_user"]
+        assert node["source_file"] == "src/auth/service.py"
+
+    def test_node_importance_preserved(self, real_graphify_json):
+        G = load_graph(real_graphify_json)
+        node = G.nodes["src/auth/service.py::authenticate_user"]
+        assert node["importance"] == 9
+
+    def test_edge_relation_preserved(self, real_graphify_json):
+        G = load_graph(real_graphify_json)
+        src = "src/middleware/jwt.py::JWTMiddleware"
+        tgt = "src/auth/service.py::authenticate_user"
+        assert G.edges[src, tgt]["relation"] == "calls"
+
+    def test_edge_weight_preserved(self, real_graphify_json):
+        G = load_graph(real_graphify_json)
+        src = "src/middleware/jwt.py::JWTMiddleware"
+        tgt = "src/auth/service.py::authenticate_user"
+        assert G.edges[src, tgt]["weight"] == 3
+
+    def test_edge_confidence_preserved(self, real_graphify_json):
+        G = load_graph(real_graphify_json)
+        src = "src/middleware/jwt.py::JWTMiddleware"
+        tgt = "src/auth/service.py::authenticate_user"
+        assert G.edges[src, tgt]["confidence"] == 0.95
+
+    def test_edge_direction_preserved(self, real_graphify_json):
+        G = load_graph(real_graphify_json)
+        src = "src/middleware/jwt.py::JWTMiddleware"
+        tgt = "src/auth/service.py::authenticate_user"
+        assert G.has_edge(src, tgt)
+        assert not G.has_edge(tgt, src)
+
+    def test_top_level_metadata_not_added_as_node(self, real_graphify_json):
+        G = load_graph(real_graphify_json)
+        # 'directed', 'multigraph', 'built_at_commit' must not become nodes
+        for key in ("directed", "multigraph", "built_at_commit", "graph"):
+            assert key not in G.nodes
+
+    def test_links_key_empty_means_no_edges(self, tmp_path):
+        data = {
+            "directed": True,
+            "multigraph": False,
+            "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+            "links": [],
+        }
+        graph_file = tmp_path / "empty_links.json"
+        graph_file.write_text(json.dumps(data))
+        G = load_graph(graph_file)
+        assert G.number_of_edges() == 0
+
+    def test_links_preferred_over_edges_when_both_present(self, tmp_path):
+        # If a file has both 'links' and 'edges', 'links' wins
+        data = {
+            "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}, {"id": "c", "label": "C"}],
+            "links": [{"source": "a", "target": "b"}],
+            "edges": [{"source": "a", "target": "c"}],
+        }
+        graph_file = tmp_path / "both.json"
+        graph_file.write_text(json.dumps(data))
+        G = load_graph(graph_file)
+        assert G.has_edge("a", "b")
+        assert not G.has_edge("a", "c")
+
+    def test_integration_with_scorer(self, real_graphify_json):
+        from slurp.scorer import score_nodes
+        G = load_graph(real_graphify_json)
+        scores = score_nodes(G, "authentication jwt")
+        assert len(scores) == G.number_of_nodes()
+        assert all(0.0 <= s <= 1.0 for s in scores.values())
+
+    def test_integration_with_budget(self, real_graphify_json):
+        from slurp.budget import select_subgraph
+        from slurp.scorer import score_nodes
+        G = load_graph(real_graphify_json)
+        scores = score_nodes(G, "authentication")
+        subG, stats = select_subgraph(G, scores, budget=10_000)
+        assert stats["nodes_total"] == 4
+        assert stats["tokens_used"] <= 10_000

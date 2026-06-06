@@ -136,6 +136,20 @@ def stats(graph: str | None) -> None:
 
 
 @cli.command()
+@click.option("--graph", "-g", type=click.Path(), default=None,
+              help="Path to graph.json (auto-discovered if omitted).")
+def serve(graph: str | None) -> None:
+    """Start an MCP stdio server exposing the slurp_query tool."""
+    graph_path = Path(graph) if graph else _find_graph()
+    if graph_path is None:
+        raise click.ClickException(
+            "No graph.json found. Pass --graph or run from a directory with graph.json."
+        )
+    import slurp.mcp as _mcp
+    _mcp.serve(graph_path)
+
+
+@cli.command()
 @click.option("--top-nodes", "top_n", default=10, show_default=True,
               help="Show N most frequently selected nodes.")
 @click.option("--audit-dir", default=".slurp", show_default=True,

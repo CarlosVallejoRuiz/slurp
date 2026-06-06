@@ -13,15 +13,20 @@ class SlurpLoadError(Exception):
 def detect_format(data: dict) -> str:
     """Returns 'graphify' or 'generic'.
 
-    Graphify format has nodes with at least one of: type, description,
-    importance, or file_path beyond the mandatory id/label fields.
+    Graphify format is detected by:
+    - presence of a 'links' key (real graphify: NetworkX JSON serialization), or
+    - nodes with any of: type, description, importance, file_path, file_type, source_file
     Generic format has only id and label on nodes.
     """
+    # Real graphify output uses 'links' (NetworkX node-link format)
+    if "links" in data:
+        return "graphify"
+
     nodes = data.get("nodes", [])
     if not nodes:
         return "generic"
 
-    graphify_keys = {"type", "description", "importance", "file_path"}
+    graphify_keys = {"type", "description", "importance", "file_path", "file_type", "source_file"}
     for node in nodes:
         if graphify_keys & set(node.keys()):
             return "graphify"
@@ -29,7 +34,10 @@ def detect_format(data: dict) -> str:
 
 
 def _build_graph(data: dict) -> nx.DiGraph:
-    """Constructs a DiGraph from raw parsed JSON data."""
+    """Constructs a DiGraph from raw parsed JSON data.
+
+    Supports both 'links' (real graphify / NetworkX JSON) and 'edges' key for edges.
+    """
     G = nx.DiGraph()
 
     for node in data["nodes"]:
@@ -37,7 +45,9 @@ def _build_graph(data: dict) -> nx.DiGraph:
         attrs = {k: v for k, v in node.items() if k != "id"}
         G.add_node(node_id, **attrs)
 
-    for edge in data.get("edges", []):
+    # Real graphify uses 'links'; our test/generic format uses 'edges'
+    edges = data["links"] if "links" in data else data.get("edges", [])
+    for edge in edges:
         source = edge["source"]
         target = edge["target"]
         attrs = {k: v for k, v in edge.items() if k not in ("source", "target")}
