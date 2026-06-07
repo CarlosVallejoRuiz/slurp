@@ -1,9 +1,21 @@
 [project]
-name = "slurp"
+name = "slurp-graph"
 version = "0.1.0"
-description = "Add your description here"
+description = "Token-budget-aware graph navigation for AI coding agents. Serve exactly the noodles your LLM needs."
 readme = "README.md"
 requires-python = ">=3.12"
+license = {text = "MIT"}
+authors = [
+    {name = "Juan Carlos Vallejo Ruiz", email = "juancarlos@prismastats.es"}
+]
+keywords = ["knowledge-graph", "llm", "token-optimization", "graphify", "ai-tools", "cli"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Software Development :: Documentation",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "anthropic>=0.106.0",
     "click>=8.4.1",
@@ -12,6 +24,10 @@ dependencies = [
     "rich>=15.0.0",
     "tiktoken>=0.13.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/CarlosVallejoRuiz/slurp"
+Repository = "https://github.com/CarlosVallejoRuiz/slurp"
 
 [project.scripts]
 slurp = "slurp.cli:cli"
@@ -29,3 +45,6 @@ dev = [
     "pytest>=9.0.3",
     "ruff>=0.15.16",
 ]
+
+[tool.hatch.build.targets.wheel]
+packages = ["slurp"]
