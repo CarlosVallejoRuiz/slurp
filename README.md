@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" alt="slurp logo" width="120">
+</p>
+
 # slurp
 
 ![tests](https://img.shields.io/badge/tests-794%20passed-brightgreen)
