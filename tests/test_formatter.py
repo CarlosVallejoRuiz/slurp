@@ -457,3 +457,68 @@ class TestIntegration:
             excluded = stats["nodes_total"] - stats["nodes_selected"]
             assert "💡" in out
             assert str(excluded) in out
+
+
+# ---------------------------------------------------------------------------
+# code_block rendering in markdown
+# ---------------------------------------------------------------------------
+
+class TestCodeBlockMarkdown:
+    def _stats(self, G):
+        n = G.number_of_nodes()
+        return {"nodes_selected": n, "nodes_total": n,
+                "tokens_used": 0, "tokens_budget": 9999, "coverage_pct": 100.0}
+
+    def test_code_block_rendered_in_markdown(self):
+        G = nx.DiGraph()
+        G.add_node("fn", label="my_func", type="function", file_path="src/auth.py",
+                   code_block="def my_func():\n    return 42")
+        out = format_subgraph(G, self._stats(G), format="markdown")
+        assert "```python" in out
+        assert "def my_func():" in out
+        assert "return 42" in out
+        assert "```" in out
+
+    def test_language_detected_from_file_path(self):
+        G = nx.DiGraph()
+        G.add_node("fn", label="fn", type="function", file_path="utils.ts",
+                   code_block="function fn() { return 1; }")
+        out = format_subgraph(G, self._stats(G), format="markdown")
+        assert "```typescript" in out
+
+    def test_language_detected_from_source_file_fallback(self):
+        G = nx.DiGraph()
+        G.add_node("fn", label="fn", type="function", source_file="main.go",
+                   code_block="func Foo() {}")
+        out = format_subgraph(G, self._stats(G), format="markdown")
+        assert "```go" in out
+
+    def test_unknown_extension_renders_empty_lang(self):
+        G = nx.DiGraph()
+        G.add_node("fn", label="fn", type="function", file_path="script.rb",
+                   code_block="def hello; end")
+        out = format_subgraph(G, self._stats(G), format="markdown")
+        assert "```\n" in out
+
+    def test_no_code_block_attr_renders_nothing(self):
+        G = nx.DiGraph()
+        G.add_node("fn", label="fn", type="function", file_path="src/auth.py")
+        out = format_subgraph(G, self._stats(G), format="markdown")
+        assert "```" not in out
+
+    def test_code_block_appears_after_file_line(self):
+        G = nx.DiGraph()
+        G.add_node("fn", label="fn", type="function", file_path="src/auth.py",
+                   code_block="def fn(): pass")
+        out = format_subgraph(G, self._stats(G), format="markdown")
+        file_idx = out.index("→ File:")
+        code_idx = out.index("```python")
+        assert code_idx > file_idx
+
+    def test_code_block_not_in_json_format(self):
+        G = nx.DiGraph()
+        G.add_node("fn", label="fn", type="function",
+                   code_block="def fn(): pass")
+        out = format_subgraph(G, self._stats(G), format="json")
+        # JSON format does not emit fenced code blocks
+        assert "```" not in out

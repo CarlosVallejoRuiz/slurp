@@ -1042,3 +1042,89 @@ class TestExportCommand:
         assert r_small.exit_code == 0
         assert r_large.exit_code == 0
         assert len(r_large.output) >= len(r_small.output)
+
+
+# ---------------------------------------------------------------------------
+# --inject-code and --project-root
+# ---------------------------------------------------------------------------
+
+PYTHON_CODE_CLI = """\
+def authenticate_user(username, password):
+    if not username:
+        return None
+    return db.find(username)
+
+def other():
+    pass
+"""
+
+
+class TestInjectCodeCommand:
+    def _make_graph_json(self, tmp_path: Path) -> tuple[Path, Path]:
+        """Return (graph_json_path, project_root) with a real source file."""
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "auth.py").write_text(PYTHON_CODE_CLI)
+
+        graph = {
+            "nodes": [
+                {"id": "n1", "label": "authenticate_user", "type": "function",
+                 "source_file": "src/auth.py", "source_location": "L1"},
+                {"id": "n2", "label": "other", "type": "function",
+                 "source_file": "src/auth.py", "source_location": "L6"},
+            ],
+            "edges": [],
+        }
+        gpath = tmp_path / "graph.json"
+        gpath.write_text(json.dumps(graph))
+        return gpath, tmp_path
+
+    def test_inject_code_flag_accepted(self, tmp_path):
+        gpath, root = self._make_graph_json(tmp_path)
+        result = _runner().invoke(
+            cli, ["auth", "--graph", str(gpath), "--budget", "8000",
+                  "--inject-code", "--project-root", str(root)]
+        )
+        assert result.exit_code == 0
+
+    def test_inject_code_appends_code_block(self, tmp_path):
+        gpath, root = self._make_graph_json(tmp_path)
+        result = _runner().invoke(
+            cli, ["auth", "--graph", str(gpath), "--budget", "8000",
+                  "--inject-code", "--project-root", str(root)]
+        )
+        assert result.exit_code == 0
+        assert "```python" in result.output
+        assert "def authenticate_user" in result.output
+
+    def test_inject_code_without_project_root_uses_graph_dir(self, tmp_path):
+        gpath, root = self._make_graph_json(tmp_path)
+        result = _runner().invoke(
+            cli, ["auth", "--graph", str(gpath), "--budget", "8000", "--inject-code"]
+        )
+        assert result.exit_code == 0
+        assert "```python" in result.output
+
+    def test_inject_code_too_many_nodes_shows_warning(self, tmp_path):
+        src = tmp_path / "auth.py"
+        src.write_text(PYTHON_CODE_CLI)
+        # Build a graph with 31 nodes
+        nodes = [{"id": f"n{i}", "label": f"Node {i}"} for i in range(31)]
+        graph = {"nodes": nodes, "edges": []}
+        gpath = tmp_path / "graph.json"
+        gpath.write_text(json.dumps(graph))
+        result = _runner().invoke(
+            cli, ["auth", "--graph", str(gpath), "--budget", "99999", "--inject-code",
+                  "--project-root", str(tmp_path)],
+        )
+        assert result.exit_code == 0
+        # Warning goes to stderr (err=True); CliRunner merges stderr into output by default
+        assert "Warning" in result.output
+
+    def test_without_inject_code_no_code_block(self, tmp_path):
+        gpath, root = self._make_graph_json(tmp_path)
+        result = _runner().invoke(
+            cli, ["auth", "--graph", str(gpath), "--budget", "8000"]
+        )
+        assert result.exit_code == 0
+        assert "```python" not in result.output

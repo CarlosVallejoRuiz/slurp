@@ -49,6 +49,26 @@ def _box(title: str, subtitle: str) -> str:
     return "\n".join([top, mid, bot])
 
 
+_LANG_MAP: dict[str, str] = {
+    ".py": "python",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".go": "go",
+}
+
+
+def _file_lang(file_path: str) -> str:
+    """Return a fenced-code-block language identifier from a file path's extension."""
+    if not file_path:
+        return ""
+    dot = file_path.rfind(".")
+    if dot < 0:
+        return ""
+    return _LANG_MAP.get(file_path[dot:].lower(), "")
+
+
 def _sorted_nodes(G: nx.DiGraph, scores: dict[str, float] | None) -> list[str]:
     """Returns node IDs sorted by score descending, then alphabetically for ties."""
     return sorted(
@@ -133,6 +153,13 @@ def _format_markdown(
             lines.append(desc)
         if fpath:
             lines.append(f"→ File: {fpath}")
+        code_block = attrs.get("code_block", "")
+        if code_block:
+            lang_path = fpath or attrs.get("source_file", "")
+            lang = _file_lang(lang_path)
+            lines.append(f"```{lang}")
+            lines.append(code_block)
+            lines.append("```")
         lines.append("")
 
     # Key relationships --------------------------------------------------

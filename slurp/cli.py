@@ -95,6 +95,10 @@ def cli(ctx: click.Context) -> None:
 @click.option("--backend", default="tfidf", show_default=True,
               type=click.Choice(["tfidf", "openai", "anthropic"]),
               help="Scoring backend. 'openai'/'anthropic' use real embeddings.")
+@click.option("--inject-code", "inject_code_flag", is_flag=True, default=False,
+              help="Append source code blocks for each selected node (≤30 nodes required).")
+@click.option("--project-root", "project_root", type=click.Path(), default=None,
+              help="Root directory for resolving source_file paths (default: graph.json directory).")
 def run(
     query: str,
     graph: str | None,
@@ -108,6 +112,8 @@ def run(
     viz: bool,
     ignore_file: str,
     backend: str,
+    inject_code_flag: bool,
+    project_root: str | None,
 ) -> None:
     """Run a query against the graph."""
     graph_path = Path(graph) if graph else _find_graph()
@@ -133,6 +139,17 @@ def run(
         G, scores, budget=budget, model=model,
         neighbor_decay=neighbor_decay, min_score=min_score,
     )
+
+    if inject_code_flag:
+        from slurp.injector import inject_code
+        root = Path(project_root) if project_root else graph_path.parent
+        if subG.number_of_nodes() > 30:
+            click.echo(
+                f"Warning: --inject-code requires ≤30 nodes, but subgraph has "
+                f"{subG.number_of_nodes()}. Increase --min-score or lower --budget to reduce.",
+                err=True,
+            )
+        subG = inject_code(subG, root)
 
     result = format_subgraph(subG, stats, format=fmt, query=query)
     click.echo(result)
