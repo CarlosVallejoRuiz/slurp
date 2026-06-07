@@ -336,6 +336,59 @@ def export_cmd(
         click.echo(result)
 
 
+@cli.command("benchmark")
+@click.option("--graph", "-g", type=click.Path(), default=None,
+              help="Path to graph.json (auto-discovered if omitted).")
+@click.option("--queries", "-q", multiple=True, required=True,
+              help="Query strings to benchmark (repeatable).")
+@click.option("--budget", "budgets", multiple=True, type=int,
+              default=(2000, 4000, 8000), show_default=True,
+              help="Token budgets to test (repeatable).")
+@click.option("--model", "-m", default="cl100k_base", show_default=True,
+              help="Tiktoken encoding model for token counting.")
+@click.option("--output", "-o", type=click.Path(), default=None,
+              help="Save raw results to JSON file.")
+@click.option("--min-score", "min_score", default=0.0, show_default=True,
+              help="Minimum score filter (0.0 = include all nodes).")
+def benchmark_cmd(
+    graph: str | None,
+    queries: tuple[str, ...],
+    budgets: tuple[int, ...],
+    model: str,
+    output: str | None,
+    min_score: float,
+) -> None:
+    """Measure token savings of slurp vs injecting the full graph."""
+    from slurp.benchmark import format_benchmark, run_benchmark
+
+    graph_path = Path(graph) if graph else _find_graph()
+    if graph_path is None:
+        raise click.ClickException(
+            "No graph.json found. Pass --graph or run from a directory with graph.json."
+        )
+
+    try:
+        G = load_graph(graph_path)
+    except SlurpLoadError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    result = run_benchmark(
+        G,
+        queries=list(queries),
+        budgets=list(budgets),
+        model=model,
+        min_score=min_score,
+    )
+
+    click.echo(format_benchmark(result))
+
+    if output:
+        import json as _json
+        out_path = Path(output)
+        out_path.write_text(_json.dumps(result.to_dict(), indent=2), encoding="utf-8")
+        click.echo(f"Results saved to {out_path}")
+
+
 @cli.command()
 @click.option("--graph", "-g", type=click.Path(), default=None,
               help="Path to graph.json (auto-discovered if omitted).")
