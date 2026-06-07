@@ -1,5 +1,7 @@
 """Scores graph nodes by relevance to a query string."""
 
+from __future__ import annotations
+
 import math
 import re
 from collections import Counter
@@ -154,41 +156,167 @@ def _compute_scores(
     return result, pr_norm, tfidf
 
 
-def score_nodes(G: nx.DiGraph, query: str) -> dict[str, float]:
+# ---------------------------------------------------------------------------
+# Embedding backends (optional — require external packages)
+# ---------------------------------------------------------------------------
+
+def _node_text(attrs: dict) -> str:
+    """Build a combined text representation of a node for embedding."""
+    parts = [
+        attrs.get("label", ""),
+        attrs.get("type") or attrs.get("file_type") or "",
+        attrs.get("description") or "",
+    ]
+    return " ".join(p for p in parts if p).strip()
+
+
+def _cosine_sim(a: list[float], b: list[float]) -> float:
+    """Cosine similarity clamped to [0.0, 1.0]. Returns 0.0 for zero vectors."""
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return max(0.0, min(1.0, dot / (norm_a * norm_b)))
+
+
+def _embed_openai(texts: list[str]) -> list[list[float]]:
+    """Embed a list of texts using OpenAI text-embedding-3-small.
+
+    Raises:
+        ImportError: If the openai package is not installed.
+    """
+    try:
+        import openai
+    except ImportError:
+        raise ImportError(
+            "OpenAI backend requires the openai package.\n"
+            "Install it with: pip install openai"
+        )
+    client = openai.OpenAI()
+    response = client.embeddings.create(model="text-embedding-3-small", input=texts)
+    return [item.embedding for item in response.data]
+
+
+def _embed_anthropic(texts: list[str]) -> list[list[float]]:
+    """Embed a list of texts using Anthropic's voyage-3-large model.
+
+    Raises:
+        ImportError: If the anthropic package is not installed.
+    """
+    try:
+        import anthropic
+    except ImportError:
+        raise ImportError(
+            "Anthropic backend requires the anthropic package.\n"
+            "Install it with: pip install anthropic"
+        )
+    client = anthropic.Anthropic()
+    # DECISION: Anthropic exposes Voyage embeddings through their unified HTTP API.
+    # The Python SDK's SyncAPIClient.post() allows raw endpoint calls until
+    # a first-class .embeddings namespace is added to the SDK.
+    body = {"model": "voyage-3-large", "input": texts, "input_type": "document"}
+    resp: object = client.post(path="/v1/embeddings", body=body, cast_to=object)  # type: ignore[call-overload]
+    return [item["embedding"] for item in resp["data"]]  # type: ignore[index]
+
+
+def _score_nodes_embeddings(
+    G: nx.DiGraph,
+    query: str,
+    backend: str,
+) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
+    """Score nodes using real embedding similarity instead of TF-IDF.
+
+    Batches query + all node texts in a single API call for efficiency.
+
+    Returns:
+        (final, structural, semantic) where structural is all zeros and
+        semantic equals final (cosine similarity scores in [0.0, 1.0]).
+    """
+    node_ids = list(G.nodes)
+    node_texts = [_node_text(G.nodes[nid]) or str(nid) for nid in node_ids]
+    all_texts = [query] + node_texts
+
+    if backend == "openai":
+        all_embeddings = _embed_openai(all_texts)
+    elif backend == "anthropic":
+        all_embeddings = _embed_anthropic(all_texts)
+    else:
+        raise ValueError(
+            f"Unknown backend {backend!r}. Expected 'tfidf', 'openai', or 'anthropic'."
+        )
+
+    query_emb = all_embeddings[0]
+    zeros: dict[str, float] = {nid: 0.0 for nid in node_ids}
+    semantic: dict[str, float] = {
+        nid: _cosine_sim(query_emb, emb)
+        for nid, emb in zip(node_ids, all_embeddings[1:])
+    }
+    return semantic, zeros, semantic
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+def score_nodes(G: nx.DiGraph, query: str, backend: str = "tfidf") -> dict[str, float]:
     """Returns {node_id: score} with scores normalized between 0 and 1.
 
-    Combines two signals:
+    Default backend combines two signals:
     - Structural (40%): PageRank normalized by the max value in the graph.
     - Semantic  (60%): TF-IDF cosine similarity between query and node text.
+
+    With --backend openai or --backend anthropic, uses real embedding cosine
+    similarity instead of TF-IDF. The structural PageRank component is dropped
+    when using an embedding backend.
 
     Args:
         G: Directed graph with node attributes (label, description).
         query: Free-text query string.
+        backend: Scoring backend — 'tfidf' (default), 'openai', or 'anthropic'.
 
     Returns:
         Dict mapping every node ID to a score in [0.0, 1.0].
+
+    Raises:
+        ValueError: If backend is unknown.
+        ImportError: If the required package for an embedding backend is missing.
     """
     if G.number_of_nodes() == 0:
         return {}
-    final, _, _ = _compute_scores(G, query)
+    if backend == "tfidf":
+        final, _, _ = _compute_scores(G, query)
+        return final
+    final, _, _ = _score_nodes_embeddings(G, query, backend)
     return final
 
 
 def score_nodes_detailed(
     G: nx.DiGraph,
     query: str,
+    backend: str = "tfidf",
 ) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
     """Like score_nodes but also returns the structural and semantic components.
+
+    For the 'tfidf' backend:
+        structural = normalized PageRank (0–1, before 0.4 weight).
+        semantic   = TF-IDF cosine similarity (0–1, before 0.6 weight).
+
+    For embedding backends ('openai', 'anthropic'):
+        structural = all zeros (PageRank is not computed).
+        semantic   = cosine similarity to query embedding (same as final).
 
     Args:
         G: Directed graph with node attributes (label, description).
         query: Free-text query string.
+        backend: Scoring backend — 'tfidf', 'openai', or 'anthropic'.
 
     Returns:
         Tuple of (final_scores, structural_scores, semantic_scores).
-        structural_scores: normalized PageRank values (0–1, before 0.4 weight).
-        semantic_scores: TF-IDF cosine similarities (0–1, before 0.6 weight).
     """
     if G.number_of_nodes() == 0:
         return {}, {}, {}
-    return _compute_scores(G, query)
+    if backend == "tfidf":
+        return _compute_scores(G, query)
+    return _score_nodes_embeddings(G, query, backend)

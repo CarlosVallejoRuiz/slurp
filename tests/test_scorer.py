@@ -1,9 +1,20 @@
 """Tests for slurp/scorer.py."""
 
+import sys
+from unittest.mock import patch
+
 import networkx as nx
 import pytest
 
-from slurp.scorer import _tokenize, score_nodes, score_nodes_detailed
+from slurp.scorer import (
+    _cosine_sim,
+    _embed_anthropic,
+    _embed_openai,
+    _node_text,
+    _tokenize,
+    score_nodes,
+    score_nodes_detailed,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -337,3 +348,297 @@ class TestScoreNodesDetailed:
         _, structural, _ = score_nodes_detailed(sample_graph, "auth")
         # hash_password is pointed to by authenticate_user — has incoming edges → PR > 0.
         assert structural["hash_password"] > 0.0
+
+
+# ---------------------------------------------------------------------------
+# _node_text
+# ---------------------------------------------------------------------------
+
+class TestNodeText:
+    def test_combines_label_type_description(self):
+        attrs = {"label": "MyFunc", "type": "function", "description": "Does things"}
+        result = _node_text(attrs)
+        assert "MyFunc" in result
+        assert "function" in result
+        assert "Does things" in result
+
+    def test_uses_file_type_if_no_type(self):
+        attrs = {"label": "Foo", "file_type": "class", "description": ""}
+        assert "class" in _node_text(attrs)
+
+    def test_ignores_empty_parts(self):
+        attrs = {"label": "X", "type": "", "description": ""}
+        assert _node_text(attrs) == "X"
+
+    def test_empty_attrs_returns_empty_string(self):
+        assert _node_text({}) == ""
+
+
+# ---------------------------------------------------------------------------
+# _cosine_sim
+# ---------------------------------------------------------------------------
+
+class TestCosineSimHelper:
+    def test_identical_vectors_return_1(self):
+        assert _cosine_sim([1.0, 0.0, 0.0], [1.0, 0.0, 0.0]) == pytest.approx(1.0)
+
+    def test_orthogonal_vectors_return_0(self):
+        assert _cosine_sim([1.0, 0.0], [0.0, 1.0]) == pytest.approx(0.0)
+
+    def test_opposite_vectors_clamped_to_0(self):
+        # -1 cosine sim is clamped to 0.0
+        assert _cosine_sim([1.0, 0.0], [-1.0, 0.0]) == 0.0
+
+    def test_zero_vector_returns_0(self):
+        assert _cosine_sim([0.0, 0.0], [1.0, 0.0]) == 0.0
+        assert _cosine_sim([1.0, 0.0], [0.0, 0.0]) == 0.0
+
+    def test_similar_vectors_return_high_score(self):
+        result = _cosine_sim([0.9, 0.1], [0.8, 0.2])
+        assert result > 0.95
+
+    def test_result_always_in_0_1(self):
+        import random
+        rng = random.Random(42)
+        for _ in range(20):
+            a = [rng.uniform(-1, 1) for _ in range(5)]
+            b = [rng.uniform(-1, 1) for _ in range(5)]
+            result = _cosine_sim(a, b)
+            assert 0.0 <= result <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# _embed_openai — ImportError behavior
+# ---------------------------------------------------------------------------
+
+class TestEmbedOpenAIImport:
+    def test_raises_import_error_if_not_installed(self):
+        with patch.dict(sys.modules, {"openai": None}):
+            with pytest.raises(ImportError, match="pip install openai"):
+                _embed_openai(["hello"])
+
+    def test_error_message_mentions_openai(self):
+        with patch.dict(sys.modules, {"openai": None}):
+            with pytest.raises(ImportError) as exc_info:
+                _embed_openai(["hello"])
+            assert "openai" in str(exc_info.value).lower()
+
+
+# ---------------------------------------------------------------------------
+# _embed_anthropic — ImportError behavior
+# ---------------------------------------------------------------------------
+
+class TestEmbedAnthropicImport:
+    def test_raises_import_error_if_not_installed(self):
+        with patch.dict(sys.modules, {"anthropic": None}):
+            with pytest.raises(ImportError, match="pip install anthropic"):
+                _embed_anthropic(["hello"])
+
+    def test_error_message_mentions_anthropic(self):
+        with patch.dict(sys.modules, {"anthropic": None}):
+            with pytest.raises(ImportError) as exc_info:
+                _embed_anthropic(["hello"])
+            assert "anthropic" in str(exc_info.value).lower()
+
+
+# ---------------------------------------------------------------------------
+# score_nodes with embedding backends (mocked)
+# ---------------------------------------------------------------------------
+
+def _fake_embeddings(n: int, dim: int = 8) -> list[list[float]]:
+    """Returns n unit vectors where vector i has 1.0 at position i%dim."""
+    result = []
+    for i in range(n):
+        v = [0.0] * dim
+        v[i % dim] = 1.0
+        result.append(v)
+    return result
+
+
+class TestEmbeddingBackendScoreNodes:
+    def test_openai_backend_calls_embed_openai(self, sample_graph):
+        n_nodes = sample_graph.number_of_nodes()
+        fake = _fake_embeddings(n_nodes + 1)  # query + nodes
+        with patch("slurp.scorer._embed_openai", return_value=fake) as mock_fn:
+            scores = score_nodes(sample_graph, "auth", backend="openai")
+            mock_fn.assert_called_once()
+        assert set(scores.keys()) == set(sample_graph.nodes)
+
+    def test_anthropic_backend_calls_embed_anthropic(self, sample_graph):
+        n_nodes = sample_graph.number_of_nodes()
+        fake = _fake_embeddings(n_nodes + 1)
+        with patch("slurp.scorer._embed_anthropic", return_value=fake) as mock_fn:
+            scores = score_nodes(sample_graph, "auth", backend="anthropic")
+            mock_fn.assert_called_once()
+        assert set(scores.keys()) == set(sample_graph.nodes)
+
+    def test_embedding_scores_in_valid_range(self, sample_graph):
+        n_nodes = sample_graph.number_of_nodes()
+        fake = _fake_embeddings(n_nodes + 1)
+        with patch("slurp.scorer._embed_openai", return_value=fake):
+            scores = score_nodes(sample_graph, "auth", backend="openai")
+        for nid, s in scores.items():
+            assert 0.0 <= s <= 1.0, f"{nid}: score={s}"
+
+    def test_tfidf_backend_is_unchanged_default(self, sample_graph):
+        scores_default = score_nodes(sample_graph, "auth")
+        scores_tfidf = score_nodes(sample_graph, "auth", backend="tfidf")
+        for nid in sample_graph.nodes:
+            assert abs(scores_default[nid] - scores_tfidf[nid]) < 1e-12
+
+    def test_unknown_backend_raises_value_error(self, sample_graph):
+        with pytest.raises(ValueError, match="Unknown backend"):
+            score_nodes(sample_graph, "auth", backend="foobar")
+
+    def test_openai_import_error_propagates(self, sample_graph):
+        with patch("slurp.scorer._embed_openai",
+                   side_effect=ImportError("pip install openai")):
+            with pytest.raises(ImportError, match="pip install openai"):
+                score_nodes(sample_graph, "auth", backend="openai")
+
+    def test_anthropic_import_error_propagates(self, sample_graph):
+        with patch("slurp.scorer._embed_anthropic",
+                   side_effect=ImportError("pip install anthropic")):
+            with pytest.raises(ImportError, match="pip install anthropic"):
+                score_nodes(sample_graph, "auth", backend="anthropic")
+
+    def test_embed_called_with_query_plus_all_nodes(self, sample_graph):
+        n_nodes = sample_graph.number_of_nodes()
+        fake = _fake_embeddings(n_nodes + 1)
+        with patch("slurp.scorer._embed_openai", return_value=fake) as mock_fn:
+            score_nodes(sample_graph, "my query", backend="openai")
+        texts_arg = mock_fn.call_args[0][0]
+        assert texts_arg[0] == "my query"         # query is first
+        assert len(texts_arg) == n_nodes + 1       # query + all nodes
+
+    def test_most_similar_node_gets_highest_score(self, sample_graph):
+        node_ids = list(sample_graph.nodes)
+        dim = len(node_ids) + 1
+        # query embedding: 1.0 in slot 0
+        query_emb = [1.0] + [0.0] * (dim - 1)
+        # first node embedding: 1.0 in slot 0 (perfectly matches query)
+        node_embs = []
+        for i, _ in enumerate(node_ids):
+            v = [0.0] * dim
+            if i == 0:
+                v[0] = 1.0   # perfect match
+            else:
+                v[i + 1] = 1.0  # orthogonal to query
+            node_embs.append(v)
+        all_embs = [query_emb] + node_embs
+
+        with patch("slurp.scorer._embed_openai", return_value=all_embs):
+            scores = score_nodes(sample_graph, "auth", backend="openai")
+
+        best_id = max(scores, key=scores.__getitem__)
+        assert best_id == node_ids[0]
+
+    def test_empty_graph_returns_empty(self):
+        G = nx.DiGraph()
+        assert score_nodes(G, "auth", backend="openai") == {}
+
+    def test_embedding_backend_returns_correct_node_count(self, sample_graph):
+        n_nodes = sample_graph.number_of_nodes()
+        fake = _fake_embeddings(n_nodes + 1)
+        with patch("slurp.scorer._embed_anthropic", return_value=fake):
+            scores = score_nodes(sample_graph, "auth", backend="anthropic")
+        assert len(scores) == n_nodes
+
+
+# ---------------------------------------------------------------------------
+# score_nodes_detailed with embedding backends (mocked)
+# ---------------------------------------------------------------------------
+
+class TestEmbeddingBackendDetailed:
+    def test_structural_zeros_for_embedding_backend(self, sample_graph):
+        n_nodes = sample_graph.number_of_nodes()
+        fake = _fake_embeddings(n_nodes + 1)
+        with patch("slurp.scorer._embed_openai", return_value=fake):
+            _, structural, _ = score_nodes_detailed(sample_graph, "auth", backend="openai")
+        assert all(v == 0.0 for v in structural.values())
+
+    def test_semantic_equals_final_for_embedding_backend(self, sample_graph):
+        n_nodes = sample_graph.number_of_nodes()
+        fake = _fake_embeddings(n_nodes + 1)
+        with patch("slurp.scorer._embed_openai", return_value=fake):
+            final, _, semantic = score_nodes_detailed(sample_graph, "auth", backend="openai")
+        for nid in sample_graph.nodes:
+            assert abs(final[nid] - semantic[nid]) < 1e-12
+
+    def test_three_dicts_same_keys_for_embedding(self, sample_graph):
+        n_nodes = sample_graph.number_of_nodes()
+        fake = _fake_embeddings(n_nodes + 1)
+        with patch("slurp.scorer._embed_anthropic", return_value=fake):
+            final, structural, semantic = score_nodes_detailed(
+                sample_graph, "auth", backend="anthropic"
+            )
+        assert set(final) == set(structural) == set(semantic) == set(sample_graph.nodes)
+
+    def test_empty_graph_returns_three_empty_dicts_embedding(self):
+        final, structural, semantic = score_nodes_detailed(
+            nx.DiGraph(), "auth", backend="openai"
+        )
+        assert final == {} and structural == {} and semantic == {}
+
+
+# ---------------------------------------------------------------------------
+# CLI --backend flag (integration via CliRunner)
+# ---------------------------------------------------------------------------
+
+from click.testing import CliRunner
+from slurp.cli import cli
+
+
+class TestBackendCLI:
+    def test_default_backend_tfidf(self, sample_graph_json, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(cli, [
+            "auth", "--graph", str(sample_graph_json), "--no-audit"
+        ])
+        assert result.exit_code == 0
+
+    def test_backend_flag_accepted(self, sample_graph_json, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(cli, [
+            "auth", "--graph", str(sample_graph_json),
+            "--backend", "tfidf", "--no-audit"
+        ])
+        assert result.exit_code == 0
+
+    def test_openai_backend_calls_embed_openai(
+        self, sample_graph_json, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        import networkx as _nx
+        G = _nx.DiGraph()
+        G.add_node("a", label="auth")
+        n = 7  # sample_graph has 7 nodes
+        fake = _fake_embeddings(n + 1)
+        with patch("slurp.scorer._embed_openai", return_value=fake) as mock_fn:
+            result = CliRunner().invoke(cli, [
+                "auth", "--graph", str(sample_graph_json),
+                "--backend", "openai", "--no-audit", "--min-score", "0.0"
+            ])
+        assert result.exit_code == 0, result.output
+        mock_fn.assert_called()
+
+    def test_anthropic_backend_calls_embed_anthropic(
+        self, sample_graph_json, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        n = 7
+        fake = _fake_embeddings(n + 1)
+        with patch("slurp.scorer._embed_anthropic", return_value=fake) as mock_fn:
+            result = CliRunner().invoke(cli, [
+                "auth", "--graph", str(sample_graph_json),
+                "--backend", "anthropic", "--no-audit", "--min-score", "0.0"
+            ])
+        assert result.exit_code == 0, result.output
+        mock_fn.assert_called()
+
+    def test_invalid_backend_rejected(self, sample_graph_json, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(cli, [
+            "auth", "--graph", str(sample_graph_json), "--backend", "gpt4"
+        ])
+        assert result.exit_code != 0

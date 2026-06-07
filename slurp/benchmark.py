@@ -84,6 +84,7 @@ def run_benchmark(
     min_score: float = 0.0,
     neighbor_decay: float = 0.7,
     relevance_threshold: float = 0.3,
+    backend: str = "tfidf",
 ) -> BenchmarkResult:
     """Run a battery of queries across multiple budgets and measure token savings.
 
@@ -96,6 +97,7 @@ def run_benchmark(
         neighbor_decay: Neighbor decay passed to select_subgraph.
         relevance_threshold: Score cutoff that defines a "relevant" node for
             precision calculation.
+        backend: Scoring backend — 'tfidf' (default), 'openai', or 'anthropic'.
 
     Returns:
         BenchmarkResult with per-row data and aggregate statistics.
@@ -107,7 +109,7 @@ def run_benchmark(
     rows: list[QueryBudgetResult] = []
 
     for query in queries:
-        scores = score_nodes(G, query)
+        scores = score_nodes(G, query, backend=backend)
         relevant_ids = {nid for nid, s in scores.items() if s >= relevance_threshold}
 
         for budget in budgets:

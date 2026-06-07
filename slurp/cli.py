@@ -92,6 +92,9 @@ def cli(ctx: click.Context) -> None:
               help="Open an interactive graph visualisation in the browser.")
 @click.option("--ignore-file", "ignore_file", default=".slurpignore", show_default=True,
               help="Path to .slurpignore file for excluding nodes.")
+@click.option("--backend", default="tfidf", show_default=True,
+              type=click.Choice(["tfidf", "openai", "anthropic"]),
+              help="Scoring backend. 'openai'/'anthropic' use real embeddings.")
 def run(
     query: str,
     graph: str | None,
@@ -104,6 +107,7 @@ def run(
     min_score: float,
     viz: bool,
     ignore_file: str,
+    backend: str,
 ) -> None:
     """Run a query against the graph."""
     graph_path = Path(graph) if graph else _find_graph()
@@ -120,9 +124,9 @@ def run(
     G = apply_ignore(G, load_ignore(Path(ignore_file)))
 
     if explain:
-        scores, structural, semantic = score_nodes_detailed(G, query)
+        scores, structural, semantic = score_nodes_detailed(G, query, backend=backend)
     else:
-        scores = score_nodes(G, query)
+        scores = score_nodes(G, query, backend=backend)
         structural = semantic = {}
 
     subG, stats = select_subgraph(
@@ -294,6 +298,9 @@ def diff_cmd(
               help="Score decay factor for neighbor nodes.")
 @click.option("--ignore-file", "ignore_file", default=".slurpignore", show_default=True,
               help="Path to .slurpignore file for excluding nodes.")
+@click.option("--backend", default="tfidf", show_default=True,
+              type=click.Choice(["tfidf", "openai", "anthropic"]),
+              help="Scoring backend. 'openai'/'anthropic' use real embeddings.")
 def export_cmd(
     query: str,
     graph: str | None,
@@ -304,6 +311,7 @@ def export_cmd(
     min_score: float,
     neighbor_decay: float,
     ignore_file: str,
+    backend: str,
 ) -> None:
     """Export a context block ready to paste into a Claude/ChatGPT/CLAUDE.md system prompt."""
     from slurp.exporter import export_context
@@ -320,7 +328,7 @@ def export_cmd(
         raise click.ClickException(str(exc)) from exc
 
     G = apply_ignore(G, load_ignore(Path(ignore_file)))
-    scores = score_nodes(G, query)
+    scores = score_nodes(G, query, backend=backend)
     subG, stats = select_subgraph(
         G, scores, budget=budget, model=model,
         neighbor_decay=neighbor_decay, min_score=min_score,
@@ -350,6 +358,9 @@ def export_cmd(
               help="Save raw results to JSON file.")
 @click.option("--min-score", "min_score", default=0.0, show_default=True,
               help="Minimum score filter (0.0 = include all nodes).")
+@click.option("--backend", default="tfidf", show_default=True,
+              type=click.Choice(["tfidf", "openai", "anthropic"]),
+              help="Scoring backend. 'openai'/'anthropic' use real embeddings.")
 def benchmark_cmd(
     graph: str | None,
     queries: tuple[str, ...],
@@ -357,6 +368,7 @@ def benchmark_cmd(
     model: str,
     output: str | None,
     min_score: float,
+    backend: str,
 ) -> None:
     """Measure token savings of slurp vs injecting the full graph."""
     from slurp.benchmark import format_benchmark, run_benchmark
@@ -378,6 +390,7 @@ def benchmark_cmd(
         budgets=list(budgets),
         model=model,
         min_score=min_score,
+        backend=backend,
     )
 
     click.echo(format_benchmark(result))
