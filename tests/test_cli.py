@@ -645,12 +645,22 @@ class TestVizFlag:
 
     def test_viz_html_node_font_size_13(self, sample_graph_json, monkeypatch):
         html, _ = _viz_html(monkeypatch, sample_graph_json, query="auth")
-        assert "size:13" in html or "size: 13" in html
+        # Template uses a ternary: size:isDiff?11:13 — 13 is the normal-mode size.
+        assert "isDiff?11:13" in html
 
     def test_viz_html_node_font_stroke(self, sample_graph_json, monkeypatch):
         html, _ = _viz_html(monkeypatch, sample_graph_json, query="auth")
-        assert "strokeWidth:3" in html or "strokeWidth: 3" in html
+        assert "strokeWidth:isDiff?2:3" in html
         assert "strokeColor" in html
+
+    def test_viz_html_diff_type_detection_present(self, sample_graph_json, monkeypatch):
+        html, _ = _viz_html(monkeypatch, sample_graph_json, query="auth")
+        assert "DIFF_TYPES" in html
+        assert "isDiff" in html
+
+    def test_viz_html_vadjust_present(self, sample_graph_json, monkeypatch):
+        html, _ = _viz_html(monkeypatch, sample_graph_json, query="auth")
+        assert "vadjust" in html
 
     def test_viz_html_node_chosen_false(self, sample_graph_json, monkeypatch):
         html, _ = _viz_html(monkeypatch, sample_graph_json, query="auth")
@@ -765,7 +775,7 @@ def _extract_nodes_json(html: str) -> list:
 
 def _extract_edges_json(html: str) -> list:
     start = html.index("var RE = ") + len("var RE = ")
-    end = html.index(";\n\nvar vn = ")
+    end = html.index(";\n\nvar DIFF_TYPES")
     return json.loads(html[start:end])
 
 
@@ -932,3 +942,103 @@ class TestIgnoreFile:
         data = json.loads(result.output)
         types = [n.get("type") for n in data["nodes"]]
         assert "class" not in types
+
+
+# ---------------------------------------------------------------------------
+# slurp export command
+# ---------------------------------------------------------------------------
+
+class TestExportCommand:
+    def test_default_format_is_claude(self, sample_graph_json, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(
+            cli, ["export", "auth", "--graph", str(sample_graph_json)]
+        )
+        assert result.exit_code == 0, result.output
+        assert result.output.startswith("<context ")
+        assert "</context>" in result.output
+
+    def test_claude_format_explicit(self, sample_graph_json, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(
+            cli, ["export", "auth", "--graph", str(sample_graph_json), "--format", "claude"]
+        )
+        assert result.exit_code == 0
+        assert 'source="slurp-graph"' in result.output
+        assert 'query="auth"' in result.output
+
+    def test_chatgpt_format(self, sample_graph_json, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(
+            cli, ["export", "auth", "--graph", str(sample_graph_json), "--format", "chatgpt"]
+        )
+        assert result.exit_code == 0
+        assert "[CODEBASE CONTEXT — slurp-graph]" in result.output
+        assert "[END CODEBASE CONTEXT]" in result.output
+
+    def test_claudemd_format(self, sample_graph_json, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(
+            cli, ["export", "auth", "--graph", str(sample_graph_json), "--format", "claudemd"]
+        )
+        assert result.exit_code == 0
+        assert "## Codebase Context" in result.output
+        assert "<!-- slurp-graph" in result.output
+
+    def test_output_to_file(self, sample_graph_json, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        out_file = tmp_path / "context.md"
+        result = _runner().invoke(
+            cli, ["export", "auth", "--graph", str(sample_graph_json),
+                  "--output", str(out_file)]
+        )
+        assert result.exit_code == 0
+        assert out_file.exists()
+        content = out_file.read_text(encoding="utf-8")
+        assert "<context " in content
+        assert "Exported to" in result.output
+
+    def test_output_file_contains_full_context(self, sample_graph_json, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        out_file = tmp_path / "out.md"
+        _runner().invoke(
+            cli, ["export", "auth", "--graph", str(sample_graph_json),
+                  "--format", "claudemd", "--output", str(out_file)]
+        )
+        content = out_file.read_text(encoding="utf-8")
+        assert "## Codebase Context" in content
+        assert "## Relevant Nodes" in content
+
+    def test_no_graph_error(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["export", "auth"])
+        assert result.exit_code != 0
+        assert "No graph.json found" in result.output
+
+    def test_chatgpt_format_no_box(self, sample_graph_json, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(
+            cli, ["export", "auth", "--graph", str(sample_graph_json), "--format", "chatgpt"]
+        )
+        assert result.exit_code == 0
+        assert "╭" not in result.output
+
+    def test_claudemd_format_no_box(self, sample_graph_json, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(
+            cli, ["export", "auth", "--graph", str(sample_graph_json), "--format", "claudemd"]
+        )
+        assert result.exit_code == 0
+        assert "╭" not in result.output
+
+    def test_budget_option_respected(self, sample_graph_json, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        r_small = _runner().invoke(
+            cli, ["export", "auth", "--graph", str(sample_graph_json), "--budget", "100"]
+        )
+        r_large = _runner().invoke(
+            cli, ["export", "auth", "--graph", str(sample_graph_json), "--budget", "8000"]
+        )
+        assert r_small.exit_code == 0
+        assert r_large.exit_code == 0
+        assert len(r_large.output) >= len(r_small.output)

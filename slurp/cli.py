@@ -210,6 +210,132 @@ def stats(graph: str | None) -> None:
     click.echo(f"Edges: {G.number_of_edges()}")
 
 
+@cli.command("diff")
+@click.argument("old_graph", type=click.Path(exists=True))
+@click.argument("new_graph", type=click.Path(exists=True))
+@click.option("--hops", default=2, show_default=True,
+              help="Depth of impact neighborhood expansion.")
+@click.option("--viz", is_flag=True, default=False,
+              help="Open interactive visualiser of the affected area.")
+@click.option("--budget", "-b", default=None, type=int,
+              help="Token budget; selects most relevant nodes from affected area.")
+def diff_cmd(
+    old_graph: str,
+    new_graph: str,
+    hops: int,
+    viz: bool,
+    budget: int | None,
+) -> None:
+    """Compare two graph.json files and show the impact of changes."""
+    from slurp.diff import (
+        affected_subgraph,
+        build_diff_viz_graph,
+        diff_graphs,
+        format_diff,
+    )
+
+    try:
+        G_old = load_graph(Path(old_graph))
+        G_new = load_graph(Path(new_graph))
+    except SlurpLoadError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    diff = diff_graphs(G_old, G_new)
+    click.echo(format_diff(diff, G_new))
+
+    if budget is not None:
+        sub = affected_subgraph(G_new, diff, hops)
+        if sub.number_of_nodes() > 0:
+            query_terms = [
+                G_new.nodes[n].get("label", n)
+                for n in (diff.added_nodes + diff.modified_nodes)[:5]
+                if n in G_new
+            ]
+            query = " ".join(query_terms) or "diff"
+            scores = score_nodes(sub, query)
+            subG, stats = select_subgraph(sub, scores, budget=budget)
+            click.echo("\n## Token-Budgeted Affected Subgraph\n")
+            click.echo(format_subgraph(subG, stats, query=query))
+
+    if viz:
+        viz_G, viz_scores, viz_stats = build_diff_viz_graph(G_old, G_new, diff, hops)
+        from slurp.viz import build_html
+        query = (
+            f"diff +{len(diff.added_nodes)} "
+            f"-{len(diff.removed_nodes)} "
+            f"~{len(diff.modified_nodes)}"
+        )
+        html = build_html(viz_G, viz_stats, viz_scores, query)
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".html", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(html)
+            viz_path = Path(f.name)
+        webbrowser.open(viz_path.as_uri())
+
+
+@cli.command("export")
+@click.argument("query")
+@click.option("--graph", "-g", type=click.Path(), default=None,
+              help="Path to graph.json (auto-discovered if omitted).")
+@click.option("--budget", "-b", default=4000, show_default=True,
+              help="Token budget for subgraph selection.")
+@click.option("--format", "-f", "fmt",
+              type=click.Choice(["claude", "chatgpt", "claudemd"]),
+              default="claude", show_default=True,
+              help="Target AI format.")
+@click.option("--output", "-o", type=click.Path(), default=None,
+              help="Write output to file instead of stdout.")
+@click.option("--model", "-m", default="cl100k_base", show_default=True,
+              help="Tiktoken encoding model for token counting.")
+@click.option("--min-score", "min_score", default=0.15, show_default=True,
+              help="Minimum relevance score threshold.")
+@click.option("--neighbor-decay", "neighbor_decay", default=0.7, show_default=True,
+              help="Score decay factor for neighbor nodes.")
+@click.option("--ignore-file", "ignore_file", default=".slurpignore", show_default=True,
+              help="Path to .slurpignore file for excluding nodes.")
+def export_cmd(
+    query: str,
+    graph: str | None,
+    budget: int,
+    fmt: str,
+    output: str | None,
+    model: str,
+    min_score: float,
+    neighbor_decay: float,
+    ignore_file: str,
+) -> None:
+    """Export a context block ready to paste into a Claude/ChatGPT/CLAUDE.md system prompt."""
+    from slurp.exporter import export_context
+
+    graph_path = Path(graph) if graph else _find_graph()
+    if graph_path is None:
+        raise click.ClickException(
+            "No graph.json found. Pass --graph or run from a directory with graph.json."
+        )
+
+    try:
+        G = load_graph(graph_path)
+    except SlurpLoadError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    G = apply_ignore(G, load_ignore(Path(ignore_file)))
+    scores = score_nodes(G, query)
+    subG, stats = select_subgraph(
+        G, scores, budget=budget, model=model,
+        neighbor_decay=neighbor_decay, min_score=min_score,
+    )
+
+    result = export_context(subG, stats, query, format=fmt, scores=scores)
+
+    if output:
+        out_path = Path(output)
+        out_path.write_text(result, encoding="utf-8")
+        click.echo(f"Exported to {out_path} ({len(result):,} chars)")
+    else:
+        click.echo(result)
+
+
 @cli.command()
 @click.option("--graph", "-g", type=click.Path(), default=None,
               help="Path to graph.json (auto-discovered if omitted).")

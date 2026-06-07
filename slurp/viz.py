@@ -1,7 +1,6 @@
 """Generates a self-contained interactive HTML visualisation of a subgraph."""
 
 import json
-from pathlib import Path
 
 import networkx as nx
 
@@ -233,25 +232,32 @@ _HTML_TEMPLATE = """\
 </div>
 <script>
 var TC = {
-  "function": {bg:"#0d2137",border:"#4fc3f7",font:"#79d3f7"},
-  "class":    {bg:"#0d200f",border:"#6dbf72",font:"#8dd490"},
-  "module":   {bg:"#201800",border:"#e0a030",font:"#f0b840"},
-  "concept":  {bg:"#180d24",border:"#b878d8",font:"#cc99e8"},
-  "file":     {bg:"#200d14",border:"#e07898",font:"#f094b0"},
-  "default":  {bg:"#141c26",border:"#5e7a96",font:"#7a9ab4"}
+  "function":  {bg:"#0d2137",border:"#4fc3f7",font:"#79d3f7"},
+  "class":     {bg:"#0d200f",border:"#6dbf72",font:"#8dd490"},
+  "module":    {bg:"#201800",border:"#e0a030",font:"#f0b840"},
+  "concept":   {bg:"#180d24",border:"#b878d8",font:"#cc99e8"},
+  "file":      {bg:"#200d14",border:"#e07898",font:"#f094b0"},
+  "added":     {bg:"#0a1f0d",border:"#3fb950",font:"#56d364"},
+  "removed":   {bg:"#2a0808",border:"#e05566",font:"#f47485"},
+  "modified":  {bg:"#1f1600",border:"#e0a030",font:"#f0c050"},
+  "unchanged": {bg:"#141c26",border:"#5e7a96",font:"#7a9ab4"},
+  "default":   {bg:"#141c26",border:"#5e7a96",font:"#7a9ab4"}
 };
 function c(t){ return TC[t] || TC["default"]; }
 
 var RN = <<<NODES_JSON>>>;
 var RE = <<<EDGES_JSON>>>;
 
+var DIFF_TYPES=["added","removed","modified","unchanged"];
 var vn = new vis.DataSet(RN.map(function(n){
   var col = c(n.node_type);
   var op = n.isolated ? 0.4 : 1.0;
+  var isDiff = DIFF_TYPES.indexOf(n.node_type) !== -1;
+  var sz = isDiff ? (n.node_type === "unchanged" ? 20 : 24) : n.size;
   return {
-    id: n.id, label: n.label, size: n.size,
+    id: n.id, label: n.label, size: sz,
     color: {background:col.bg, border:col.border, highlight:{background:col.bg, border:"#e6edf3"}},
-    font: {color:col.font, size:13, strokeWidth:3, strokeColor:'#0d1117'},
+    font: {color:col.font, size:isDiff?11:13, strokeWidth:isDiff?2:3, strokeColor:'#0d1117', vadjust:isDiff?-2:0},
     chosen: false,
     borderWidth: n.isolated ? 1 : 2,
     opacity: op,
@@ -260,11 +266,14 @@ var vn = new vis.DataSet(RN.map(function(n){
   };
 }));
 
+var _anyDiff = RN.some(function(n){ return DIFF_TYPES.slice(0,3).indexOf(n.node_type) !== -1; });
 var ve = new vis.DataSet(RE.map(function(e){
   return {
-    from:e.from, to:e.to, label:e.label, arrows:"to",
+    from:e.from, to:e.to,
+    label: _anyDiff ? "" : e.label,
+    arrows:"to",
     color:{color:"#21262d",highlight:"#58a6ff",hover:"#58a6ff"},
-    font:{color:"#484f58",size:10,align:"middle",background:"#0d1117"},
+    font:{color:"rgba(72,79,88,0.4)",size:_anyDiff?0:9,align:"middle",background:"#0d1117"},
     smooth:{type:"dynamic"}
   };
 }));
