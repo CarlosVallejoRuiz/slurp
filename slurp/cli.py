@@ -23,6 +23,31 @@ _GRAPH_SEARCH_PATHS = [
     Path(".graphify/graph.json"),
 ]
 
+_SLURP_ASCII = r""" _____ _
+/ ____| |
+| (___ | |_   _ _ __ _ __
+ \___ \| | | | | '__| '_ \
+ ____) | | |_| | |  | |_) |
+|_____/|_|\__,_|_|  | .__/
+                     | |
+                     |_|    🍜"""
+
+
+def _version_callback(ctx: click.Context, _param: click.Parameter, value: bool) -> None:
+    """Print the ASCII banner and exit."""
+    if not value or ctx.resilient_parsing:
+        return
+    import sys
+    from rich.text import Text
+
+    is_tty = hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
+    buf = StringIO()
+    con = Console(file=buf, no_color=not is_tty, width=80, highlight=False)
+    con.print(Text(_SLURP_ASCII, style="bold orange1"))
+    con.print(f"\nslurp — token-budget graph navigation — v{__version__}")
+    click.echo(buf.getvalue(), nl=False)
+    ctx.exit()
+
 
 def _find_graph() -> Path | None:
     for candidate in _GRAPH_SEARCH_PATHS:
@@ -56,7 +81,10 @@ class _SlurpGroup(click.Group):
 
 
 @click.group(cls=_SlurpGroup, invoke_without_command=True)
-@click.version_option(__version__, prog_name="slurp")
+@click.option(
+    "--version", is_flag=True, is_eager=True, expose_value=False,
+    callback=_version_callback, help="Show version and exit.",
+)
 @click.pass_context
 def cli(ctx: click.Context) -> None:
     """Slurp — token-budget-aware graph navigation for AI coding agents.

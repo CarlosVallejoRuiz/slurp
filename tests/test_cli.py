@@ -35,6 +35,24 @@ class TestVersion:
         result = _runner().invoke(cli, ["--version"])
         assert "0.1.0" in result.output
 
+    def test_version_output_contains_slurp(self):
+        result = _runner().invoke(cli, ["--version"])
+        assert "slurp" in result.output
+
+    def test_version_output_contains_ascii_art(self):
+        result = _runner().invoke(cli, ["--version"])
+        # The Big-font ASCII art has these distinctive character sequences
+        assert "___" in result.output
+        assert "|_|" in result.output
+
+    def test_version_output_contains_tagline(self):
+        result = _runner().invoke(cli, ["--version"])
+        assert "token-budget" in result.output
+
+    def test_version_output_contains_ramen(self):
+        result = _runner().invoke(cli, ["--version"])
+        assert "🍜" in result.output
+
 
 # ---------------------------------------------------------------------------
 # --help

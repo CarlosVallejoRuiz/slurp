@@ -684,7 +684,7 @@ wheels = [
 ]
 
 [[package]]
-name = "slurp"
+name = "slurp-graph"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
