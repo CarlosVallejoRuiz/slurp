@@ -42,6 +42,8 @@ uv add slurp-graph
 
 > PyPI package: `slurp-graph` — CLI command: `slurp`
 
+📖 **Full usage guide (automatic MCP mode + manual CLI):** [USAGE.md](USAGE.md)
+
 ---
 
 ## Quickstart
