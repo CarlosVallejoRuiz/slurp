@@ -1,145 +1,145 @@
-# Guía de uso — slurp
+# Usage guide — slurp
 
-> Dos formas de usar slurp: en segundo plano de forma completamente automática (recomendado), o directamente desde el terminal para exploración y análisis.
+> Two ways to use slurp: fully automatically in the background (recommended), or directly from the terminal for exploration and analysis.
 
 ---
 
-## Modo Automático (recomendado)
+## Automatic Mode (recommended)
 
-Una vez configurado, **slurp no requiere ninguna intervención manual**. Vive en segundo plano como servidor MCP. Cada vez que Claude Code necesita contexto del codebase, llama a slurp automáticamente, recibe el subgrafo óptimo y lo usa como contexto. El usuario usa Claude Code exactamente igual que siempre.
+Once configured, **slurp requires no manual intervention**. It runs in the background as an MCP server. Every time Claude Code needs codebase context, it calls slurp automatically, receives the optimal subgraph, and uses it as context. The user works with Claude Code exactly as they always have.
 
-### Setup — 3 pasos, una sola vez
+### Setup — 3 steps, one time only
 
-**1. Instalar slurp-graph**
+**1. Install slurp-graph**
 
 ```bash
 pip install slurp-graph
-# o con uv
+# or with uv
 uv add slurp-graph
 ```
 
-**2. Generar el grafo con graphify**
+**2. Generate the graph with graphify**
 
 ```bash
-cd /path/to/tu-proyecto
+cd /path/to/your-project
 graphify .
-# → genera graphify-out/graph.json
+# → generates graphify-out/graph.json
 ```
 
-> Si no tienes graphify instalado: `pip install graphify-py` o `uv add graphify-py`.
-> Vuelve a ejecutar `graphify .` cuando el codebase cambie significativamente.
+> If graphify is not installed: `pip install graphify-py` or `uv add graphify-py`.
+> Re-run `graphify .` whenever the codebase changes significantly.
 
-**3. Configurar `.mcp.json` en la raíz del proyecto**
+**3. Configure `.mcp.json` at the project root**
 
 ```json
 {
   "mcpServers": {
     "slurp": {
-      "command": "/ruta/a/.venv/bin/slurp",
-      "args": ["serve", "--graph", "/ruta/a/tu-proyecto/graphify-out/graph.json"]
+      "command": "/path/to/.venv/bin/slurp",
+      "args": ["serve", "--graph", "/path/to/your-project/graphify-out/graph.json"]
     }
   }
 }
 ```
 
-Para encontrar la ruta exacta del binario:
+To find the exact binary path:
 
 ```bash
 which slurp
 # /Users/juancarlos/.venv/bin/slurp
 ```
 
-Guarda el `.mcp.json` en la raíz de tu proyecto y reinicia Claude Code. Listo.
+Save `.mcp.json` at your project root and restart Claude Code. Done.
 
 ---
 
-### Cómo funciona internamente
+### How it works internally
 
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                                                         │
-│   Usuario escribe en Claude Code:                       │
-│   "¿cómo funciona la autenticación en PrismaStats?"     │
+│   User types in Claude Code:                            │
+│   "how does authentication work in PrismaStats?"        │
 │                                                         │
 └──────────────────────┬──────────────────────────────────┘
                        │
                        ▼
 ┌─────────────────────────────────────────────────────────┐
-│   Claude Code detecta que necesita contexto             │
-│   del codebase para responder con precisión             │
+│   Claude Code detects it needs codebase context         │
+│   to answer accurately                                  │
 └──────────────────────┬──────────────────────────────────┘
                        │
                        ▼
 ┌─────────────────────────────────────────────────────────┐
-│   Llama automáticamente a:                              │
+│   Automatically calls:                                  │
 │   slurp_query("auth flow", budget=4000)                 │
 └──────────────────────┬──────────────────────────────────┘
                        │
                        ▼
 ┌─────────────────────────────────────────────────────────┐
-│   Slurp puntúa los 2111 nodos del grafo,                │
-│   selecciona los 5 más relevantes en 847 tokens         │
-│   (97.1% menos que inyectar el grafo completo)          │
+│   Slurp scores all 2111 graph nodes,                    │
+│   selects the 5 most relevant in 847 tokens             │
+│   (97.1% fewer tokens than injecting the full graph)    │
 └──────────────────────┬──────────────────────────────────┘
                        │
                        ▼
 ┌─────────────────────────────────────────────────────────┐
-│   Devuelve a Claude: authenticate_user, JWTMiddleware,  │
-│   hash_password, UserModel, sus relaciones y scores     │
+│   Returns to Claude: authenticate_user, JWTMiddleware,  │
+│   hash_password, UserModel, their relationships/scores  │
 └──────────────────────┬──────────────────────────────────┘
                        │
                        ▼
 ┌─────────────────────────────────────────────────────────┐
-│   Claude responde con contexto preciso del codebase,    │
-│   sin alucinaciones, sin tokens desperdiciados          │
+│   Claude responds with precise codebase context,        │
+│   no hallucinations, no wasted tokens                   │
 └─────────────────────────────────────────────────────────┘
 ```
 
-### Lo que el usuario experimenta
+### What the user experiences
 
-Nada diferente. Claude Code responde con más precisión sobre el codebase porque tiene contexto real en lugar de inventar. Ningún comando manual. Ninguna configuración adicional por query.
+Nothing different. Claude Code answers with greater precision about the codebase because it has real context instead of guessing. No manual commands. No additional configuration per query.
 
 ---
 
-## Modo Manual (para exploración y benchmarking)
+## Manual Mode (for exploration and benchmarking)
 
-Úsalo para:
-- Explorar qué nodos selecciona slurp para una query concreta
-- Generar contexto formateado para pegar manualmente en ChatGPT u otras herramientas
-- Medir el ahorro real de tokens antes de confiar en el modo automático
-- Depurar el grafo (¿qué nodos existen? ¿qué cambió entre versiones?)
-- Visualizar el subgrafo con `--viz`
+Use it to:
+- Explore which nodes slurp selects for a specific query
+- Generate formatted context to paste manually into ChatGPT or other tools
+- Measure real token savings before relying on automatic mode
+- Debug the graph (which nodes exist? what changed between versions?)
+- Visualize the subgraph with `--viz`
 
 ---
 
 ### `slurp QUERY`
 
-Selecciona el subgrafo óptimo para una query y lo imprime.
+Selects the optimal subgraph for a query and prints it.
 
 ```bash
-# Básico
+# Basic
 slurp "auth flow" --graph graphify-out/graph.json
 
-# Con presupuesto y formato JSON
+# With budget and JSON format
 slurp "prisma schema" --budget 8000 --format json
 
-# Ver desglose de scores por nodo
+# Show per-node score breakdown
 slurp "database pool" --explain
 
-# Abrir visualizador interactivo en el navegador
+# Open interactive visualizer in the browser
 slurp "user model" --viz
 
-# Inyectar el código fuente real de cada función seleccionada
+# Inject the real source code of each selected function
 slurp "auth flow" --inject-code --budget 4000
 
-# Usar embeddings reales en lugar de TF-IDF
+# Use real embeddings instead of TF-IDF
 slurp "auth flow" --backend openai
 
-# Excluir nodos por tipo o path
+# Exclude nodes by type or path
 slurp "auth flow" --ignore-file .slurpignore
 ```
 
-**Salida de `--explain` en PrismaStats:**
+**`--explain` output on PrismaStats:**
 
 ```
  Score Breakdown
@@ -154,25 +154,25 @@ slurp "auth flow" --ignore-file .slurpignore
  └──────┴───────────────────────┴────────┴────────────┴──────────┴──────────┴──────────────────────┘
 ```
 
-**Flags principales:**
+**Main flags:**
 
-| Flag | Default | Descripción |
+| Flag | Default | Description |
 |---|---|---|
-| `--graph`, `-g` | auto-discover | Ruta al `graph.json`. |
-| `--budget`, `-b` | `4000` | Presupuesto en tokens. |
-| `--format`, `-f` | `markdown` | `markdown`, `json`, o `yaml`. |
-| `--explain` | off | Desglose de score por nodo (final / estructural / semántico). |
-| `--viz` | off | Visualizador interactivo HTML en el navegador. |
-| `--min-score` | `0.15` | Umbral mínimo de relevancia. Aumentar si hay demasiados nodos seleccionados. |
-| `--inject-code` | off | Añade el bloque de código fuente debajo de cada nodo (máx. 30 nodos). |
-| `--backend` | `tfidf` | `tfidf` (sin API), `openai`, o `anthropic` para embeddings reales. |
-| `--no-audit` | off | No guardar esta query en `.slurp/audit.jsonl`. |
+| `--graph`, `-g` | auto-discover | Path to `graph.json`. |
+| `--budget`, `-b` | `4000` | Token budget. |
+| `--format`, `-f` | `markdown` | `markdown`, `json`, or `yaml`. |
+| `--explain` | off | Per-node score breakdown (final / structural / semantic). |
+| `--viz` | off | Interactive HTML visualizer in the browser. |
+| `--min-score` | `0.15` | Minimum relevance threshold. Raise if too many nodes are selected. |
+| `--inject-code` | off | Append source code block below each node (max 30 nodes). |
+| `--backend` | `tfidf` | `tfidf` (no API), `openai`, or `anthropic` for real embeddings. |
+| `--no-audit` | off | Do not save this query to `.slurp/audit.jsonl`. |
 
 ---
 
 ### `slurp stats`
 
-Resumen del grafo.
+Graph summary.
 
 ```bash
 slurp stats --graph graphify-out/graph.json
@@ -184,13 +184,13 @@ Nodes: 2111
 Edges: 4823
 ```
 
-Útil para verificar que graphify generó el grafo correctamente antes de empezar.
+Useful for verifying that graphify generated the graph correctly before starting.
 
 ---
 
 ### `slurp audit`
 
-Historial de queries y nodos más seleccionados.
+Query history and most-selected nodes.
 
 ```bash
 slurp audit
@@ -217,45 +217,45 @@ slurp audit --top-nodes 20
  └──────┴──────────────────────┴────────────────┘
 ```
 
-Cada query se registra en `.slurp/audit.jsonl` (append-only). Útil para saber qué partes del codebase visita más el agente de AI.
+Every query is recorded in `.slurp/audit.jsonl` (append-only). Useful for understanding which parts of the codebase the AI agent visits most.
 
 ---
 
 ### `slurp diff`
 
-Compara dos versiones del grafo y muestra el impacto de los cambios.
+Compare two graph versions and show the impact of changes.
 
 ```bash
-# Ver qué cambió entre ayer y hoy
+# See what changed between yesterday and today
 slurp diff graph-v1.json graph-v2.json
 
-# Con visualizador (verde=nuevo, rojo=eliminado, amarillo=modificado)
+# With visualizer (green=added, red=removed, yellow=modified)
 slurp diff graph-v1.json graph-v2.json --viz
 
-# Seleccionar solo los nodos afectados más relevantes dentro de un presupuesto
+# Select only the most relevant affected nodes within a budget
 slurp diff graph-v1.json graph-v2.json --budget 4000
 ```
 
-**Caso de uso típico en PrismaStats:** después de refactorizar `UserModel`, ejecutar `graphify .` para regenerar el grafo, y luego `slurp diff` para saber qué otros nodos se vieron afectados y revisar el impacto en las funciones que lo llaman.
+**Typical use case in PrismaStats:** after refactoring `UserModel`, run `graphify .` to regenerate the graph, then `slurp diff` to find which other nodes were affected and review the impact on functions that call it.
 
 ---
 
 ### `slurp export`
 
-Genera un bloque de contexto listo para pegar en un prompt de AI.
+Generate a context block ready to paste into an AI prompt.
 
 ```bash
-# Para pegar en Claude (dentro de <context> XML)
+# To paste into Claude (inside <context> XML tags)
 slurp export "auth flow" --format claude
 
-# Para pegar en ChatGPT
+# To paste into ChatGPT
 slurp export "auth flow" --format chatgpt
 
-# Para añadir al CLAUDE.md del proyecto
+# To add to the project's CLAUDE.md
 slurp export "auth flow" --format claudemd --output context.md
 ```
 
-**Salida de `--format claudemd`:**
+**`--format claudemd` output:**
 
 ```markdown
 ## Codebase Context
@@ -272,7 +272,7 @@ slurp export "auth flow" --format claudemd --output context.md
 
 ### `slurp benchmark`
 
-Mide el ahorro real de tokens comparando slurp vs inyectar el grafo completo.
+Measure real token savings comparing slurp vs injecting the full graph.
 
 ```bash
 slurp benchmark \
@@ -283,7 +283,7 @@ slurp benchmark \
   --budget 2000 --budget 4000 --budget 8000
 ```
 
-**Salida resumida:**
+**Summary output:**
 
 ```
  Benchmark Results
@@ -306,67 +306,67 @@ slurp benchmark \
  └──────────────────┴────────┘
 ```
 
-Úsalo antes de confiar en el modo automático para confirmar que slurp tiene buen rendimiento en tu codebase específico.
+Run this before relying on automatic mode to confirm slurp performs well on your specific codebase.
 
 ---
 
 ### `slurp serve`
 
-Arranca el servidor MCP manualmente (normalmente no hace falta — Claude Code lo lanza solo).
+Start the MCP server manually (normally not needed — Claude Code launches it automatically).
 
 ```bash
 slurp serve --graph graphify-out/graph.json
 ```
 
-Útil para depurar la integración MCP o para conectar otras herramientas que soporten el protocolo JSON-RPC 2.0.
+Useful for debugging the MCP integration or connecting other tools that support the JSON-RPC 2.0 protocol.
 
 ---
 
-## Cuándo usar cada modo
+## When to use each mode
 
-| Situación | Modo recomendado |
+| Situation | Recommended mode |
 |---|---|
-| Usar Claude Code en el día a día | **Automático** — configura una vez y olvídate |
-| Primera vez con slurp en un proyecto nuevo | **Manual** → `slurp benchmark` para verificar rendimiento |
-| Depurar por qué Claude da una respuesta inesperada | **Manual** → `slurp "tu query" --explain --viz` |
-| Generar contexto para ChatGPT o Gemini | **Manual** → `slurp export --format chatgpt` |
-| Revisar el impacto de un refactor grande | **Manual** → `slurp diff antes.json despues.json --viz` |
-| Entender qué partes del código visita más el agente | **Manual** → `slurp audit --top-nodes 20` |
-| Codebase cambia muy frecuentemente | **Automático** + regenerar `graph.json` en el pipeline de CI |
-| Quieres embeddings reales en lugar de TF-IDF | **Manual** → `slurp "query" --backend openai`, luego configura `--backend` en el `.mcp.json` |
+| Day-to-day use of Claude Code | **Automatic** — configure once and forget |
+| First time using slurp on a new project | **Manual** → `slurp benchmark` to verify performance |
+| Debugging why Claude gave an unexpected answer | **Manual** → `slurp "your query" --explain --viz` |
+| Generating context for ChatGPT or Gemini | **Manual** → `slurp export --format chatgpt` |
+| Reviewing the impact of a large refactor | **Manual** → `slurp diff before.json after.json --viz` |
+| Understanding which code the agent visits most | **Manual** → `slurp audit --top-nodes 20` |
+| Codebase changes very frequently | **Automatic** + regenerate `graph.json` in the CI pipeline |
+| Want real embeddings instead of TF-IDF | **Manual** → `slurp "query" --backend openai`, then set `--backend` in `.mcp.json` |
 
 ---
 
-## Preguntas frecuentes
+## Frequently asked questions
 
-**¿Necesito graphify para usar slurp?**
+**Do I need graphify to use slurp?**
 
-No, pero es la forma más fácil de generar un `graph.json` compatible. Slurp acepta cualquier grafo con el formato estándar (`id` + `label` en nodos, `source` + `target` en edges). También carga GraphML (`.graphml`) y exports de Neo4j (`.csv`) de forma nativa.
-
----
-
-**¿Qué hace exactamente `--min-score 0.15`?**
-
-Filtra los nodos con score de relevancia menor a 0.15 antes de empezar la selección greedy. Sin este filtro, en grafos grandes (2000+ nodos) el algoritmo consideraría cientos de nodos casi irrelevantes, ralentizando la selección y diluyendo el resultado. Si tus queries son muy específicas y el presupuesto se llenó con nodos poco relevantes, sube el umbral a `--min-score 0.3` o más.
+No, but it is the easiest way to generate a compatible `graph.json`. Slurp accepts any graph in the standard format (`id` + `label` on nodes, `source` + `target` on edges). It also natively loads GraphML (`.graphml`) and Neo4j exports (`.csv`).
 
 ---
 
-**En modo automático, ¿cómo sé qué nodos seleccionó slurp?**
+**What exactly does `--min-score 0.15` do?**
 
-Cada query se registra en `.slurp/audit.jsonl`. Ejecuta `slurp audit` para ver el historial completo con los nodos seleccionados, tokens usados y ahorro estimado. Para ver el razonamiento exacto de una query específica, réplicala en modo manual con `--explain`.
-
----
-
-**¿Slurp modifica el codebase o el `graph.json`?**
-
-No. Slurp es de solo lectura sobre el grafo. El único archivo que escribe es `.slurp/audit.jsonl` (append-only, desactivable con `--no-audit`). El `graph.json` nunca se modifica.
+It filters out nodes with a relevance score below 0.15 before the greedy selection begins. Without this filter, on large graphs (2000+ nodes) the algorithm would consider hundreds of nearly-irrelevant nodes, slowing down selection and diluting the result. If your queries are very specific but the budget fills up with low-relevance nodes, raise the threshold to `--min-score 0.3` or higher.
 
 ---
 
-**La query devuelve demasiados nodos y el presupuesto se agota rápido. ¿Qué hago?**
+**In automatic mode, how do I know which nodes slurp selected?**
 
-Tres opciones, de menos a más agresiva:
+Every query is recorded in `.slurp/audit.jsonl`. Run `slurp audit` to see the full history with selected nodes, tokens used, and estimated savings. To see the exact reasoning for a specific query, replay it in manual mode with `--explain`.
 
-1. **Sube `--min-score`**: `--min-score 0.3` excluye nodos con baja relevancia antes de la selección. Útil para queries amplias como `"database"`.
-2. **Baja `--neighbor-decay`**: el valor por defecto `0.7` hace que los vecinos de cada nodo seleccionado reciban un 70% del score del nodo. Bajarlo a `0.4` reduce la expansión de contexto alrededor de cada nodo.
-3. **Añade un `.slurpignore`**: excluye tipos de nodos que sabes que no son relevantes para tus queries habituales (e.g., `type:document`, `file:tests/**`).
+---
+
+**Does slurp modify the codebase or `graph.json`?**
+
+No. Slurp is read-only with respect to the graph. The only file it writes is `.slurp/audit.jsonl` (append-only, disable with `--no-audit`). The `graph.json` is never modified.
+
+---
+
+**A query returns too many nodes and the budget fills up quickly. What should I do?**
+
+Three options, from least to most aggressive:
+
+1. **Raise `--min-score`**: `--min-score 0.3` excludes low-relevance nodes before selection. Useful for broad queries like `"database"`.
+2. **Lower `--neighbor-decay`**: the default `0.7` gives neighbors of each selected node 70% of that node's score. Lowering it to `0.4` reduces context expansion around each node.
+3. **Add a `.slurpignore`**: exclude node types you know are irrelevant to your usual queries (e.g., `type:document`, `file:tests/**`).
