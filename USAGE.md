@@ -1,6 +1,7 @@
 # Usage guide — slurp
 
 > Two ways to use slurp: fully automatically in the background (recommended), or directly from the terminal for exploration and analysis.
+> Primary flow: install → `slurp index .` → configure MCP → use Claude Code normally.
 
 ---
 
@@ -34,7 +35,7 @@ The generated `graph.json` is fully compatible with graphify's format — you ca
 
 Once configured, **slurp requires no manual intervention**. It runs in the background as an MCP server. Every time Claude Code needs codebase context, it calls slurp automatically, receives the optimal subgraph, and uses it as context. The user works with Claude Code exactly as they always have.
 
-### Setup — 3 steps, one time only
+### Setup — 4 steps, one time only
 
 **1. Install slurp-graph**
 
@@ -44,16 +45,18 @@ pip install slurp-graph
 uv add slurp-graph
 ```
 
-**2. Generate the graph with graphify**
+**2. Index the project**
 
 ```bash
 cd /path/to/your-project
-graphify .
+slurp index .
 # → generates graphify-out/graph.json
 ```
 
-> If graphify is not installed: `pip install graphify-py` or `uv add graphify-py`.
-> Re-run `graphify .` whenever the codebase changes significantly.
+Supports Python, TypeScript/JS, and Go out of the box — no LLM, no API key, no external tools.
+Re-run whenever the codebase changes significantly (or use `slurp index . --watch` for live updates).
+
+> **Already using graphify?** Slurp works with your existing `graph.json` out of the box — skip this step and point `.mcp.json` at your graphify output directly.
 
 **3. Configure `.mcp.json` at the project root**
 
@@ -61,19 +64,14 @@ graphify .
 {
   "mcpServers": {
     "slurp": {
-      "command": "/path/to/.venv/bin/slurp",
-      "args": ["serve", "--graph", "/path/to/your-project/graphify-out/graph.json"]
+      "command": "slurp",
+      "args": ["serve", "--graph", "graphify-out/graph.json"]
     }
   }
 }
 ```
 
-To find the exact binary path:
-
-```bash
-which slurp
-# /Users/juancarlos/.venv/bin/slurp
-```
+**4. Restart Claude Code**
 
 Save `.mcp.json` at your project root and restart Claude Code. Done.
 
