@@ -47,7 +47,7 @@ def _lineno(source: str, pos: int) -> int:
 _SKIP_DIRS: frozenset[str] = frozenset({
     ".git", "__pycache__", "node_modules", ".venv", "venv",
     "dist", "build", ".mypy_cache", ".ruff_cache", ".pytest_cache",
-    "coverage", ".tox", ".eggs",
+    "coverage", ".tox", ".eggs", "vendor",
 })
 
 
@@ -559,18 +559,27 @@ def index_project(root: Path, ignore: SlurpIgnore | None = None) -> dict:
     Returns:
         dict with 'nodes', 'links', 'built_at_commit' keys (graphify-compatible).
     """
+    import sys
+
     all_nodes: list[dict] = []
     all_edges: list[dict] = []
+    root_resolved = root.resolve()
 
     for path in sorted(root.rglob("*")):
         if not path.is_file() or _should_skip(path):
+            continue
+        # Guard against symlink traversal outside the project root
+        try:
+            path.resolve().relative_to(root_resolved)
+        except ValueError:
             continue
         indexer = _INDEXED_EXTENSIONS.get(path.suffix.lower())
         if indexer is None:
             continue
         try:
             nodes, edges = indexer(path, root)  # type: ignore[operator]
-        except Exception:
+        except Exception as exc:
+            print(f"  Warning: skipping {path}: {exc}", file=sys.stderr)
             continue
         all_nodes.extend(nodes)
         all_edges.extend(edges)

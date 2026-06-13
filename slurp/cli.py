@@ -477,7 +477,7 @@ def index_cmd(path: str, output_path: str | None, watch: bool, ignore_file: str)
     """
     import json as _json
 
-    from slurp.indexer import _INDEXED_EXTENSIONS, _should_skip, index_project
+    from slurp.indexer import _INDEXED_EXTENSIONS, index_project
 
     root = Path(path).resolve()
     out = Path(output_path) if output_path else root / "graphify-out" / "graph.json"
@@ -488,12 +488,7 @@ def index_cmd(path: str, output_path: str | None, watch: bool, ignore_file: str)
         graph = index_project(root, ignore)
         n_nodes = len(graph["nodes"])
         n_edges = len(graph["links"])
-        files_processed = sum(
-            1 for p in root.rglob("*")
-            if p.is_file()
-            and not _should_skip(p)
-            and p.suffix.lower() in _INDEXED_EXTENSIONS
-        )
+        files_processed = len({n["source_file"] for n in graph["nodes"] if n.get("source_file")})
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(_json.dumps(graph, indent=2), encoding="utf-8")
         click.echo(f"✓ {n_nodes} nodes · {n_edges} edges · {files_processed} files")
@@ -515,7 +510,8 @@ def index_cmd(path: str, output_path: str | None, watch: bool, ignore_file: str)
             def on_modified(self, event) -> None:
                 if not event.is_directory:
                     if Path(event.src_path).suffix.lower() in _INDEXED_EXTENSIONS:
-                        click.echo(f"  Changed: {event.src_path} — re-indexing...")
+                        safe_path = event.src_path.encode("unicode_escape").decode("ascii")
+                        click.echo(f"  Changed: {safe_path} — re-indexing...")
                         _run()
 
         observer = Observer()
