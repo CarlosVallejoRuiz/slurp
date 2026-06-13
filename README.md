@@ -4,14 +4,14 @@
 
 # slurp
 
-![tests](https://img.shields.io/badge/tests-794%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-883%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 ![pypi](https://img.shields.io/badge/PyPI-slurp--graph-orange)
 
 > *graphify builds the bowl. slurp serves exactly the noodles your LLM needs.*
 
-A knowledge graph is a bowl of ramen — thousands of nodes tangled together. Your LLM doesn't need the whole bowl. Slurp scores every node against your query, then greedily selects the highest-relevance subgraph that fits within your token budget — and tells you exactly what it picked and why.
+A knowledge graph is a bowl of ramen — thousands of nodes tangled together. Your LLM doesn't need the whole bowl. Slurp scores every node against your query, then greedily selects the highest-relevance subgraph that fits within your token budget — and tells you exactly what it picked and why. Works standalone or as a companion to graphify.
 
 ---
 
@@ -227,6 +227,41 @@ Outputs a per-run table and aggregate stats: mean savings, p50/p90/p95, best/wor
 
 ---
 
+### `slurp index`
+
+Index the project's source code and generate `graph.json` without graphify or any LLM.
+
+```bash
+slurp index .                              # index current directory
+slurp index /path/to/project              # specific path
+slurp index . --output custom/graph.json  # custom output path
+slurp index . --watch                     # re-index on file changes
+```
+
+```
+Indexing /path/to/project ...
+✓ 312 nodes · 487 edges · 41 files
+  Saved: /path/to/project/graphify-out/graph.json
+
+Next: slurp "your query" --graph /path/to/project/graphify-out/graph.json
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--output`, `-o` | `<path>/graphify-out/graph.json` | Output path for graph.json. |
+| `--watch` | off | Re-index on file changes (requires watchdog, installed by default). |
+| `--ignore-file` | `.slurpignore` | Path to .slurpignore rules. |
+
+**Supported languages:** Python (stdlib `ast`) · TypeScript/JS (tree-sitter if installed, otherwise regex) · Go (regex)
+
+After indexing, the full query pipeline works as usual:
+
+```bash
+slurp "auth flow" --graph graphify-out/graph.json --budget 4000
+```
+
+---
+
 ## Works with graphify
 
 Slurp is the query layer for [`graphify`](https://github.com/CarlosVallejoRuiz/graphify). Run graphify on your codebase, point slurp at the output.
@@ -331,6 +366,7 @@ Pass a custom path with `--ignore-file path/to/.slurpignore`.
 - ✅ **v0.3.0** — `slurp serve` (MCP stdio), `slurp diff`, `slurp export` (claude/chatgpt/claudemd), PyPI publish as `slurp-graph`
 - ✅ **v0.4.0** — `--backend openai|anthropic` (optional embeddings), `slurp benchmark`, GraphML + Neo4j CSV loader, `convert_graph()`
 - ✅ **v0.5.0** — `--inject-code`: extract real function bodies from source files and embed them in the context output
+- ✅ **v0.6.0** — `slurp index .`: standalone static indexer (Python ast, TypeScript/JS, Go) — graphify is now optional
 
 ---
 

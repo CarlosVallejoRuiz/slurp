@@ -23,6 +23,13 @@ dependencies = [
     "pathspec>=1.1.1",
     "rich>=15.0.0",
     "tiktoken>=0.13.0",
+    "watchdog>=3.0.0",
+]
+
+[project.optional-dependencies]
+ts = [
+    "tree-sitter>=0.22.0",
+    "tree-sitter-typescript>=0.23.0",
 ]
 
 [project.urls]

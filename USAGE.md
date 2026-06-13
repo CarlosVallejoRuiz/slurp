@@ -4,6 +4,32 @@
 
 ---
 
+## Zero dependencies mode
+
+**As of v0.6.0, graphify is optional.** Use `slurp index` to build `graph.json` directly from your source code — no LLM, no external tool, no API key required.
+
+```bash
+slurp index .                              # index current directory → graphify-out/graph.json
+slurp index /path/to/project              # specific path
+slurp index . --output out/graph.json     # custom output path
+slurp index . --watch                     # re-index on every file save
+```
+
+**Supported languages:** Python (stdlib `ast`) · TypeScript/JS (tree-sitter if installed, regex otherwise) · Go (regex)
+
+After indexing, everything else works exactly the same:
+
+```bash
+slurp "auth flow" --graph graphify-out/graph.json --budget 4000
+```
+
+The generated `graph.json` is fully compatible with graphify's format — you can mix both: index with `slurp index` today and switch to graphify later (or vice versa) without changing any other command.
+
+> **Install tree-sitter for better TypeScript coverage:**
+> `pip install "slurp-graph[ts]"` — adds tree-sitter and tree-sitter-typescript for precise TypeScript/TSX parsing. Without it, slurp falls back to regex (works for most common patterns).
+
+---
+
 ## Automatic Mode (recommended)
 
 Once configured, **slurp requires no manual intervention**. It runs in the background as an MCP server. Every time Claude Code needs codebase context, it calls slurp automatically, receives the optimal subgraph, and uses it as context. The user works with Claude Code exactly as they always have.
@@ -310,6 +336,50 @@ Run this before relying on automatic mode to confirm slurp performs well on your
 
 ---
 
+### `slurp index`
+
+Index source code and generate a graphify-compatible `graph.json` without any external tool.
+
+```bash
+# Index current directory (default output: graphify-out/graph.json)
+slurp index .
+
+# Custom output path
+slurp index . --output graph.json
+
+# Specific project root
+slurp index /path/to/project
+
+# Live re-indexing on file changes
+slurp index . --watch
+```
+
+**Example output on PrismaStats:**
+
+```
+Indexing /path/to/prismastats ...
+✓ 312 nodes · 487 edges · 41 files
+  Saved: /path/to/prismastats/graphify-out/graph.json
+
+Next: slurp "your query" --graph /path/to/prismastats/graphify-out/graph.json
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--output`, `-o` | `<path>/graphify-out/graph.json` | Output path for graph.json. |
+| `--watch` | off | Re-index on file changes (watchdog included). |
+| `--ignore-file` | `.slurpignore` | Exclusion rules (same file used for queries). |
+
+`.slurpignore` is applied during indexing, so excluded nodes never enter the graph:
+
+```
+type:import      # skip all import nodes (reduces graph size significantly)
+file:tests/**    # skip test files
+id:generated_*  # skip auto-generated code
+```
+
+---
+
 ### `slurp serve`
 
 Start the MCP server manually (normally not needed — Claude Code launches it automatically).
@@ -327,12 +397,13 @@ Useful for debugging the MCP integration or connecting other tools that support 
 | Situation | Recommended mode |
 |---|---|
 | Day-to-day use of Claude Code | **Automatic** — configure once and forget |
-| First time using slurp on a new project | **Manual** → `slurp benchmark` to verify performance |
+| First time using slurp on a new project | `slurp index .` then `slurp benchmark` to verify |
+| No graphify installed | `slurp index .` — fully standalone, no external deps |
 | Debugging why Claude gave an unexpected answer | **Manual** → `slurp "your query" --explain --viz` |
 | Generating context for ChatGPT or Gemini | **Manual** → `slurp export --format chatgpt` |
 | Reviewing the impact of a large refactor | **Manual** → `slurp diff before.json after.json --viz` |
 | Understanding which code the agent visits most | **Manual** → `slurp audit --top-nodes 20` |
-| Codebase changes very frequently | **Automatic** + regenerate `graph.json` in the CI pipeline |
+| Codebase changes very frequently | **Automatic** + `slurp index . --watch` or regenerate in CI |
 | Want real embeddings instead of TF-IDF | **Manual** → `slurp "query" --backend openai`, then set `--backend` in `.mcp.json` |
 
 ---
@@ -341,7 +412,7 @@ Useful for debugging the MCP integration or connecting other tools that support 
 
 **Do I need graphify to use slurp?**
 
-No, but it is the easiest way to generate a compatible `graph.json`. Slurp accepts any graph in the standard format (`id` + `label` on nodes, `source` + `target` on edges). It also natively loads GraphML (`.graphml`) and Neo4j exports (`.csv`).
+No. As of v0.6.0, run `slurp index .` to build `graph.json` directly from source code — no graphify needed. Slurp also accepts any graph in the standard format (`id` + `label` on nodes, `source` + `target` on edges), and natively loads GraphML (`.graphml`) and Neo4j exports (`.csv`). Graphify remains a great option for richer semantic graphs generated with LLM assistance.
 
 ---
 
