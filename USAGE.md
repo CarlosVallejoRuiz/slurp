@@ -39,11 +39,28 @@ Once configured, **slurp requires no manual intervention**. It runs in the backg
 
 **1. Install slurp-graph**
 
+Choose the command that matches your setup:
+
+| Setup | Command |
+|---|---|
+| Any project — recommended | `uv tool install slurp-graph` |
+| Non-Python project (pipx) | `pipx install slurp-graph` |
+| Simple global install | `pip install slurp-graph` |
+| Python project (adds to `pyproject.toml`) | `uv add slurp-graph` |
+
+**Don't have Python?** Install [uv](https://docs.astral.sh/uv/) first — it bundles a Python 3.12+ runtime:
+
 ```bash
-pip install slurp-graph
-# or with uv
-uv add slurp-graph
+# macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Windows (PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
+
+Then run `uv tool install slurp-graph`.
+
+> **Windows note:** if you use `pip install` and `slurp` is not found afterwards, Python's `Scripts` folder may not be on your PATH. Use `uv tool install` or `pipx install` instead — they handle PATH automatically.
 
 **2. Index the project**
 
@@ -60,6 +77,8 @@ Re-run whenever the codebase changes significantly (or use `slurp index . --watc
 
 **3. Configure `.mcp.json` at the project root**
 
+For global installs (`uv tool install`, `pipx`, `pip`):
+
 ```json
 {
   "mcpServers": {
@@ -70,6 +89,21 @@ Re-run whenever the codebase changes significantly (or use `slurp index . --watc
   }
 }
 ```
+
+If you installed with `uv add` inside a Python project, use `uv run` instead so slurp runs in the project's virtual environment:
+
+```json
+{
+  "mcpServers": {
+    "slurp": {
+      "command": "uv",
+      "args": ["run", "slurp", "serve", "--graph", "graphify-out/graph.json"]
+    }
+  }
+}
+```
+
+> **Windows:** Use forward slashes in the graph path (`"graphify-out/graph.json"` works). If `slurp` is not found by Claude Code, use the full absolute path: find it with `where slurp` (CMD) or `(Get-Command slurp).Source` (PowerShell).
 
 **4. Restart Claude Code**
 
@@ -299,12 +333,18 @@ slurp export "auth flow" --format claudemd --output context.md
 Measure real token savings comparing slurp vs injecting the full graph.
 
 ```bash
+# macOS / Linux / PowerShell
 slurp benchmark \
   --graph graphify-out/graph.json \
   --queries "auth flow" \
   --queries "prisma schema" \
   --queries "database pool" \
   --budget 2000 --budget 4000 --budget 8000
+```
+
+```bat
+REM Windows CMD — no line continuation, write it on one line
+slurp benchmark --graph graphify-out/graph.json --queries "auth flow" --queries "prisma schema" --budget 2000 --budget 4000
 ```
 
 **Summary output:**

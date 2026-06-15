@@ -33,25 +33,57 @@ Even the worst case — `"database pool"` at budget 8k — injects 85% fewer tok
 
 ## Install
 
-**Python projects** (inside a project with `pyproject.toml`):
+**Quick reference:**
+
+| Situation | Command |
+|---|---|
+| Any project, fastest setup | `uv tool install slurp-graph` |
+| Non-Python project (pipx user) | `pipx install slurp-graph` |
+| Simple global install | `pip install slurp-graph` |
+| Python project (adds to `pyproject.toml`) | `uv add slurp-graph` |
+| Better TypeScript/TSX indexing | `pip install "slurp-graph[ts]"` |
+
+**Requires Python 3.12+.** Don't have Python? [Install uv](https://docs.astral.sh/uv/) — it bundles a Python runtime and is the fastest path.
+
+---
+
+**Install uv (if you don't have Python yet):**
 
 ```bash
-pip install slurp-graph
+# macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# or with uv
+# Windows (PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+Then: `uv tool install slurp-graph`
+
+---
+
+**Non-Python projects** (JS, TypeScript, Go — install slurp globally so it's on your PATH):
+
+```bash
+uv tool install slurp-graph     # recommended: isolated environment, no conflicts
+pipx install slurp-graph        # same idea if you already have pipx
+pip install slurp-graph         # works if Python's bin/Scripts dir is on your PATH
+```
+
+> **Windows:** `pip install` places `slurp.exe` in Python's `Scripts` folder, which may not be on PATH by default. If `slurp` is not found after install, see [adding Python Scripts to PATH](https://docs.python.org/3/using/windows.html#excursus-setting-environment-variables), or use `uv tool install` instead (it handles PATH automatically).
+
+---
+
+**Python projects** (adds slurp as a project dependency):
+
+```bash
 uv add slurp-graph
-```
-
-**Non-Python projects** (JS, TypeScript, Go, etc.) — install slurp as a global tool:
-
-```bash
+# or
 pip install slurp-graph
-
-# or with uv (installs into an isolated environment, makes `slurp` available globally)
-uv tool install slurp-graph
 ```
 
-> `uv add` only works inside Python projects with a `pyproject.toml`. For everything else, use `uv tool install` or `pip install`.
+> When using `uv add`, run slurp as `uv run slurp` or activate the virtual environment first. For the MCP server with `uv add`, see the note in [MCP Integration](#mcp-integration).
+
+---
 
 > PyPI package: `slurp-graph` — CLI command: `slurp`
 
@@ -234,6 +266,7 @@ slurp benchmark \
   --graph graph.json \
   --queries "auth flow" --queries "schema validation" \
   --budget 2000 --budget 4000 --budget 8000
+# Windows CMD: remove the backslashes and write on one line
 ```
 
 Outputs a per-run table and aggregate stats: mean savings, p50/p90/p95, best/worst case, and precision (fraction of relevant nodes captured).
@@ -316,18 +349,33 @@ Use `slurp convert` or the `convert_graph()` API to export between formats.
 
 Run slurp as an MCP server so Claude Code (or any MCP-compatible agent) can query the graph directly.
 
-**`.mcp.json`:**
+**`.mcp.json`** — for global installs (`uv tool install`, `pipx`, `pip`):
 
 ```json
 {
   "mcpServers": {
     "slurp": {
-      "command": "/path/to/.venv/bin/slurp",
-      "args": ["serve", "--graph", "/path/to/graphify-out/graph.json"]
+      "command": "slurp",
+      "args": ["serve", "--graph", "/absolute/path/to/graphify-out/graph.json"]
     }
   }
 }
 ```
+
+**`.mcp.json`** — if you installed with `uv add` inside a Python project:
+
+```json
+{
+  "mcpServers": {
+    "slurp": {
+      "command": "uv",
+      "args": ["run", "slurp", "serve", "--graph", "graphify-out/graph.json"]
+    }
+  }
+}
+```
+
+> **Windows:** Use forward slashes or escaped backslashes in the graph path: `"C:/Users/you/project/graphify-out/graph.json"`. If `slurp` isn't found, replace `"command": "slurp"` with the full path — find it with `where slurp` (CMD) or `Get-Command slurp | Select-Object Source` (PowerShell).
 
 **Tool exposed:** `slurp_query(query: str, budget: int = 4000) → str`
 
