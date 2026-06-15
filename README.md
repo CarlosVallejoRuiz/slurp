@@ -33,12 +33,25 @@ Even the worst case — `"database pool"` at budget 8k — injects 85% fewer tok
 
 ## Install
 
+**Python projects** (inside a project with `pyproject.toml`):
+
 ```bash
 pip install slurp-graph
 
 # or with uv
 uv add slurp-graph
 ```
+
+**Non-Python projects** (JS, TypeScript, Go, etc.) — install slurp as a global tool:
+
+```bash
+pip install slurp-graph
+
+# or with uv (installs into an isolated environment, makes `slurp` available globally)
+uv tool install slurp-graph
+```
+
+> `uv add` only works inside Python projects with a `pyproject.toml`. For everything else, use `uv tool install` or `pip install`.
 
 > PyPI package: `slurp-graph` — CLI command: `slurp`
 
