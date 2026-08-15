@@ -7,6 +7,8 @@ from pathlib import Path
 
 import click
 from rich.console import Console
+from rich.markup import escape
+from rich.panel import Panel
 from rich.table import Table
 
 from slurp import __version__
@@ -61,6 +63,99 @@ def _echo_rich(renderable) -> None:
     buf = StringIO()
     Console(file=buf, no_color=True, width=100).print(renderable)
     click.echo(buf.getvalue(), nl=False)
+
+
+_LANGUAGE_BY_EXT: dict[str, str] = {
+    ".py": "Python",
+    ".ts": "TypeScript",
+    ".tsx": "TypeScript",
+    ".js": "JavaScript",
+    ".jsx": "JavaScript",
+    ".go": "Go",
+}
+
+
+def _detect_language(root: Path) -> tuple[str | None, dict[str, int]]:
+    """Detect the dominant source language of a project.
+
+    Counts indexable source files per language, reusing the indexer's own
+    discovery rules so vendored trees (node_modules, .venv, ...) never skew
+    the result.
+
+    Args:
+        root: Project root to scan.
+
+    Returns:
+        Tuple of (dominant language or None if no source files, counts by
+        language). Ties break alphabetically for deterministic output.
+    """
+    from slurp.indexer import iter_source_files
+
+    counts: dict[str, int] = {}
+    for path in iter_source_files(root):
+        lang = _LANGUAGE_BY_EXT.get(path.suffix.lower())
+        if lang is not None:
+            counts[lang] = counts.get(lang, 0) + 1
+
+    if not counts:
+        return None, counts
+    dominant = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+    return dominant, counts
+
+
+def _detect_slurp_command() -> tuple[str, str]:
+    """Locate the slurp binary and identify how it was installed.
+
+    DECISION: the resolved absolute path is what goes into .mcp.json. MCP
+    clients spawn the server without a login shell, so a bare "slurp" only
+    works if PATH happens to be inherited — an absolute path works for both
+    `uv tool install` and `pip install` layouts.
+
+    Returns:
+        Tuple of (command to launch slurp, human-readable install kind).
+    """
+    import shutil
+    import sys
+
+    exe = shutil.which("slurp")
+    if exe is None:
+        # Running via `uv run slurp init` may leave the venv bin dir off PATH.
+        candidate = Path(sys.executable).parent / "slurp"
+        if candidate.exists():
+            exe = str(candidate)
+    if exe is None:
+        return "slurp", "not found on PATH"
+
+    resolved = Path(exe).resolve()
+    parts = [p.lower() for p in resolved.parts]
+    if "uv" in parts and "tools" in parts:
+        kind = "uv tool install"
+    elif (resolved.parent.parent / "pyvenv.cfg").exists():
+        kind = "pip install (virtualenv)"
+    else:
+        kind = "pip install"
+    return exe, kind
+
+
+def _build_mcp_config(command: str, graph_path: Path, existing: dict | None) -> dict:
+    """Build the .mcp.json payload, preserving any unrelated MCP servers.
+
+    Args:
+        command: Command that launches slurp.
+        graph_path: Absolute path to graph.json.
+        existing: Previously parsed .mcp.json contents, or None.
+
+    Returns:
+        The full config dict to write.
+    """
+    config = dict(existing) if existing else {}
+    servers = dict(config.get("mcpServers") or {})
+    servers["slurp"] = {
+        "command": command,
+        "args": ["serve", "--graph", str(graph_path)],
+    }
+    config["mcpServers"] = servers
+    return config
 
 
 class _SlurpGroup(click.Group):
@@ -525,6 +620,148 @@ def index_cmd(path: str, output_path: str | None, watch: bool, ignore_file: str)
         except KeyboardInterrupt:
             observer.stop()
         observer.join()
+
+
+@cli.command("init")
+@click.option("--yes", "-y", is_flag=True, default=False,
+              help="Accept every prompt (for CI and scripting).")
+def init(yes: bool) -> None:
+    """Set up slurp in this project — index it and write .mcp.json.
+
+    Detects the project language, builds graph.json, and registers slurp as an
+    MCP server so your AI coding assistant can query it. Needs no flags: run
+    `slurp init` from the project root.
+    """
+    import json as _json
+    import sys
+
+    root = Path(".").resolve()
+    mcp_path = Path(".mcp.json")
+
+    language, counts = _detect_language(root)
+    existing_graph = _find_graph()
+    command, install_kind = _detect_slurp_command()
+
+    # --- Plan ---------------------------------------------------------------
+    plan: list[str] = []
+    if language is None:
+        plan.append("[yellow]Language:[/]  none detected (no .py/.ts/.js/.go sources)")
+    else:
+        breakdown = ", ".join(
+            f"{lang} {n}" for lang, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        )
+        plan.append(f"[bold]Language:[/]  {language}  ([dim]{breakdown} files[/])")
+    plan.append(f"[bold]Project:[/]   {root}")
+    plan.append("")
+    if existing_graph is not None:
+        plan.append(f"  1. Reuse existing graph at [cyan]{existing_graph}[/] (or re-index)")
+    else:
+        plan.append("  1. Index this project into [cyan]graphify-out/graph.json[/]")
+    verb = "Update" if mcp_path.exists() else "Create"
+    plan.append(f"  2. {verb} [cyan].mcp.json[/] registering slurp as an MCP server")
+    plan.append("")
+    plan.append(f"[dim]slurp binary: {command}  ({install_kind})[/]")
+
+    _echo_rich(Panel("\n".join(plan), title="slurp init", border_style="cyan", padding=(1, 2)))
+
+    if language is None:
+        click.echo(
+            "Warning: no indexable source files found — the graph would be empty.\n"
+            "         Run this from your project root."
+        )
+
+    if not yes and not click.confirm("Proceed?", default=True):
+        click.echo("Cancelled — nothing was changed.")
+        raise click.Abort()
+
+    # --- Step 1: graph ------------------------------------------------------
+    reuse = False
+    if existing_graph is not None:
+        reuse = yes or click.confirm(
+            f"Reuse the existing graph at {existing_graph}?", default=True
+        )
+
+    if reuse and existing_graph is not None:
+        graph_path = existing_graph.resolve()
+        data = _json.loads(graph_path.read_text(encoding="utf-8"))
+        n_nodes = len(data.get("nodes", []))
+        n_edges = len(data.get("links", data.get("edges", [])))
+        click.echo(f"Using existing graph: {graph_path}")
+    else:
+        from slurp.indexer import index_project, iter_source_files
+
+        graph_path = root / "graphify-out" / "graph.json"
+        ignore = load_ignore(Path(".slurpignore"))
+        files = list(iter_source_files(root))
+
+        # DECISION: the live progress bar is disabled off-TTY so piped output
+        # and CliRunner captures stay free of ANSI control sequences.
+        is_tty = hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
+        if not is_tty:
+            click.echo(f"Indexing {len(files)} files...")
+
+        from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn
+
+        with Progress(
+            TextColumn("[cyan]Indexing[/]"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TextColumn("[dim]{task.completed}/{task.total} files[/]"),
+            disable=not is_tty,
+        ) as progress:
+            task = progress.add_task("index", total=len(files))
+            graph = index_project(root, ignore, on_file=lambda _p: progress.advance(task))
+
+        n_nodes = len(graph["nodes"])
+        n_edges = len(graph["links"])
+        graph_path.parent.mkdir(parents=True, exist_ok=True)
+        graph_path.write_text(_json.dumps(graph, indent=2), encoding="utf-8")
+
+    # --- Step 2: .mcp.json --------------------------------------------------
+    existing_cfg: dict | None = None
+    write_mcp = True
+
+    if mcp_path.exists():
+        try:
+            parsed = _json.loads(mcp_path.read_text(encoding="utf-8"))
+            existing_cfg = parsed if isinstance(parsed, dict) else None
+        except ValueError:
+            existing_cfg = None
+
+        others = [k for k in (existing_cfg or {}).get("mcpServers", {}) if k != "slurp"]
+        if existing_cfg is None:
+            prompt = ".mcp.json exists but is not valid JSON. Overwrite it?"
+        elif others:
+            prompt = (
+                f".mcp.json exists. Update its 'slurp' entry? "
+                f"({len(others)} other server(s) will be kept)"
+            )
+        else:
+            prompt = ".mcp.json exists. Overwrite it?"
+        write_mcp = yes or click.confirm(prompt, default=True)
+
+    config = _build_mcp_config(command, graph_path, existing_cfg)
+    config_json = _json.dumps(config, indent=2)
+    if write_mcp:
+        mcp_path.write_text(config_json + "\n", encoding="utf-8")
+
+    # --- Summary ------------------------------------------------------------
+    summary: list[str] = [
+        f"[bold]Nodes:[/]   {n_nodes}",
+        f"[bold]Edges:[/]   {n_edges}",
+        f"[bold]Graph:[/]   {graph_path}",
+        "",
+    ]
+    if write_mcp:
+        summary.append(f"[bold].mcp.json[/] ({mcp_path.resolve()}):")
+    else:
+        summary.append("[yellow].mcp.json left untouched.[/] Add this entry manually:")
+    # JSON contains square brackets, which rich would parse as markup tags.
+    summary.append(escape(config_json))
+
+    _echo_rich(Panel("\n".join(summary), title="slurp is ready", border_style="green",
+                     padding=(1, 2)))
+    click.echo("Next: restart your AI coding assistant to activate slurp")
 
 
 @cli.command()

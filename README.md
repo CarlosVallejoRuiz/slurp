@@ -4,7 +4,7 @@
 
 # slurp
 
-![tests](https://img.shields.io/badge/tests-883%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-911%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 ![pypi](https://img.shields.io/badge/PyPI-slurp--graph-orange)
@@ -93,6 +93,14 @@ pip install slurp-graph
 
 ## Quickstart
 
+**New to slurp?** Run `slurp init` in your project root — it detects your language, indexes your codebase, and configures the MCP server in one step.
+
+```bash
+slurp init
+```
+
+Then query it:
+
 ```bash
 slurp "auth flow" --graph graph.json --budget 4000
 ```
@@ -149,6 +157,27 @@ Pipe the output directly into your LLM prompt, save it to a file, or use `slurp 
 ---
 
 ## Commands
+
+### `slurp init`
+
+Guided one-command setup. **New to slurp?** Run `slurp init` in your project root — it detects your language, indexes your codebase, and configures the MCP server in one step.
+
+```bash
+slurp init          # from your project root — no flags needed
+slurp init --yes    # accept every prompt (CI / scripting)
+```
+
+It shows you a plan and asks for confirmation before touching anything:
+
+1. **Detects the dominant language** by counting `.py`, `.ts`, `.tsx`, `.js`, `.jsx` and `.go` files, ignoring vendored trees like `node_modules/` and `.venv/`.
+2. **Indexes the project** into `graphify-out/graph.json` with a live progress bar. If a graph already exists, it offers to reuse it instead of re-indexing.
+3. **Writes `.mcp.json`** pointing at the slurp binary it detected — works with both `uv tool install` and `pip install` layouts. An existing `.mcp.json` is never clobbered: slurp asks first, and other MCP servers in the file are preserved.
+
+Finish by restarting your AI coding assistant to activate slurp.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--yes`, `-y` | off | Accept every confirmation prompt. Useful for CI and scripting. |
 
 ### `slurp QUERY`
 

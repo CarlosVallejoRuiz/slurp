@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
+
     from slurp.ignore import SlurpIgnore
 
 
@@ -546,25 +548,20 @@ _INDEXED_EXTENSIONS: dict[str, object] = {
 }
 
 
-def index_project(root: Path, ignore: SlurpIgnore | None = None) -> dict:
-    """Index an entire project directory.
+def iter_source_files(root: Path) -> Iterator[Path]:
+    """Yield every indexable source file under *root*, in deterministic order.
 
-    Discovers Python, TypeScript/JavaScript, and Go source files, indexes them,
-    deduplicates nodes by ID, and builds a graphify-compatible graph dict.
+    Applies the same skip-directory and symlink-containment rules as
+    :func:`index_project`, so callers can count or preview the exact set of
+    files that indexing will process.
 
     Args:
-        root: Root directory to index.
-        ignore: Optional SlurpIgnore rules to apply.
+        root: Root directory to scan.
 
-    Returns:
-        dict with 'nodes', 'links', 'built_at_commit' keys (graphify-compatible).
+    Yields:
+        Paths of files whose extension has a registered indexer.
     """
-    import sys
-
-    all_nodes: list[dict] = []
-    all_edges: list[dict] = []
     root_resolved = root.resolve()
-
     for path in sorted(root.rglob("*")):
         if not path.is_file() or _should_skip(path):
             continue
@@ -573,14 +570,46 @@ def index_project(root: Path, ignore: SlurpIgnore | None = None) -> dict:
             path.resolve().relative_to(root_resolved)
         except ValueError:
             continue
-        indexer = _INDEXED_EXTENSIONS.get(path.suffix.lower())
-        if indexer is None:
-            continue
+        if path.suffix.lower() in _INDEXED_EXTENSIONS:
+            yield path
+
+
+def index_project(
+    root: Path,
+    ignore: SlurpIgnore | None = None,
+    on_file: Callable[[Path], None] | None = None,
+) -> dict:
+    """Index an entire project directory.
+
+    Discovers Python, TypeScript/JavaScript, and Go source files, indexes them,
+    deduplicates nodes by ID, and builds a graphify-compatible graph dict.
+
+    Args:
+        root: Root directory to index.
+        ignore: Optional SlurpIgnore rules to apply.
+        on_file: Optional callback invoked with each source file once it has
+            been processed, including files skipped due to a parse error. Used
+            to drive progress reporting; the file set matches
+            :func:`iter_source_files`.
+
+    Returns:
+        dict with 'nodes', 'links', 'built_at_commit' keys (graphify-compatible).
+    """
+    import sys
+
+    all_nodes: list[dict] = []
+    all_edges: list[dict] = []
+
+    for path in iter_source_files(root):
+        indexer = _INDEXED_EXTENSIONS[path.suffix.lower()]
         try:
             nodes, edges = indexer(path, root)  # type: ignore[operator]
         except Exception as exc:
             print(f"  Warning: skipping {path}: {exc}", file=sys.stderr)
             continue
+        finally:
+            if on_file is not None:
+                on_file(path)
         all_nodes.extend(nodes)
         all_edges.extend(edges)
 

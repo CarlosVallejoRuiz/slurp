@@ -1147,3 +1147,287 @@ class TestInjectCodeCommand:
         )
         assert result.exit_code == 0
         assert "```python" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# slurp init
+# ---------------------------------------------------------------------------
+
+
+class TestInitCommand:
+    """Tests for the guided `slurp init` setup command."""
+
+    @staticmethod
+    def _make_project(root: Path, python: int = 2, typescript: int = 0, go: int = 0) -> None:
+        """Create a throwaway project tree with the requested file mix."""
+        src = root / "src"
+        src.mkdir(parents=True, exist_ok=True)
+        for i in range(python):
+            (src / f"mod{i}.py").write_text(
+                f"def handler{i}(request):\n    return validate{i}(request)\n\n"
+                f"def validate{i}(request):\n    return True\n",
+                encoding="utf-8",
+            )
+        for i in range(typescript):
+            (src / f"mod{i}.ts").write_text(
+                f"export function fetchThing{i}(id: string) {{ return id; }}\n",
+                encoding="utf-8",
+            )
+        for i in range(go):
+            (src / f"mod{i}.go").write_text(
+                f"package main\n\nfunc Handle{i}() error {{ return nil }}\n",
+                encoding="utf-8",
+            )
+
+    @staticmethod
+    def _read_mcp(root: Path) -> dict:
+        return json.loads((root / ".mcp.json").read_text(encoding="utf-8"))
+
+    # --- language detection ------------------------------------------------
+
+    def test_detects_python_as_dominant_language(self, tmp_path, monkeypatch):
+        self._make_project(tmp_path, python=3, typescript=1)
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["init", "--yes"])
+        assert result.exit_code == 0
+        assert "Python" in result.output
+
+    def test_detects_go_as_dominant_language(self, tmp_path, monkeypatch):
+        self._make_project(tmp_path, python=1, go=4)
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["init", "--yes"])
+        assert result.exit_code == 0
+        assert "Language:" in result.output
+        assert "Go" in result.output
+
+    def test_language_breakdown_lists_every_language_found(self, tmp_path, monkeypatch):
+        self._make_project(tmp_path, python=2, typescript=1, go=1)
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["init", "--yes"])
+        assert result.exit_code == 0
+        for lang in ("Python", "TypeScript", "Go"):
+            assert lang in result.output
+
+    def test_empty_project_warns_about_no_sources(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["init", "--yes"])
+        assert result.exit_code == 0
+        assert "no indexable source files" in result.output
+
+    def test_vendored_dirs_do_not_skew_detection(self, tmp_path, monkeypatch):
+        self._make_project(tmp_path, python=2)
+        vendored = tmp_path / "node_modules" / "pkg"
+        vendored.mkdir(parents=True)
+        for i in range(20):
+            (vendored / f"bundle{i}.js").write_text("export function x() {}\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["init", "--yes"])
+        assert result.exit_code == 0
+        assert "Python" in result.output
+
+    # --- confirmation ------------------------------------------------------
+
+    def test_declining_confirmation_aborts(self, tmp_path, monkeypatch):
+        self._make_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["init"], input="n\n")
+        assert result.exit_code == 1
+        assert "Cancelled" in result.output
+
+    def test_declining_confirmation_writes_nothing(self, tmp_path, monkeypatch):
+        self._make_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        _runner().invoke(cli, ["init"], input="n\n")
+        assert not (tmp_path / ".mcp.json").exists()
+        assert not (tmp_path / "graphify-out" / "graph.json").exists()
+
+    def test_shows_plan_before_asking(self, tmp_path, monkeypatch):
+        self._make_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["init"], input="n\n")
+        plan_pos = result.output.find("slurp init")
+        prompt_pos = result.output.find("Proceed?")
+        assert plan_pos != -1 and prompt_pos != -1
+        assert plan_pos < prompt_pos
+
+    def test_runs_with_no_flags_at_all(self, tmp_path, monkeypatch):
+        self._make_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["init"], input="y\n")
+        assert result.exit_code == 0
+        assert (tmp_path / ".mcp.json").exists()
+
+    # --- indexing ----------------------------------------------------------
+
+    def test_creates_graph_json(self, tmp_path, monkeypatch):
+        self._make_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["init", "--yes"])
+        assert result.exit_code == 0
+        assert (tmp_path / "graphify-out" / "graph.json").exists()
+
+    def test_graph_json_is_graphify_compatible(self, tmp_path, monkeypatch):
+        self._make_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        _runner().invoke(cli, ["init", "--yes"])
+        data = json.loads((tmp_path / "graphify-out" / "graph.json").read_text(encoding="utf-8"))
+        assert "nodes" in data
+        assert "links" in data
+        assert len(data["nodes"]) > 0
+
+    def test_summary_reports_node_and_edge_counts(self, tmp_path, monkeypatch):
+        self._make_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["init", "--yes"])
+        data = json.loads((tmp_path / "graphify-out" / "graph.json").read_text(encoding="utf-8"))
+        assert "Nodes:" in result.output
+        assert "Edges:" in result.output
+        assert str(len(data["nodes"])) in result.output
+
+    def test_summary_reports_graph_path(self, tmp_path, monkeypatch):
+        self._make_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["init", "--yes"])
+        assert "graph.json" in result.output
+
+    # --- reusing an existing graph -----------------------------------------
+
+    def test_offers_to_reuse_existing_graph(self, tmp_path, monkeypatch):
+        self._make_project(tmp_path)
+        out = tmp_path / "graphify-out"
+        out.mkdir()
+        (out / "graph.json").write_text(
+            json.dumps({"nodes": [{"id": "sentinel", "label": "Sentinel"}], "links": []}),
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["init"], input="y\ny\ny\n")
+        assert result.exit_code == 0
+        assert "Reuse" in result.output
+
+    def test_reusing_existing_graph_does_not_reindex(self, tmp_path, monkeypatch):
+        self._make_project(tmp_path)
+        out = tmp_path / "graphify-out"
+        out.mkdir()
+        (out / "graph.json").write_text(
+            json.dumps({"nodes": [{"id": "sentinel", "label": "Sentinel"}], "links": []}),
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["init", "--yes"])
+        assert result.exit_code == 0
+        data = json.loads((out / "graph.json").read_text(encoding="utf-8"))
+        assert [n["id"] for n in data["nodes"]] == ["sentinel"]
+
+    def test_declining_reuse_reindexes(self, tmp_path, monkeypatch):
+        self._make_project(tmp_path)
+        out = tmp_path / "graphify-out"
+        out.mkdir()
+        (out / "graph.json").write_text(
+            json.dumps({"nodes": [{"id": "sentinel", "label": "Sentinel"}], "links": []}),
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["init"], input="y\nn\ny\n")
+        assert result.exit_code == 0
+        data = json.loads((out / "graph.json").read_text(encoding="utf-8"))
+        assert [n["id"] for n in data["nodes"]] != ["sentinel"]
+
+    # --- .mcp.json ---------------------------------------------------------
+
+    def test_creates_mcp_json(self, tmp_path, monkeypatch):
+        self._make_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["init", "--yes"])
+        assert result.exit_code == 0
+        assert (tmp_path / ".mcp.json").exists()
+
+    def test_mcp_json_registers_slurp_server(self, tmp_path, monkeypatch):
+        self._make_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        _runner().invoke(cli, ["init", "--yes"])
+        cfg = self._read_mcp(tmp_path)
+        assert "slurp" in cfg["mcpServers"]
+
+    def test_mcp_json_args_invoke_serve_with_graph(self, tmp_path, monkeypatch):
+        self._make_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        _runner().invoke(cli, ["init", "--yes"])
+        args = self._read_mcp(tmp_path)["mcpServers"]["slurp"]["args"]
+        assert args[0] == "serve"
+        assert args[1] == "--graph"
+        assert args[2].endswith("graph.json")
+
+    def test_mcp_json_graph_path_is_absolute(self, tmp_path, monkeypatch):
+        self._make_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        _runner().invoke(cli, ["init", "--yes"])
+        graph_arg = self._read_mcp(tmp_path)["mcpServers"]["slurp"]["args"][2]
+        assert Path(graph_arg).is_absolute()
+
+    def test_mcp_json_command_matches_detected_binary(self, tmp_path, monkeypatch):
+        from slurp.cli import _detect_slurp_command
+
+        self._make_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        _runner().invoke(cli, ["init", "--yes"])
+        expected, _kind = _detect_slurp_command()
+        assert self._read_mcp(tmp_path)["mcpServers"]["slurp"]["command"] == expected
+
+    def test_mcp_json_contents_shown_in_summary(self, tmp_path, monkeypatch):
+        self._make_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["init", "--yes"])
+        assert "mcpServers" in result.output
+
+    def test_existing_mcp_json_prompts_before_touching(self, tmp_path, monkeypatch):
+        self._make_project(tmp_path)
+        (tmp_path / ".mcp.json").write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["init"], input="y\nn\n")
+        assert result.exit_code == 0
+        assert ".mcp.json exists" in result.output
+
+    def test_declining_overwrite_leaves_mcp_json_untouched(self, tmp_path, monkeypatch):
+        self._make_project(tmp_path)
+        original = json.dumps({"mcpServers": {"keep": {"command": "x", "args": []}}})
+        (tmp_path / ".mcp.json").write_text(original, encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["init"], input="y\nn\n")
+        assert result.exit_code == 0
+        assert (tmp_path / ".mcp.json").read_text(encoding="utf-8") == original
+
+    def test_overwrite_preserves_other_mcp_servers(self, tmp_path, monkeypatch):
+        self._make_project(tmp_path)
+        (tmp_path / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"other": {"command": "foo", "args": ["bar"]}}}),
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["init", "--yes"])
+        assert result.exit_code == 0
+        servers = self._read_mcp(tmp_path)["mcpServers"]
+        assert servers["other"] == {"command": "foo", "args": ["bar"]}
+        assert "slurp" in servers
+
+    def test_invalid_existing_mcp_json_is_replaced(self, tmp_path, monkeypatch):
+        self._make_project(tmp_path)
+        (tmp_path / ".mcp.json").write_text("{not valid json", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["init", "--yes"])
+        assert result.exit_code == 0
+        assert "slurp" in self._read_mcp(tmp_path)["mcpServers"]
+
+    # --- final instruction -------------------------------------------------
+
+    def test_prints_restart_instruction(self, tmp_path, monkeypatch):
+        self._make_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["init", "--yes"])
+        assert "Restart your AI coding assistant to activate slurp" in result.output.replace(
+            "restart", "Restart"
+        )
+
+    def test_init_appears_in_help(self):
+        result = _runner().invoke(cli, ["--help"])
+        assert "init" in result.output
