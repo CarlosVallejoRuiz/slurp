@@ -4,7 +4,7 @@
 
 # slurp
 
-![tests](https://img.shields.io/badge/tests-1038%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-1099%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 ![pypi](https://img.shields.io/badge/PyPI-slurp--graph-orange)
@@ -248,7 +248,105 @@ Every query is appended as a JSON line (unless `--no-audit` is passed). Useful f
 
 ### `slurp diff`
 
-Compare two graph versions and report the impact of changes.
+**Know exactly what changed — and what it affects.**
+
+A `git diff` tells you which lines moved. It cannot tell you that the helper you
+just renamed is called from eleven other modules, or that the function you deleted
+was the only caller keeping a service alive. `slurp diff` compares two versions of
+your knowledge graph and reports the **blast radius**: what changed, what sits
+downstream of it, and which nodes are central enough that a reviewer should look
+at them by hand.
+
+#### The workflow: before you merge
+
+Index both sides of the change and diff them:
+
+```bash
+git checkout main       && slurp index . --output main.json
+git checkout feature/auth-refactor && slurp index . --output feature.json
+
+slurp diff main.json feature.json --viz
+```
+
+The `--viz` flag opens an interactive graph where the change is colour-coded:
+**green** for added nodes, **red** for removed, **yellow** for modified, and
+**grey** for untouched neighbors that are still connected to the change. You can
+see at a glance whether your refactor touched one isolated corner or pulled on a
+thread running through half the codebase.
+
+#### Text output
+
+Without `--viz` you get a Markdown impact report — pipe it into a PR description,
+a review checklist, or your AI assistant:
+
+```
+# Slurp Diff — Impact Analysis
+
+## Summary
+- **⚠️ High impact change**
+- **Impact score:** 0.7412 (🔴 high)
+- 3 nodes added · 1 removed · 2 modified
+- 5 edges added · 2 removed
+- 9 nodes in risk neighborhood
+
+## Added Nodes (3)
+
+### refresh_token (function)
+Issues a new JWT from a valid refresh token.
+→ File: src/auth/tokens.py
+
+## Removed Nodes (1)
+
+### legacy_session_check
+
+## Modified Nodes (2)
+
+### authenticate_user (function)
+### JWTMiddleware (class)
+
+## Affected Edges
+
+**Added (5):**
+- login_handler → calls → refresh_token
+- JWTMiddleware → calls → refresh_token
+
+**Removed (2):**
+- login_handler → legacy_session_check
+
+## Nodes at Risk
+Direct neighbors of changed nodes:
+
+- login_handler (function) · centrality: 0.0841
+- UserModel (class) · centrality: 0.0663
+- api_router (module) · centrality: 0.0512
+
+## What to review
+Most connected nodes in the blast radius — review these first:
+
+1. login_handler (function) · centrality: 0.0841 · src/api/login.py
+2. UserModel (class) · centrality: 0.0663 · src/models.py
+3. api_router (module) · centrality: 0.0512 · src/api/router.py
+4. JWTMiddleware (class) · centrality: 0.0447 · src/middleware/jwt.py
+5. authenticate_user (function) · centrality: 0.0391 · src/auth/service.py
+```
+
+The run finishes with a colour-coded summary panel and, if you did not pass
+`--viz`, the exact command to see the full picture:
+
+```
+╭─────────────── Impact Summary ───────────────╮
+│                                              │
+│  ⚠️ High impact change  (impact score 0.7412) │
+│                                              │
+│  +3 added  -1 removed  ~2 modified           │
+│                                              │
+│  See the full blast radius:                  │
+│    slurp diff main.json feature.json --viz   │
+│                                              │
+╰──────────────────────────────────────────────╯
+```
+
+#### Flags
 
 ```bash
 slurp diff old.json new.json
@@ -264,7 +362,12 @@ slurp diff old.json new.json --viz-output reports/impact.html
 | `--viz-output PATH` | — | Save visualization HTML to file (without opening browser). |
 | `--budget`, `-b` | none | Token budget; selects the most relevant nodes from the affected area. |
 
-Reports added/removed/modified nodes and edges, computes an impact score based on centrality, and optionally opens a diff-colored visualization (green=added, red=removed, yellow=modified, grey=unchanged). Pass `--budget` to further select the most relevant affected nodes.
+Impact score is computed from the centrality of the changed nodes — changing a
+leaf scores near zero, changing a hub scores high. `--hops` controls how far the
+blast radius is traced; `--budget` narrows the affected area down to what fits a
+token budget, so you can hand exactly the relevant slice to a reviewer or an LLM.
+
+> **This is the only tool that shows you the blast radius of your code changes before you merge.**
 
 ---
 

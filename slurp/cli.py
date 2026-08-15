@@ -419,7 +419,7 @@ def diff_cmd(
         raise click.ClickException(str(exc)) from exc
 
     diff = diff_graphs(G_old, G_new)
-    click.echo(format_diff(diff, G_new))
+    click.echo(format_diff(diff, G_new, hops=hops))
 
     if budget is not None:
         sub = affected_subgraph(G_new, diff, hops)
@@ -444,6 +444,57 @@ def diff_cmd(
             f"~{len(diff.modified_nodes)}"
         )
         _deliver_viz(build_html(viz_G, viz_stats, viz_scores, query), viz, viz_output)
+
+    if diff.has_changes:
+        _echo_rich(_build_diff_panel(diff, old_graph, new_graph, hops, suggest_viz=not viz))
+
+
+def _build_diff_panel(
+    diff,
+    old_graph: str,
+    new_graph: str,
+    hops: int,
+    suggest_viz: bool,
+) -> Panel:
+    """Summary panel shown after a diff report.
+
+    Args:
+        diff: GraphDiff produced by diff_graphs.
+        old_graph: Path string of the old graph, for the suggested command.
+        new_graph: Path string of the new graph, for the suggested command.
+        hops: Neighborhood depth the report was run with.
+        suggest_viz: Whether to append the --viz suggestion.
+    """
+    from slurp.diff import impact_headline
+
+    if diff.impact_score > 0.7:
+        colour, border = "bold red", "red"
+    elif diff.impact_score > 0.3:
+        colour, border = "bold yellow", "yellow"
+    else:
+        colour, border = "bold green", "green"
+
+    body = [
+        f"[{colour}]{impact_headline(diff.impact_score)}[/]  "
+        f"[dim](impact score {diff.impact_score:.4f})[/]",
+        "",
+        f"[green]+{len(diff.added_nodes)} added[/]  "
+        f"[red]-{len(diff.removed_nodes)} removed[/]  "
+        f"[yellow]~{len(diff.modified_nodes)} modified[/]",
+    ]
+
+    if suggest_viz:
+        body.append("")
+        body.append("See the full blast radius:")
+        hops_arg = f" --hops {hops}" if hops != 2 else ""
+        body.append(f"  [cyan]slurp diff {old_graph} {new_graph}{hops_arg} --viz[/]")
+
+    return Panel(
+        "\n".join(body),
+        title="Impact Summary",
+        border_style=border,
+        padding=(1, 2),
+    )
 
 
 @cli.command("export")

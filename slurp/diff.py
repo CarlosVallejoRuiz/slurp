@@ -144,15 +144,90 @@ def affected_subgraph(
     return G.subgraph(visited).copy()
 
 
-def format_diff(diff: GraphDiff, G_new: nx.DiGraph) -> str:
+# DECISION: one severity band drives both the headline and the score label, so
+# the two lines of the summary can never disagree. Thresholds are inclusive
+# (>=) to match the label logic these bands were unified with.
+_HEADLINES = {
+    "high": "⚠️ High impact change",
+    "medium": "⚡ Medium impact change",
+    "low": "✅ Low impact change",
+}
+_SCORE_LABELS = {"high": "🔴 high", "medium": "🟡 medium", "low": "🟢 low"}
+
+
+def impact_severity(impact_score: float) -> str:
+    """Severity band for an impact score.
+
+    Args:
+        impact_score: GraphDiff.impact_score, in [0, 1].
+
+    Returns:
+        One of 'high' (>= 0.5), 'medium' (>= 0.2), or 'low'.
+    """
+    if impact_score >= 0.5:
+        return "high"
+    if impact_score >= 0.2:
+        return "medium"
+    return "low"
+
+
+def impact_headline(impact_score: float) -> str:
+    """One-line verdict on how risky a change is.
+
+    Args:
+        impact_score: GraphDiff.impact_score, in [0, 1].
+
+    Returns:
+        Headline string with a severity marker.
+    """
+    return _HEADLINES[impact_severity(impact_score)]
+
+
+def review_candidates(
+    G_new: nx.DiGraph,
+    diff: GraphDiff,
+    hops: int = 2,
+    limit: int = 5,
+) -> list[tuple[str, float]]:
+    """Rank the affected neighborhood by how central its nodes are.
+
+    DECISION: nodes come from the affected subgraph, but centrality is measured
+    on the full graph — a node's blast radius is how connected it is in the whole
+    codebase, not within the slice we happen to be showing.
+
+    Args:
+        G_new: Current graph.
+        diff:  Diff produced by diff_graphs.
+        hops:  Neighborhood expansion depth for the affected subgraph.
+        limit: Maximum number of nodes to return.
+
+    Returns:
+        List of (node_id, centrality) ordered by centrality descending, then by
+        node id for deterministic output.
+    """
+    affected = affected_subgraph(G_new, diff, hops=hops)
+    if affected.number_of_nodes() == 0:
+        return []
+
+    cent = _centrality(G_new)
+    ranked = sorted(
+        ((nid, cent.get(nid, 0.0)) for nid in affected.nodes),
+        key=lambda item: (-item[1], item[0]),
+    )
+    return ranked[:limit]
+
+
+def format_diff(diff: GraphDiff, G_new: nx.DiGraph, hops: int = 2) -> str:
     """Formats a GraphDiff as a Markdown impact report.
 
     Sections: executive summary, added/removed/modified nodes, affected edges,
-    and at-risk nodes (direct neighbors of changed nodes with their centrality).
+    at-risk nodes (direct neighbors of changed nodes with their centrality), and
+    a review shortlist ranked by centrality.
 
     Args:
         diff:  Diff produced by diff_graphs.
         G_new: Current graph (used for labels, types, and centrality).
+        hops:  Neighborhood depth used for the "What to review" shortlist.
 
     Returns:
         Markdown string.
@@ -163,11 +238,8 @@ def format_diff(diff: GraphDiff, G_new: nx.DiGraph) -> str:
 
     # --- Summary ---
     lines.append("## Summary")
-    impact_label = (
-        "🔴 high" if diff.impact_score >= 0.5
-        else "🟡 medium" if diff.impact_score >= 0.2
-        else "🟢 low"
-    )
+    impact_label = _SCORE_LABELS[impact_severity(diff.impact_score)]
+    lines.append(f"- **{impact_headline(diff.impact_score)}**")
     lines.append(f"- **Impact score:** {diff.impact_score:.4f} ({impact_label})")
     lines.append(
         f"- {len(diff.added_nodes)} nodes added · "
@@ -267,6 +339,25 @@ def format_diff(diff: GraphDiff, G_new: nx.DiGraph) -> str:
             if ntype:
                 entry += f" ({ntype})"
             entry += f" · centrality: {c:.4f}"
+            lines.append(entry)
+        lines.append("")
+
+    # --- What to review ---
+    if candidates := review_candidates(G_new, diff, hops=hops):
+        lines.append("## What to review")
+        lines.append("Most connected nodes in the blast radius — review these first:")
+        lines.append("")
+        for rank, (nid, c) in enumerate(candidates, 1):
+            attrs = G_new.nodes[nid] if nid in G_new else {}
+            label = attrs.get("label", nid)
+            ntype = attrs.get("type", "")
+            entry = f"{rank}. {label}"
+            if ntype:
+                entry += f" ({ntype})"
+            entry += f" · centrality: {c:.4f}"
+            fpath = attrs.get("file_path") or attrs.get("source_file") or ""
+            if fpath:
+                entry += f" · {fpath}"
             lines.append(entry)
         lines.append("")
 

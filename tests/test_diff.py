@@ -1,6 +1,7 @@
 """Tests for slurp/diff.py."""
 
 import json
+import re
 
 import networkx as nx
 import pytest
@@ -8,12 +9,17 @@ from click.testing import CliRunner
 
 from slurp.cli import cli
 from slurp.diff import (
+    _HEADLINES,
+    _SCORE_LABELS,
     GraphDiff,
     _centrality,
     affected_subgraph,
     build_diff_viz_graph,
     diff_graphs,
     format_diff,
+    impact_headline,
+    impact_severity,
+    review_candidates,
 )
 
 
@@ -548,3 +554,314 @@ class TestDiffCLI:
         html = path.read_text(encoding="utf-8") if path.exists() else ""
         assert "added" in html
         assert "removed" in html
+
+
+# ---------------------------------------------------------------------------
+# impact_headline
+# ---------------------------------------------------------------------------
+
+
+class TestImpactHeadline:
+    @pytest.mark.parametrize("score", [0.5, 0.75, 1.0])
+    def test_high_from_point_five(self, score):
+        assert impact_headline(score) == "⚠️ High impact change"
+
+    @pytest.mark.parametrize("score", [0.2, 0.35, 0.49])
+    def test_medium_between_point_two_and_point_five(self, score):
+        assert impact_headline(score) == "⚡ Medium impact change"
+
+    @pytest.mark.parametrize("score", [0.0, 0.1, 0.19])
+    def test_low_below_point_two(self, score):
+        assert impact_headline(score) == "✅ Low impact change"
+
+    def test_boundaries_are_inclusive(self):
+        """0.5 and 0.2 belong to the upper band, matching the score label."""
+        assert impact_headline(0.5) == "⚠️ High impact change"
+        assert impact_headline(0.2) == "⚡ Medium impact change"
+
+
+class TestImpactSeverity:
+    @pytest.mark.parametrize("score,band", [
+        (0.0, "low"), (0.19, "low"),
+        (0.2, "medium"), (0.49, "medium"),
+        (0.5, "high"), (1.0, "high"),
+    ])
+    def test_bands(self, score, band):
+        assert impact_severity(score) == band
+
+    @pytest.mark.parametrize("score", [0.0, 0.19, 0.2, 0.3, 0.49, 0.5, 0.7, 1.0])
+    def test_headline_and_score_label_always_agree(self, score, graphs):
+        """The whole point of unifying the scales: no contradictory summary."""
+        _, G_new = graphs
+        diff = diff_graphs(*graphs)
+        diff.impact_score = score
+        out = format_diff(diff, G_new)
+        band = impact_severity(score)
+        assert _HEADLINES[band] in out
+        assert _SCORE_LABELS[band] in out
+
+    @pytest.mark.parametrize("score", [0.5, 0.2])
+    def test_no_contradiction_at_the_boundaries(self, score, graphs):
+        """A strict > would have made these two lines disagree."""
+        _, G_new = graphs
+        diff = diff_graphs(*graphs)
+        diff.impact_score = score
+        out = format_diff(diff, G_new)
+        summary = out.split("## Summary")[1].split("##")[0]
+        highs = ("⚠️ High impact change" in summary, "🔴 high" in summary)
+        mediums = ("⚡ Medium impact change" in summary, "🟡 medium" in summary)
+        assert highs[0] == highs[1]
+        assert mediums[0] == mediums[1]
+
+
+# ---------------------------------------------------------------------------
+# review_candidates
+# ---------------------------------------------------------------------------
+
+
+class TestReviewCandidates:
+    def test_returns_list_of_pairs(self, graphs):
+        G_old, G_new = graphs
+        out = review_candidates(G_new, diff_graphs(G_old, G_new))
+        assert all(isinstance(nid, str) and isinstance(c, float) for nid, c in out)
+
+    def test_limits_to_five_by_default(self):
+        G_old = nx.DiGraph()
+        G_old.add_node("hub", label="Hub")
+        G_new = nx.DiGraph()
+        G_new.add_node("hub", label="Hub")
+        for i in range(20):
+            G_new.add_node(f"n{i}", label=f"N{i}")
+            G_new.add_edge("hub", f"n{i}")
+        out = review_candidates(G_new, diff_graphs(G_old, G_new))
+        assert len(out) <= 5
+
+    def test_limit_is_configurable(self, graphs):
+        G_old, G_new = graphs
+        out = review_candidates(G_new, diff_graphs(G_old, G_new), limit=1)
+        assert len(out) <= 1
+
+    def test_ordered_by_centrality_descending(self):
+        G_old = nx.DiGraph()
+        G_old.add_node("seed", label="Seed")
+        G_new = nx.DiGraph()
+        G_new.add_node("seed", label="Seed")
+        G_new.add_node("hub", label="Hub")
+        G_new.add_node("leaf", label="Leaf")
+        G_new.add_edge("seed", "hub")
+        G_new.add_edge("hub", "leaf")
+        G_new.add_edge("hub", "seed")
+        out = review_candidates(G_new, diff_graphs(G_old, G_new))
+        scores = [c for _, c in out]
+        assert scores == sorted(scores, reverse=True)
+
+    def test_empty_when_no_changes(self, graphs):
+        _, G_new = graphs
+        assert review_candidates(G_new, diff_graphs(G_new, G_new)) == []
+
+    def test_empty_graph_returns_empty(self):
+        empty = nx.DiGraph()
+        assert review_candidates(empty, diff_graphs(empty, empty)) == []
+
+    def test_only_includes_affected_nodes(self, graphs):
+        G_old, G_new = graphs
+        diff = diff_graphs(G_old, G_new)
+        affected = set(affected_subgraph(G_new, diff).nodes)
+        assert all(nid in affected for nid, _ in review_candidates(G_new, diff))
+
+    def test_hops_widens_the_candidate_pool(self, chain_graph):
+        G_old = chain_graph.copy()
+        G_old.remove_node("a")
+        G_new = chain_graph
+        diff = diff_graphs(G_old, G_new)
+        near = review_candidates(G_new, diff, hops=1, limit=99)
+        far = review_candidates(G_new, diff, hops=3, limit=99)
+        assert len(far) >= len(near)
+
+    def test_deterministic_for_tied_centrality(self):
+        G_old = nx.DiGraph()
+        G_old.add_node("seed", label="Seed")
+        G_new = nx.DiGraph()
+        G_new.add_node("seed", label="Seed")
+        for name in ("z", "y", "x"):
+            G_new.add_node(name, label=name.upper())
+            G_new.add_edge("seed", name)
+        first = review_candidates(G_new, diff_graphs(G_old, G_new))
+        second = review_candidates(G_new, diff_graphs(G_old, G_new))
+        assert first == second
+
+
+# ---------------------------------------------------------------------------
+# format_diff — impact headline and "What to review"
+# ---------------------------------------------------------------------------
+
+
+class TestFormatDiffImpactHeadline:
+    def test_headline_present_in_summary(self, graphs):
+        G_old, G_new = graphs
+        out = format_diff(diff_graphs(G_old, G_new), G_new)
+        assert "impact change" in out
+
+    def test_headline_appears_before_impact_score(self, graphs):
+        G_old, G_new = graphs
+        out = format_diff(diff_graphs(G_old, G_new), G_new)
+        assert out.index("impact change") < out.index("**Impact score:**")
+
+    def test_high_score_shows_high_headline(self, graphs):
+        _, G_new = graphs
+        diff = diff_graphs(*graphs)
+        diff.impact_score = 0.95
+        assert "⚠️ High impact change" in format_diff(diff, G_new)
+
+    def test_medium_score_shows_medium_headline(self, graphs):
+        _, G_new = graphs
+        diff = diff_graphs(*graphs)
+        diff.impact_score = 0.35
+        assert "⚡ Medium impact change" in format_diff(diff, G_new)
+
+    def test_low_score_shows_low_headline(self, graphs):
+        _, G_new = graphs
+        diff = diff_graphs(*graphs)
+        diff.impact_score = 0.01
+        assert "✅ Low impact change" in format_diff(diff, G_new)
+
+    def test_headline_shown_even_with_no_changes(self, graphs):
+        _, G_new = graphs
+        out = format_diff(diff_graphs(G_new, G_new), G_new)
+        assert "impact change" in out
+
+
+class TestFormatDiffWhatToReview:
+    def test_section_present_when_changes_exist(self, graphs):
+        G_old, G_new = graphs
+        out = format_diff(diff_graphs(G_old, G_new), G_new)
+        assert "## What to review" in out
+
+    def test_section_absent_when_no_changes(self, graphs):
+        _, G_new = graphs
+        out = format_diff(diff_graphs(G_new, G_new), G_new)
+        assert "## What to review" not in out
+
+    def test_section_has_explanatory_line(self, graphs):
+        G_old, G_new = graphs
+        out = format_diff(diff_graphs(G_old, G_new), G_new)
+        assert "blast radius" in out
+
+    def test_entries_are_numbered(self, graphs):
+        G_old, G_new = graphs
+        out = format_diff(diff_graphs(G_old, G_new), G_new)
+        section = out.split("## What to review")[1]
+        assert re.search(r"^1\. ", section, re.MULTILINE)
+
+    def test_lists_at_most_five(self):
+        G_old = nx.DiGraph()
+        G_old.add_node("hub", label="Hub")
+        G_new = nx.DiGraph()
+        G_new.add_node("hub", label="Hub")
+        for i in range(20):
+            G_new.add_node(f"n{i}", label=f"Node{i}")
+            G_new.add_edge("hub", f"n{i}")
+        out = format_diff(diff_graphs(G_old, G_new), G_new)
+        section = out.split("## What to review")[1]
+        assert len(re.findall(r"^\d+\. ", section, re.MULTILINE)) <= 5
+
+    def test_entries_show_centrality(self, graphs):
+        G_old, G_new = graphs
+        out = format_diff(diff_graphs(G_old, G_new), G_new)
+        section = out.split("## What to review")[1]
+        assert "centrality:" in section
+
+    def test_entries_use_labels_not_ids(self, graphs):
+        G_old, G_new = graphs
+        out = format_diff(diff_graphs(G_old, G_new), G_new)
+        section = out.split("## What to review")[1]
+        assert "NodeD" in section or "NodeA_v2" in section or "NodeB" in section
+
+    def test_entries_show_node_type(self, graphs):
+        G_old, G_new = graphs
+        out = format_diff(diff_graphs(G_old, G_new), G_new)
+        section = out.split("## What to review")[1]
+        assert "(module)" in section or "(function)" in section or "(class)" in section
+
+    def test_entries_show_file_path_when_present(self):
+        G_old = nx.DiGraph()
+        G_old.add_node("seed", label="Seed")
+        G_new = nx.DiGraph()
+        G_new.add_node("seed", label="Seed")
+        G_new.add_node("new", label="NewNode", type="function", file_path="src/new.py")
+        G_new.add_edge("seed", "new")
+        out = format_diff(diff_graphs(G_old, G_new), G_new)
+        assert "src/new.py" in out.split("## What to review")[1]
+
+    def test_section_comes_last(self, graphs):
+        G_old, G_new = graphs
+        out = format_diff(diff_graphs(G_old, G_new), G_new)
+        assert out.index("## What to review") > out.index("## Summary")
+        for section in ("## Added Nodes", "## Affected Edges"):
+            if section in out:
+                assert out.index("## What to review") > out.index(section)
+
+    def test_hops_parameter_is_honoured(self, chain_graph):
+        G_old = chain_graph.copy()
+        G_old.remove_node("a")
+        G_new = chain_graph
+        diff = diff_graphs(G_old, G_new)
+        near = format_diff(diff, G_new, hops=1).split("## What to review")[1]
+        far = format_diff(diff, G_new, hops=4).split("## What to review")[1]
+        assert len(re.findall(r"^\d+\. ", far, re.MULTILINE)) >= len(
+            re.findall(r"^\d+\. ", near, re.MULTILINE)
+        )
+
+    def test_default_hops_is_two(self, chain_graph):
+        G_old = chain_graph.copy()
+        G_old.remove_node("a")
+        G_new = chain_graph
+        diff = diff_graphs(G_old, G_new)
+        assert format_diff(diff, G_new) == format_diff(diff, G_new, hops=2)
+
+
+class TestDiffCLIPanel:
+    def test_panel_shown_when_changes(self, old_graph_json, new_graph_json):
+        result = CliRunner().invoke(cli, ["diff", str(old_graph_json), str(new_graph_json)])
+        assert result.exit_code == 0, result.output
+        assert "Impact Summary" in result.output
+
+    def test_panel_absent_when_no_changes(self, new_graph_json):
+        result = CliRunner().invoke(cli, ["diff", str(new_graph_json), str(new_graph_json)])
+        assert "Impact Summary" not in result.output
+
+    def test_panel_shows_counts(self, old_graph_json, new_graph_json):
+        result = CliRunner().invoke(cli, ["diff", str(old_graph_json), str(new_graph_json)])
+        assert "added" in result.output
+        assert "removed" in result.output
+        assert "modified" in result.output
+
+    def test_panel_shows_headline(self, old_graph_json, new_graph_json):
+        result = CliRunner().invoke(cli, ["diff", str(old_graph_json), str(new_graph_json)])
+        assert "impact change" in result.output
+
+    def test_suggests_viz_when_not_used(self, old_graph_json, new_graph_json):
+        result = CliRunner().invoke(cli, ["diff", str(old_graph_json), str(new_graph_json)])
+        assert "See the full blast radius" in result.output
+        assert "--viz" in result.output
+
+    def test_no_suggestion_when_viz_used(self, old_graph_json, new_graph_json, monkeypatch):
+        monkeypatch.setattr("webbrowser.open", lambda url: None)
+        result = CliRunner().invoke(
+            cli, ["diff", str(old_graph_json), str(new_graph_json), "--viz"]
+        )
+        assert "See the full blast radius" not in result.output
+
+    def test_viz_output_alone_still_suggests_viz(self, old_graph_json, new_graph_json,
+                                                 tmp_path):
+        result = CliRunner().invoke(cli, [
+            "diff", str(old_graph_json), str(new_graph_json),
+            "--viz-output", str(tmp_path / "d.html"),
+        ])
+        assert "See the full blast radius" in result.output
+
+    def test_suggestion_includes_hops_when_non_default(self, old_graph_json, new_graph_json):
+        result = CliRunner().invoke(cli, [
+            "diff", str(old_graph_json), str(new_graph_json), "--hops", "3",
+        ])
+        assert "--hops 3" in result.output
