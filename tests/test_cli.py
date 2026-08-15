@@ -9,6 +9,7 @@ import networkx as nx
 import pytest
 from click.testing import CliRunner
 
+from slurp import __version__
 from slurp.cli import cli
 from slurp.viz import build_html
 
@@ -33,7 +34,7 @@ class TestVersion:
 
     def test_version_output_contains_version_string(self):
         result = _runner().invoke(cli, ["--version"])
-        assert "0.1.0" in result.output
+        assert __version__ in result.output
 
     def test_version_output_contains_slurp(self):
         result = _runner().invoke(cli, ["--version"])

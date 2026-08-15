@@ -16,6 +16,24 @@ from slurp.scorer import score_nodes
 
 _PROTOCOL_VERSION = "2024-11-05"
 
+# DECISION: min_score mirrors the CLI default (see cli.py --min-score) so the
+# same query returns the same subgraph through MCP and through the terminal.
+# The library default is 0.0, which would select hundreds of irrelevant nodes.
+_MIN_SCORE = 0.15
+
+_INSTRUCTIONS = (
+    "Slurp serves token-budget-aware slices of a codebase knowledge graph.\n\n"
+    "Call slurp_query before reading files when you need to orient yourself in "
+    "an unfamiliar codebase, locate the code responsible for a feature, or "
+    "understand how components relate. It returns only the most relevant nodes "
+    "that fit the token budget, so it is far cheaper than reading files "
+    "speculatively.\n\n"
+    "Pass a natural-language description of what you are looking for (for "
+    "example 'user authentication flow'), not a filename or a bare keyword. "
+    "Raise the budget when you need broader context; lower it when you only "
+    "need a pointer to the right area."
+)
+
 _TOOL_DEFINITION = {
     "name": "slurp_query",
     "description": (
@@ -23,6 +41,15 @@ _TOOL_DEFINITION = {
         "within a token budget. Returns structured markdown with selected "
         "nodes, their relationships, and token usage statistics."
     ),
+    # DECISION: annotations let clients auto-approve the call — slurp_query
+    # only reads a graph loaded at startup, so it is read-only and idempotent.
+    "annotations": {
+        "title": "Slurp graph query",
+        "readOnlyHint": True,
+        "idempotentHint": True,
+        "destructiveHint": False,
+        "openWorldHint": False,
+    },
     "inputSchema": {
         "type": "object",
         "properties": {
@@ -52,6 +79,17 @@ def _ok(request_id, result: dict) -> dict:
 
 def _err(request_id, code: int, message: str) -> dict:
     return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
+
+
+def _tool_err(request_id, message: str) -> dict:
+    """Build a tool-execution error.
+
+    DECISION: MCP separates protocol errors (JSON-RPC "error") from tool
+    failures (a normal result carrying isError). Tool failures are handed back
+    to the model so it can retry with different arguments, whereas a JSON-RPC
+    error is surfaced to the user and read by some clients as a broken server.
+    """
+    return _ok(request_id, {"content": [{"type": "text", "text": message}], "isError": True})
 
 
 def _write(obj: dict, out) -> None:
@@ -94,6 +132,7 @@ def _handle(msg: dict, G, out) -> None:
                 "protocolVersion": _PROTOCOL_VERSION,
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": "slurp", "version": __version__},
+                "instructions": _INSTRUCTIONS,
             }),
             out,
         )
@@ -103,6 +142,19 @@ def _handle(msg: dict, G, out) -> None:
 
     elif method == "tools/list":
         _write(_ok(msg_id, {"tools": [_TOOL_DEFINITION]}), out)
+
+    # DECISION: slurp exposes no resources or prompts, so per spec these
+    # methods could return -32601. Several clients probe them at startup
+    # regardless of advertised capabilities and treat the error as a failing
+    # server, so answer with empty lists instead.
+    elif method == "resources/list":
+        _write(_ok(msg_id, {"resources": []}), out)
+
+    elif method == "resources/templates/list":
+        _write(_ok(msg_id, {"resourceTemplates": []}), out)
+
+    elif method == "prompts/list":
+        _write(_ok(msg_id, {"prompts": []}), out)
 
     elif method == "tools/call":
         name = params.get("name")
@@ -128,9 +180,17 @@ def _handle(msg: dict, G, out) -> None:
             _write(_err(msg_id, -32603, "Graph not loaded"), out)
             return
 
-        scores = score_nodes(G, query)
-        subG, stats = select_subgraph(G, scores, budget=budget)
-        text = format_subgraph(subG, stats, format="markdown", scores=scores, query=query)
+        # DECISION: any failure inside scoring/selection/formatting used to
+        # propagate out of the read loop and kill the server, leaving the
+        # in-flight request unanswered and the client staring at a dead pipe.
+        # Report it as a tool error instead so the session survives.
+        try:
+            scores = score_nodes(G, query)
+            subG, stats = select_subgraph(G, scores, budget=budget, min_score=_MIN_SCORE)
+            text = format_subgraph(subG, stats, format="markdown", scores=scores, query=query)
+        except Exception as exc:
+            _write(_tool_err(msg_id, f"slurp_query failed: {type(exc).__name__}: {exc}"), out)
+            return
 
         _write(
             _ok(msg_id, {"content": [{"type": "text", "text": text}]}),
