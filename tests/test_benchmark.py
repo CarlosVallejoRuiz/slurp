@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+import json
+import re
+
 import pytest
 import networkx as nx
 
 from slurp.benchmark import (
+    MODEL_PRICES_PER_MTok,
     BenchmarkResult,
     QueryBudgetResult,
+    _cost_usd,
     _full_graph_tokens,
     _percentile,
+    _savings_pct,
     format_benchmark,
+    price_per_mtok,
     run_benchmark,
 )
 
@@ -499,3 +506,253 @@ class TestBenchmarkCLI:
         ])
         assert result.exit_code == 0
         assert "%" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Cost estimation
+# ---------------------------------------------------------------------------
+
+
+class TestPriceTable:
+    def test_default_key_exists(self):
+        assert "default" in MODEL_PRICES_PER_MTok
+
+    def test_every_price_is_positive(self):
+        assert all(p > 0 for p in MODEL_PRICES_PER_MTok.values())
+
+    @pytest.mark.parametrize("model,expected", [
+        ("claude-opus-5", 5.0),
+        ("claude-sonnet-5", 3.0),
+        ("claude-haiku-4-5", 1.0),
+        ("gpt-4o", 5.0),
+        ("gpt-4o-mini", 0.15),
+        ("gpt-4.1", 2.0),
+        ("gemini-2.0-flash", 0.10),
+        ("default", 3.0),
+    ])
+    def test_price_lookup(self, model, expected):
+        assert price_per_mtok(model) == expected
+
+    def test_unknown_model_raises(self):
+        with pytest.raises(ValueError, match="Unknown pricing model"):
+            price_per_mtok("gpt-9-turbo-ultra")
+
+    def test_unknown_model_error_lists_known_models(self):
+        with pytest.raises(ValueError, match="claude-sonnet-5"):
+            price_per_mtok("nope")
+
+
+class TestCostCalculation:
+    def test_one_million_tokens_costs_exactly_the_price(self):
+        assert _cost_usd(1_000_000, 3.0) == pytest.approx(3.0)
+
+    def test_zero_tokens_costs_nothing(self):
+        assert _cost_usd(0, 15.0) == 0.0
+
+    def test_cost_scales_linearly(self):
+        assert _cost_usd(500_000, 3.0) == pytest.approx(1.5)
+
+    def test_cost_uses_the_selected_model_price(self, simple_graph, single_query, single_budget):
+        cheap = run_benchmark(simple_graph, single_query, single_budget,
+                              model_price="gemini-2.0-flash")
+        pricey = run_benchmark(simple_graph, single_query, single_budget,
+                               model_price="claude-opus-5")
+        assert pricey.total_cost_slurp_usd > cheap.total_cost_slurp_usd
+
+    def test_cost_ratio_matches_price_ratio(self, simple_graph, single_query, single_budget):
+        a = run_benchmark(simple_graph, single_query, single_budget, model_price="gpt-4.1")
+        b = run_benchmark(simple_graph, single_query, single_budget, model_price="gpt-4o")
+        assert b.total_cost_full_usd / a.total_cost_full_usd == pytest.approx(5.0 / 2.0)
+
+
+class TestQueryBudgetResultCostFields:
+    def test_has_cost_slurp_field(self, simple_graph, single_query, single_budget):
+        result = run_benchmark(simple_graph, single_query, single_budget)
+        assert hasattr(result.rows[0], "cost_slurp_usd")
+
+    def test_has_cost_full_field(self, simple_graph, single_query, single_budget):
+        result = run_benchmark(simple_graph, single_query, single_budget)
+        assert hasattr(result.rows[0], "cost_full_usd")
+
+    def test_cost_fields_default_to_zero(self):
+        row = QueryBudgetResult(
+            query="q", budget=1000, tokens_slurp=10, tokens_full=100,
+            savings_pct=90.0, nodes_selected=1, nodes_total=5,
+            coverage_pct=20.0, precision=1.0,
+        )
+        assert row.cost_slurp_usd == 0.0
+        assert row.cost_full_usd == 0.0
+
+    def test_row_cost_matches_its_token_count(self, simple_graph, single_query, single_budget):
+        result = run_benchmark(simple_graph, single_query, single_budget, model_price="gpt-4o")
+        row = result.rows[0]
+        assert row.cost_slurp_usd == pytest.approx(_cost_usd(row.tokens_slurp, 5.0))
+
+    def test_full_cost_is_at_least_slurp_cost(self, simple_graph, multi_queries, multi_budgets):
+        result = run_benchmark(simple_graph, multi_queries, multi_budgets)
+        assert all(r.cost_full_usd >= r.cost_slurp_usd for r in result.rows)
+
+
+class TestBenchmarkResultCostTotals:
+    def test_totals_default_to_zero(self):
+        result = BenchmarkResult()
+        assert result.total_cost_slurp_usd == 0.0
+        assert result.total_cost_full_usd == 0.0
+        assert result.total_savings_usd == 0.0
+
+    def test_default_model_price_is_default(self):
+        assert BenchmarkResult().model_price == "default"
+
+    def test_totals_sum_the_rows(self, simple_graph, multi_queries, multi_budgets):
+        result = run_benchmark(simple_graph, multi_queries, multi_budgets)
+        assert result.total_cost_slurp_usd == pytest.approx(
+            sum(r.cost_slurp_usd for r in result.rows)
+        )
+        assert result.total_cost_full_usd == pytest.approx(
+            sum(r.cost_full_usd for r in result.rows)
+        )
+
+    def test_savings_is_the_difference(self, simple_graph, multi_queries, multi_budgets):
+        result = run_benchmark(simple_graph, multi_queries, multi_budgets)
+        assert result.total_savings_usd == pytest.approx(
+            result.total_cost_full_usd - result.total_cost_slurp_usd
+        )
+
+    def test_savings_is_positive(self, simple_graph, multi_queries, multi_budgets):
+        result = run_benchmark(simple_graph, multi_queries, multi_budgets)
+        assert result.total_savings_usd > 0
+
+    def test_model_price_is_recorded(self, simple_graph, single_query, single_budget):
+        result = run_benchmark(simple_graph, single_query, single_budget,
+                               model_price="claude-haiku-4-5")
+        assert result.model_price == "claude-haiku-4-5"
+
+    def test_costs_serialize_to_dict(self, simple_graph, single_query, single_budget):
+        d = run_benchmark(simple_graph, single_query, single_budget).to_dict()
+        for key in ("total_cost_slurp_usd", "total_cost_full_usd",
+                    "total_savings_usd", "model_price"):
+            assert key in d
+
+    def test_empty_run_records_model_price(self, simple_graph):
+        result = run_benchmark(simple_graph, [], [], model_price="gpt-4o")
+        assert result.model_price == "gpt-4o"
+        assert result.total_savings_usd == 0.0
+
+    def test_unknown_price_model_raises_before_running(self, simple_graph, single_query,
+                                                       single_budget):
+        with pytest.raises(ValueError, match="Unknown pricing model"):
+            run_benchmark(simple_graph, single_query, single_budget, model_price="bogus")
+
+
+class TestFormatBenchmarkCosts:
+    def test_shows_cost_slurp_column(self, simple_graph, single_query, single_budget):
+        out = format_benchmark(run_benchmark(simple_graph, single_query, single_budget))
+        assert "Cost (slurp)" in out
+
+    def test_shows_cost_full_column(self, simple_graph, single_query, single_budget):
+        out = format_benchmark(run_benchmark(simple_graph, single_query, single_budget))
+        assert "Cost (full)" in out
+
+    def test_costs_are_dollar_formatted(self, simple_graph, single_query, single_budget):
+        out = format_benchmark(run_benchmark(simple_graph, single_query, single_budget))
+        assert re.search(r"\$\d+\.\d{4}", out)
+
+    def test_summary_has_cost_with_slurp(self, simple_graph, single_query, single_budget):
+        out = format_benchmark(run_benchmark(simple_graph, single_query, single_budget))
+        assert "Cost with slurp" in out
+
+    def test_summary_has_cost_without_slurp(self, simple_graph, single_query, single_budget):
+        out = format_benchmark(run_benchmark(simple_graph, single_query, single_budget))
+        assert "Cost without slurp" in out
+
+    def test_summary_has_money_saved(self, simple_graph, single_query, single_budget):
+        out = format_benchmark(run_benchmark(simple_graph, single_query, single_budget))
+        assert "Money saved" in out
+
+    def test_money_saved_shows_a_percentage(self, simple_graph, single_query, single_budget):
+        out = format_benchmark(run_benchmark(simple_graph, single_query, single_budget))
+        assert re.search(r"Money saved.*%", out, re.DOTALL)
+
+    def test_header_names_the_pricing_model(self, simple_graph, single_query, single_budget):
+        out = format_benchmark(
+            run_benchmark(simple_graph, single_query, single_budget,
+                          model_price="claude-haiku-4-5")
+        )
+        assert "claude-haiku-4-5" in out
+
+    def test_header_shows_the_price(self, simple_graph, single_query, single_budget):
+        out = format_benchmark(
+            run_benchmark(simple_graph, single_query, single_budget, model_price="gpt-4o")
+        )
+        assert "$5/MTok" in out
+
+    def test_empty_result_still_returns_message(self):
+        assert format_benchmark(BenchmarkResult()) == "No benchmark results."
+
+    def test_savings_pct_is_zero_when_no_cost(self):
+        assert _savings_pct(BenchmarkResult()) == 0.0
+
+    def test_savings_pct_matches_the_totals(self, simple_graph, multi_queries, multi_budgets):
+        result = run_benchmark(simple_graph, multi_queries, multi_budgets)
+        expected = result.total_savings_usd / result.total_cost_full_usd * 100
+        assert _savings_pct(result) == pytest.approx(expected)
+
+
+class TestPriceModelCLI:
+    def test_price_model_flag_accepted(self, sample_graph_json):
+        result = _runner().invoke(cli, [
+            "benchmark", "--graph", str(sample_graph_json),
+            "-q", "auth", "--budget", "2000", "--price-model", "gpt-4o",
+        ])
+        assert result.exit_code == 0, result.output
+
+    def test_price_model_appears_in_output(self, sample_graph_json):
+        result = _runner().invoke(cli, [
+            "benchmark", "--graph", str(sample_graph_json),
+            "-q", "auth", "--budget", "2000", "--price-model", "claude-haiku-4-5",
+        ])
+        assert "claude-haiku-4-5" in result.output
+
+    def test_default_price_model_is_default(self, sample_graph_json):
+        result = _runner().invoke(cli, [
+            "benchmark", "--graph", str(sample_graph_json),
+            "-q", "auth", "--budget", "2000",
+        ])
+        assert result.exit_code == 0
+        assert "pricing: default" in result.output
+
+    def test_invalid_price_model_rejected(self, sample_graph_json):
+        result = _runner().invoke(cli, [
+            "benchmark", "--graph", str(sample_graph_json),
+            "-q", "auth", "--budget", "2000", "--price-model", "gpt-9",
+        ])
+        assert result.exit_code != 0
+
+    def test_cost_columns_render_in_cli_output(self, sample_graph_json):
+        result = _runner().invoke(cli, [
+            "benchmark", "--graph", str(sample_graph_json),
+            "-q", "auth", "--budget", "2000",
+        ])
+        assert "Cost (slurp)" in result.output
+        assert "Money saved" in result.output
+
+    def test_costs_saved_to_json_output(self, sample_graph_json, tmp_path):
+        out_path = tmp_path / "bench.json"
+        _runner().invoke(cli, [
+            "benchmark", "--graph", str(sample_graph_json),
+            "-q", "auth", "--budget", "2000", "--price-model", "gpt-4o",
+            "--output", str(out_path),
+        ])
+        data = json.loads(out_path.read_text(encoding="utf-8"))
+        assert data["model_price"] == "gpt-4o"
+        assert data["total_cost_full_usd"] > 0
+
+    def test_price_model_does_not_shadow_tiktoken_model(self, sample_graph_json):
+        """--model stays the tiktoken encoding; --price-model is separate."""
+        result = _runner().invoke(cli, [
+            "benchmark", "--graph", str(sample_graph_json),
+            "-q", "auth", "--budget", "2000",
+            "--model", "cl100k_base", "--price-model", "gpt-4o",
+        ])
+        assert result.exit_code == 0, result.output
+        assert "pricing: gpt-4o" in result.output

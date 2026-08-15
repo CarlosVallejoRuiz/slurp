@@ -13,6 +13,8 @@ from rich.table import Table
 
 from slurp import __version__
 from slurp.audit import log_query, read_audit, top_nodes_from_audit
+# Imported at module level because the --price-model choices are built at decoration time.
+from slurp.benchmark import MODEL_PRICES_PER_MTok
 from slurp.budget import select_subgraph
 from slurp.formatter import format_subgraph
 from slurp.ignore import apply_ignore, load_ignore
@@ -501,6 +503,9 @@ def export_cmd(
 @click.option("--backend", default="tfidf", show_default=True,
               type=click.Choice(["tfidf", "openai", "anthropic"]),
               help="Scoring backend. 'openai'/'anthropic' use real embeddings.")
+@click.option("--price-model", "model_price", default="default", show_default=True,
+              type=click.Choice(sorted(MODEL_PRICES_PER_MTok)),
+              help="Model whose input-token price is used for cost estimates.")
 def benchmark_cmd(
     graph: str | None,
     queries: tuple[str, ...],
@@ -509,6 +514,7 @@ def benchmark_cmd(
     output: str | None,
     min_score: float,
     backend: str,
+    model_price: str,
 ) -> None:
     """Measure token savings of slurp vs injecting the full graph."""
     from slurp.benchmark import format_benchmark, run_benchmark
@@ -531,6 +537,7 @@ def benchmark_cmd(
         model=model,
         min_score=min_score,
         backend=backend,
+        model_price=model_price,
     )
 
     click.echo(format_benchmark(result))
