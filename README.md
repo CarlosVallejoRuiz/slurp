@@ -202,6 +202,7 @@ slurp "prisma models" --backend openai
 | `--neighbor-decay` | `0.7` | Score multiplier applied to neighbors of each selected node. |
 | `--min-score` | `0.15` | Minimum relevance score; nodes below this are excluded before selection. |
 | `--viz` | off | Open an interactive graph visualization in the browser. |
+| `--viz-output PATH` | — | Save visualization HTML to file (without opening browser). |
 | `--ignore-file` | `.slurpignore` | Path to node exclusion rules. |
 | `--backend` | `tfidf` | Scoring backend: `tfidf` (default), `openai`, or `anthropic`. |
 | `--inject-code` | off | Embed source code blocks for each selected node (requires ≤30 nodes). |
@@ -253,7 +254,15 @@ Compare two graph versions and report the impact of changes.
 slurp diff old.json new.json
 slurp diff old.json new.json --hops 2 --viz
 slurp diff old.json new.json --budget 4000
+slurp diff old.json new.json --viz-output reports/impact.html
 ```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--hops` | `2` | Depth of impact neighborhood expansion. |
+| `--viz` | off | Open an interactive visualizer of the affected area in the browser. |
+| `--viz-output PATH` | — | Save visualization HTML to file (without opening browser). |
+| `--budget`, `-b` | none | Token budget; selects the most relevant nodes from the affected area. |
 
 Reports added/removed/modified nodes and edges, computes an impact score based on centrality, and optionally opens a diff-colored visualization (green=added, red=removed, yellow=modified, grey=unchanged). Pass `--budget` to further select the most relevant affected nodes.
 
