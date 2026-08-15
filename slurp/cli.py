@@ -578,7 +578,9 @@ def benchmark_cmd(
 @cli.command()
 @click.option("--graph", "-g", type=click.Path(), default=None,
               help="Path to graph.json (auto-discovered if omitted).")
-def serve(graph: str | None) -> None:
+@click.option("--log/--no-log", "log", default=True, show_default=True,
+              help="Append served queries to .slurp/session.log (only if .slurp/ exists).")
+def serve(graph: str | None, log: bool) -> None:
     """Start an MCP stdio server exposing the slurp_query tool."""
     graph_path = Path(graph) if graph else _find_graph()
     if graph_path is None:
@@ -586,7 +588,102 @@ def serve(graph: str | None) -> None:
             "No graph.json found. Pass --graph or run from a directory with graph.json."
         )
     import slurp.mcp as _mcp
-    _mcp.serve(graph_path)
+    _mcp.serve(graph_path, session_log=log)
+
+
+@cli.command("session")
+@click.option("--last", "last", default=20, show_default=True,
+              help="Number of most recent entries to show.")
+@click.option("--tail", is_flag=True, default=False,
+              help="Follow the log in real time (Ctrl+C to stop).")
+@click.option("--log-dir", "log_dir", default=".slurp", show_default=True,
+              help="Directory containing session.log.")
+def session_cmd(last: int, tail: bool, log_dir: str) -> None:
+    """Show queries your AI assistant sent to the slurp MCP server."""
+    import time
+
+    from slurp.mcp import SESSION_LOG_FILE, read_session_log
+
+    log_path = Path(log_dir) / SESSION_LOG_FILE
+    entries = read_session_log(Path(log_dir), last=last)
+
+    if not entries:
+        if not Path(log_dir).is_dir():
+            click.echo(
+                f"No session log: {log_dir}/ does not exist.\n"
+                "Run a query manually first — that creates it — then let your "
+                "assistant call slurp."
+            )
+        else:
+            click.echo(
+                f"No entries yet in {log_path}.\n"
+                "Start the MCP server with 'slurp serve' and let your assistant query it."
+            )
+        if not tail:
+            return
+
+    if entries:
+        _echo_rich(_build_session_table(entries, log_path))
+
+    if not tail:
+        return
+
+    # DECISION: seek to EOF rather than re-reading, so following a long log costs
+    # nothing and never re-prints what the table above already showed.
+    click.echo(f"\nFollowing {log_path} (Ctrl+C to stop)...")
+    try:
+        with log_path.open("r", encoding="utf-8") as fh:
+            fh.seek(0, 2)
+            while True:
+                line = fh.readline()
+                if not line:
+                    time.sleep(0.5)
+                    continue
+                click.echo(_format_session_line(line))
+    except FileNotFoundError:
+        raise click.ClickException(f"{log_path} disappeared while following it.")
+    except KeyboardInterrupt:
+        click.echo("\nStopped.")
+
+
+def _build_session_table(entries: list[dict], log_path: Path) -> Table:
+    """Render session log entries as a rich table."""
+    table = Table(
+        title=f"MCP Session Log — last {len(entries)} ({log_path})",
+        show_header=True,
+    )
+    table.add_column("Time")
+    table.add_column("Query", max_width=36)
+    table.add_column("Budget", justify="right")
+    table.add_column("Nodes", justify="right")
+    table.add_column("Tokens", justify="right")
+    table.add_column("Savings", justify="right")
+
+    for e in entries:
+        table.add_row(
+            str(e.get("ts", "")),
+            str(e.get("query", "")),
+            f"{e.get('budget', 0):,}",
+            str(e.get("nodes", 0)),
+            f"{e.get('tokens', 0):,}",
+            f"{e.get('savings_pct', 0)}%",
+        )
+    return table
+
+
+def _format_session_line(line: str) -> str:
+    """Format one raw log line for --tail output; passes through unparseable lines."""
+    import json as _json
+
+    try:
+        e = _json.loads(line)
+    except ValueError:
+        return line.rstrip("\n")
+    return (
+        f"{e.get('ts', '')}  {e.get('query', '')!r}  "
+        f"{e.get('nodes', 0)} nodes · {e.get('tokens', 0):,} tokens · "
+        f"{e.get('savings_pct', 0)}% saved"
+    )
 
 
 @cli.command("index")

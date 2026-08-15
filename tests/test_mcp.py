@@ -2,12 +2,22 @@
 
 import io
 import json
+from datetime import datetime
+from pathlib import Path
 
 import pytest
 
 from slurp import __version__
 from slurp.loader import load_graph
-from slurp.mcp import _PROTOCOL_VERSION, _TOOL_DEFINITION, _handle, serve
+from slurp.mcp import (
+    SESSION_LOG_FILE,
+    _PROTOCOL_VERSION,
+    _TOOL_DEFINITION,
+    _handle,
+    log_session,
+    read_session_log,
+    serve,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -469,3 +479,198 @@ class TestServe:
         texts = [r["result"]["content"][0]["text"] for r in resps]
         # Same query → same output every time
         assert texts[0] == texts[1] == texts[2]
+
+
+# ---------------------------------------------------------------------------
+# Session log
+# ---------------------------------------------------------------------------
+
+
+class TestLogSession:
+    """Tests for slurp.mcp.log_session."""
+
+    STATS = {
+        "nodes_selected": 28,
+        "nodes_total": 100,
+        "tokens_used": 260,
+        "tokens_budget": 4000,
+        "coverage_pct": 28.0,
+    }
+
+    def test_returns_false_when_dir_missing(self, tmp_path):
+        assert log_session("q", 4000, self.STATS, log_dir=tmp_path / "nope") is False
+
+    def test_does_not_create_the_dir(self, tmp_path):
+        missing = tmp_path / "nope"
+        log_session("q", 4000, self.STATS, log_dir=missing)
+        assert not missing.exists()
+
+    def test_does_not_raise_when_dir_missing(self, tmp_path):
+        log_session("q", 4000, self.STATS, log_dir=tmp_path / "nope")  # must not raise
+
+    def test_returns_true_when_dir_exists(self, tmp_path):
+        assert log_session("q", 4000, self.STATS, log_dir=tmp_path) is True
+
+    def test_creates_the_log_file(self, tmp_path):
+        log_session("q", 4000, self.STATS, log_dir=tmp_path)
+        assert (tmp_path / SESSION_LOG_FILE).exists()
+
+    def test_writes_one_json_line(self, tmp_path):
+        log_session("auth flow", 4000, self.STATS, log_dir=tmp_path)
+        lines = (tmp_path / SESSION_LOG_FILE).read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 1
+        assert json.loads(lines[0])
+
+    def test_entry_has_all_required_keys(self, tmp_path):
+        log_session("auth flow", 4000, self.STATS, log_dir=tmp_path)
+        entry = json.loads((tmp_path / SESSION_LOG_FILE).read_text(encoding="utf-8"))
+        for key in ("ts", "query", "budget", "nodes", "tokens", "savings_pct"):
+            assert key in entry
+
+    def test_entry_records_query_and_budget(self, tmp_path):
+        log_session("auth flow", 4000, self.STATS, log_dir=tmp_path)
+        entry = json.loads((tmp_path / SESSION_LOG_FILE).read_text(encoding="utf-8"))
+        assert entry["query"] == "auth flow"
+        assert entry["budget"] == 4000
+
+    def test_entry_records_nodes_and_tokens_from_stats(self, tmp_path):
+        log_session("q", 4000, self.STATS, log_dir=tmp_path)
+        entry = json.loads((tmp_path / SESSION_LOG_FILE).read_text(encoding="utf-8"))
+        assert entry["nodes"] == 28
+        assert entry["tokens"] == 260
+
+    def test_savings_pct_uses_the_50_token_baseline(self, tmp_path):
+        # baseline = 100 nodes * 50 = 5000; used 260 -> 94.8% saved
+        log_session("q", 4000, self.STATS, log_dir=tmp_path)
+        entry = json.loads((tmp_path / SESSION_LOG_FILE).read_text(encoding="utf-8"))
+        assert entry["savings_pct"] == pytest.approx(94.8)
+
+    def test_savings_pct_is_zero_for_empty_graph(self, tmp_path):
+        log_session("q", 4000, {"nodes_total": 0, "tokens_used": 0,
+                                "nodes_selected": 0}, log_dir=tmp_path)
+        entry = json.loads((tmp_path / SESSION_LOG_FILE).read_text(encoding="utf-8"))
+        assert entry["savings_pct"] == 0.0
+
+    def test_savings_pct_never_negative(self, tmp_path):
+        log_session("q", 4000, {"nodes_total": 1, "tokens_used": 9999,
+                                "nodes_selected": 1}, log_dir=tmp_path)
+        entry = json.loads((tmp_path / SESSION_LOG_FILE).read_text(encoding="utf-8"))
+        assert entry["savings_pct"] == 0.0
+
+    def test_timestamp_is_iso_seconds(self, tmp_path):
+        log_session("q", 4000, self.STATS, log_dir=tmp_path)
+        entry = json.loads((tmp_path / SESSION_LOG_FILE).read_text(encoding="utf-8"))
+        datetime.fromisoformat(entry["ts"])  # must parse
+
+    def test_appends_rather_than_overwrites(self, tmp_path):
+        log_session("first", 1000, self.STATS, log_dir=tmp_path)
+        log_session("second", 2000, self.STATS, log_dir=tmp_path)
+        lines = (tmp_path / SESSION_LOG_FILE).read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 2
+        assert json.loads(lines[1])["query"] == "second"
+
+    def test_write_failure_returns_false(self, tmp_path, monkeypatch):
+        def boom(*a, **k):
+            raise OSError("disk full")
+        monkeypatch.setattr(Path, "open", boom)
+        assert log_session("q", 4000, self.STATS, log_dir=tmp_path) is False
+
+    def test_write_failure_reports_to_stderr(self, tmp_path, monkeypatch, capsys):
+        def boom(*a, **k):
+            raise OSError("disk full")
+        monkeypatch.setattr(Path, "open", boom)
+        log_session("q", 4000, self.STATS, log_dir=tmp_path)
+        assert "session log write failed" in capsys.readouterr().err
+
+
+class TestReadSessionLog:
+    def test_missing_dir_returns_empty(self, tmp_path):
+        assert read_session_log(tmp_path / "nope") == []
+
+    def test_missing_file_returns_empty(self, tmp_path):
+        assert read_session_log(tmp_path) == []
+
+    def test_reads_entries_oldest_first(self, tmp_path):
+        for q in ("one", "two", "three"):
+            log_session(q, 1000, TestLogSession.STATS, log_dir=tmp_path)
+        entries = read_session_log(tmp_path)
+        assert [e["query"] for e in entries] == ["one", "two", "three"]
+
+    def test_last_returns_most_recent(self, tmp_path):
+        for q in ("one", "two", "three"):
+            log_session(q, 1000, TestLogSession.STATS, log_dir=tmp_path)
+        entries = read_session_log(tmp_path, last=2)
+        assert [e["query"] for e in entries] == ["two", "three"]
+
+    def test_last_larger_than_log_returns_all(self, tmp_path):
+        log_session("only", 1000, TestLogSession.STATS, log_dir=tmp_path)
+        assert len(read_session_log(tmp_path, last=99)) == 1
+
+    def test_skips_malformed_lines(self, tmp_path):
+        log_session("good", 1000, TestLogSession.STATS, log_dir=tmp_path)
+        with (tmp_path / SESSION_LOG_FILE).open("a", encoding="utf-8") as fh:
+            fh.write("{not json\n")
+        entries = read_session_log(tmp_path)
+        assert len(entries) == 1
+        assert entries[0]["query"] == "good"
+
+    def test_skips_blank_lines(self, tmp_path):
+        (tmp_path / SESSION_LOG_FILE).write_text('\n\n{"query": "x"}\n\n', encoding="utf-8")
+        assert len(read_session_log(tmp_path)) == 1
+
+    def test_skips_non_dict_json(self, tmp_path):
+        (tmp_path / SESSION_LOG_FILE).write_text('[1,2]\n{"query": "x"}\n', encoding="utf-8")
+        assert len(read_session_log(tmp_path)) == 1
+
+
+class TestHandlerSessionLog:
+    """The tools/call path writes to the log only when enabled."""
+
+    @staticmethod
+    def _call(G, out, session_log, log_dir, monkeypatch):
+        monkeypatch.chdir(log_dir)
+        msg = {
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "slurp_query",
+                       "arguments": {"query": "auth", "budget": 2000}},
+        }
+        _handle(msg, G, out, session_log=session_log)
+
+    def test_successful_query_is_logged(self, sample_graph, tmp_path, monkeypatch):
+        (tmp_path / ".slurp").mkdir()
+        self._call(sample_graph, io.StringIO(), True, tmp_path, monkeypatch)
+        assert len(read_session_log(tmp_path / ".slurp")) == 1
+
+    def test_logged_entry_records_the_query(self, sample_graph, tmp_path, monkeypatch):
+        (tmp_path / ".slurp").mkdir()
+        self._call(sample_graph, io.StringIO(), True, tmp_path, monkeypatch)
+        assert read_session_log(tmp_path / ".slurp")[0]["query"] == "auth"
+
+    def test_disabled_writes_nothing(self, sample_graph, tmp_path, monkeypatch):
+        (tmp_path / ".slurp").mkdir()
+        self._call(sample_graph, io.StringIO(), False, tmp_path, monkeypatch)
+        assert read_session_log(tmp_path / ".slurp") == []
+
+    def test_no_slurp_dir_writes_nothing_and_succeeds(self, sample_graph, tmp_path,
+                                                      monkeypatch):
+        out = io.StringIO()
+        self._call(sample_graph, out, True, tmp_path, monkeypatch)
+        assert not (tmp_path / ".slurp").exists()
+        assert "result" in json.loads(out.getvalue())
+
+    def test_failed_query_is_not_logged(self, sample_graph, tmp_path, monkeypatch):
+        (tmp_path / ".slurp").mkdir()
+        monkeypatch.chdir(tmp_path)
+        msg = {
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "slurp_query", "arguments": {}},  # missing query
+        }
+        _handle(msg, sample_graph, io.StringIO(), session_log=True)
+        assert read_session_log(tmp_path / ".slurp") == []
+
+    def test_logging_does_not_alter_the_response(self, sample_graph, tmp_path, monkeypatch):
+        (tmp_path / ".slurp").mkdir()
+        out = io.StringIO()
+        self._call(sample_graph, out, True, tmp_path, monkeypatch)
+        resp = json.loads(out.getvalue())
+        assert resp["result"]["content"][0]["type"] == "text"

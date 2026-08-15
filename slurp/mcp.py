@@ -6,6 +6,7 @@ No external dependencies — stdlib only for the transport layer.
 
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from slurp import __version__
@@ -68,6 +69,101 @@ _TOOL_DEFINITION = {
 }
 
 
+SESSION_LOG_FILE = "session.log"
+
+# DECISION: same 50-tokens-per-node baseline the `slurp audit` table uses, so
+# savings_pct means the same thing everywhere in slurp.
+_TOKENS_PER_NODE_BASELINE = 50
+
+
+# ---------------------------------------------------------------------------
+# Session log
+# ---------------------------------------------------------------------------
+
+
+def log_session(
+    query: str,
+    budget: int,
+    stats: dict,
+    log_dir: Path | None = None,
+) -> bool:
+    """Append one JSON line to .slurp/session.log, if that directory exists.
+
+    DECISION: the directory is never created. Its presence is the opt-in signal —
+    a user who has run a manual query already has .slurp/ from the audit log, so
+    the session log appears for them and stays invisible for everyone else.
+
+    Args:
+        query: The query that was served.
+        budget: Token budget requested by the caller.
+        stats: Stats dict returned by budget.select_subgraph.
+        log_dir: Directory holding session.log (default: ./.slurp).
+
+    Returns:
+        True if a line was written, False if the directory was absent or the
+        write failed.
+    """
+    log_dir = Path(".slurp") if log_dir is None else log_dir
+    if not log_dir.is_dir():
+        return False
+
+    used = stats.get("tokens_used", 0)
+    baseline = stats.get("nodes_total", 0) * _TOKENS_PER_NODE_BASELINE
+    savings_pct = (
+        round(max(0, baseline - used) / baseline * 100, 1) if baseline > 0 else 0.0
+    )
+
+    entry = {
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "query": query,
+        "budget": budget,
+        "nodes": stats.get("nodes_selected", 0),
+        "tokens": used,
+        "savings_pct": savings_pct,
+    }
+
+    try:
+        with (log_dir / SESSION_LOG_FILE).open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry) + "\n")
+    except OSError as exc:
+        # Never kill the server over an optional log, but never swallow it either:
+        # stderr is safe on stdio transport, stdout would corrupt the protocol.
+        print(f"slurp: session log write failed: {exc}", file=sys.stderr)
+        return False
+    return True
+
+
+def read_session_log(log_dir: Path | None = None, last: int | None = None) -> list[dict]:
+    """Read entries from the session log, oldest first.
+
+    Args:
+        log_dir: Directory holding session.log (default: ./.slurp).
+        last: Return only the most recent N entries; None returns all.
+
+    Returns:
+        List of entry dicts. Empty if the file or directory does not exist.
+        Malformed lines are skipped rather than raising.
+    """
+    log_dir = Path(".slurp") if log_dir is None else log_dir
+    log_path = log_dir / SESSION_LOG_FILE
+    if not log_path.exists():
+        return []
+
+    entries: list[dict] = []
+    for line in log_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            parsed = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(parsed, dict):
+            entries.append(parsed)
+
+    return entries[-last:] if last is not None and last > 0 else entries
+
+
 # ---------------------------------------------------------------------------
 # JSON-RPC helpers
 # ---------------------------------------------------------------------------
@@ -102,13 +198,14 @@ def _write(obj: dict, out) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _handle(msg: dict, G, out) -> None:
+def _handle(msg: dict, G, out, session_log: bool = True) -> None:
     """Dispatch one JSON-RPC message and write the response to *out*.
 
     Args:
         msg: Parsed JSON-RPC message dict.
         G:   Pre-loaded nx.DiGraph, or None for non-query methods.
         out: File-like object to write responses to.
+        session_log: Whether to append successful queries to .slurp/session.log.
 
     Notifications (messages without an 'id' field) are silently ignored
     per the JSON-RPC 2.0 spec.
@@ -192,6 +289,9 @@ def _handle(msg: dict, G, out) -> None:
             _write(_tool_err(msg_id, f"slurp_query failed: {type(exc).__name__}: {exc}"), out)
             return
 
+        if session_log:
+            log_session(query, budget, stats)
+
         _write(
             _ok(msg_id, {"content": [{"type": "text", "text": text}]}),
             out,
@@ -206,7 +306,7 @@ def _handle(msg: dict, G, out) -> None:
 # ---------------------------------------------------------------------------
 
 
-def serve(graph_path: Path, inp=None, out=None) -> None:
+def serve(graph_path: Path, inp=None, out=None, session_log: bool = True) -> None:
     """Run the MCP stdio server.
 
     Loads the graph once at startup, then reads newline-delimited JSON-RPC
@@ -217,6 +317,7 @@ def serve(graph_path: Path, inp=None, out=None) -> None:
         graph_path: Path to the graph.json file.
         inp:        Readable file-like object (defaults to sys.stdin).
         out:        Writable file-like object (defaults to sys.stdout).
+        session_log: Whether to append served queries to .slurp/session.log.
     """
     if inp is None:
         inp = sys.stdin
@@ -252,4 +353,4 @@ def serve(graph_path: Path, inp=None, out=None) -> None:
             )
             continue
 
-        _handle(msg, G, out)
+        _handle(msg, G, out, session_log=session_log)

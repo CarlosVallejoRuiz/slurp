@@ -4,7 +4,7 @@
 
 # slurp
 
-![tests](https://img.shields.io/badge/tests-986%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-1038%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 ![pypi](https://img.shields.io/badge/PyPI-slurp--graph-orange)
@@ -289,9 +289,46 @@ Start an MCP stdio server (JSON-RPC 2.0) that exposes the `slurp_query` tool.
 
 ```bash
 slurp serve --graph graph.json
+slurp serve --graph graph.json --no-log
 ```
 
+| Flag | Default | Description |
+|---|---|---|
+| `--graph`, `-g` | auto-discover | Path to `graph.json`. |
+| `--log` / `--no-log` | `--log` | Append served queries to `.slurp/session.log` (only if `.slurp/` exists). |
+
 See [MCP Integration](#mcp-integration) for configuration.
+
+---
+
+### `slurp session`
+
+Shows queries processed by the MCP server in real time.
+
+```bash
+slurp session --last 10
+slurp session --tail
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--last N` | `20` | Number of most recent entries to show. |
+| `--tail` | off | Follow the log in real time (Ctrl+C to stop). |
+| `--log-dir PATH` | `.slurp` | Directory containing `session.log`. |
+
+```
+             MCP Session Log — last 2 (.slurp/session.log)
+┏━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━━┳━━━━━━━━━┓
+┃ Time                ┃ Query      ┃ Budget ┃ Nodes ┃ Tokens ┃ Savings ┃
+┡━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━━╇━━━━━━━━━┩
+│ 2026-08-15T12:13:58 │ auth flow  │  4,000 │   171 │  4,000 │   94.6% │
+│ 2026-08-15T12:13:58 │ mcp server │  2,000 │    94 │  1,995 │   97.3% │
+└─────────────────────┴────────────┴────────┴───────┴────────┴─────────┘
+```
+
+Use it to confirm your AI assistant is actually calling slurp. The log is written
+only when `.slurp/` already exists — running any query manually creates it, and
+`slurp serve --no-log` turns logging off entirely.
 
 ---
 

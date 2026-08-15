@@ -1714,3 +1714,207 @@ class TestVizOutputFlag:
     def test_flag_documented_in_diff_help(self):
         result = _runner().invoke(cli, ["diff", "--help"])
         assert "--viz-output" in result.output
+
+
+# ---------------------------------------------------------------------------
+# slurp session
+# ---------------------------------------------------------------------------
+
+
+class TestSessionCommand:
+    """Tests for `slurp session` and the --log/--no-log flag on `slurp serve`."""
+
+    @staticmethod
+    def _write_log(log_dir: Path, queries: list[str]) -> Path:
+        """Create log_dir and write one entry per query."""
+        log_dir.mkdir(parents=True, exist_ok=True)
+        path = log_dir / "session.log"
+        with path.open("w", encoding="utf-8") as fh:
+            for i, q in enumerate(queries):
+                fh.write(json.dumps({
+                    "ts": f"2026-08-15T09:{i:02d}:00",
+                    "query": q,
+                    "budget": 4000,
+                    "nodes": 28 + i,
+                    "tokens": 260 + i,
+                    "savings_pct": 94.2,
+                }) + "\n")
+        return path
+
+    # --- empty states ------------------------------------------------------
+
+    def test_missing_dir_explains_how_to_start(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["session"])
+        assert result.exit_code == 0
+        assert "does not exist" in result.output
+
+    def test_missing_dir_does_not_create_it(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _runner().invoke(cli, ["session"])
+        assert not (tmp_path / ".slurp").exists()
+
+    def test_empty_log_reports_no_entries(self, tmp_path, monkeypatch):
+        (tmp_path / ".slurp").mkdir()
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["session"])
+        assert result.exit_code == 0
+        assert "No entries yet" in result.output
+
+    # --- table rendering ---------------------------------------------------
+
+    def test_renders_a_table(self, tmp_path, monkeypatch):
+        self._write_log(tmp_path / ".slurp", ["auth flow"])
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["session"])
+        assert result.exit_code == 0
+        assert "MCP Session Log" in result.output
+
+    def test_table_has_all_columns(self, tmp_path, monkeypatch):
+        self._write_log(tmp_path / ".slurp", ["auth flow"])
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["session"])
+        for col in ("Time", "Query", "Budget", "Nodes", "Tokens", "Savings"):
+            assert col in result.output
+
+    def test_shows_the_query_text(self, tmp_path, monkeypatch):
+        self._write_log(tmp_path / ".slurp", ["auth flow"])
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["session"])
+        assert "auth flow" in result.output
+
+    def test_shows_savings_percentage(self, tmp_path, monkeypatch):
+        self._write_log(tmp_path / ".slurp", ["auth flow"])
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["session"])
+        assert "94.2%" in result.output
+
+    # --- --last ------------------------------------------------------------
+
+    def test_last_defaults_to_20(self, tmp_path, monkeypatch):
+        self._write_log(tmp_path / ".slurp", [f"q{i}" for i in range(30)])
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["session"])
+        assert "last 20" in result.output
+        assert "q29" in result.output
+        assert "q9" not in result.output
+
+    def test_last_limits_entries(self, tmp_path, monkeypatch):
+        self._write_log(tmp_path / ".slurp", ["one", "two", "three"])
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["session", "--last", "2"])
+        assert "three" in result.output
+        assert "one" not in result.output
+
+    def test_last_larger_than_log_shows_everything(self, tmp_path, monkeypatch):
+        self._write_log(tmp_path / ".slurp", ["one", "two"])
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["session", "--last", "99"])
+        assert "one" in result.output
+        assert "two" in result.output
+
+    # --- --log-dir ---------------------------------------------------------
+
+    def test_log_dir_flag_reads_elsewhere(self, tmp_path, monkeypatch):
+        self._write_log(tmp_path / "custom", ["elsewhere"])
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["session", "--log-dir", "custom"])
+        assert "elsewhere" in result.output
+
+    def test_malformed_lines_are_skipped(self, tmp_path, monkeypatch):
+        path = self._write_log(tmp_path / ".slurp", ["good"])
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write("{broken\n")
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["session"])
+        assert result.exit_code == 0
+        assert "good" in result.output
+
+    # --- --tail ------------------------------------------------------------
+
+    def test_tail_prints_new_lines_then_stops(self, tmp_path, monkeypatch):
+        path = self._write_log(tmp_path / ".slurp", ["existing"])
+        monkeypatch.chdir(tmp_path)
+
+        # Append a new entry on the first poll, then interrupt on the second —
+        # this is what Ctrl+C does to a real `--tail` session.
+        state = {"calls": 0}
+
+        def fake_sleep(_seconds):
+            state["calls"] += 1
+            if state["calls"] == 1:
+                with path.open("a", encoding="utf-8") as fh:
+                    fh.write(json.dumps({
+                        "ts": "2026-08-15T10:00:00", "query": "streamed",
+                        "budget": 1000, "nodes": 5, "tokens": 99, "savings_pct": 80.0,
+                    }) + "\n")
+            else:
+                raise KeyboardInterrupt
+
+        monkeypatch.setattr("time.sleep", fake_sleep)
+        result = _runner().invoke(cli, ["session", "--tail"])
+        assert result.exit_code == 0
+        assert "streamed" in result.output
+        assert "Stopped." in result.output
+
+    def test_tail_announces_the_file(self, tmp_path, monkeypatch):
+        self._write_log(tmp_path / ".slurp", ["existing"])
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("time.sleep", lambda _s: (_ for _ in ()).throw(KeyboardInterrupt))
+        result = _runner().invoke(cli, ["session", "--tail"])
+        assert "Following" in result.output
+
+    def test_tail_still_shows_the_table_first(self, tmp_path, monkeypatch):
+        self._write_log(tmp_path / ".slurp", ["existing"])
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("time.sleep", lambda _s: (_ for _ in ()).throw(KeyboardInterrupt))
+        result = _runner().invoke(cli, ["session", "--tail"])
+        assert result.output.index("existing") < result.output.index("Following")
+
+    def test_tail_without_log_dir_exits_cleanly(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["session", "--tail"])
+        assert result.exit_code != 0 or "does not exist" in result.output
+
+    # --- serve --log / --no-log -------------------------------------------
+
+    def test_serve_help_documents_log_flag(self):
+        result = _runner().invoke(cli, ["serve", "--help"])
+        assert "--log / --no-log" in result.output
+
+    def test_serve_log_defaults_on(self):
+        result = _runner().invoke(cli, ["serve", "--help"])
+        assert "[default: log]" in result.output
+
+    def test_serve_passes_log_flag_through(self, sample_graph_json, monkeypatch):
+        captured: dict = {}
+
+        def fake_serve(graph_path, session_log=True):
+            captured["session_log"] = session_log
+
+        import slurp.mcp as _mcp
+        monkeypatch.setattr(_mcp, "serve", fake_serve)
+        _runner().invoke(cli, ["serve", "--graph", str(sample_graph_json), "--no-log"])
+        assert captured["session_log"] is False
+
+    def test_serve_log_flag_on_by_default(self, sample_graph_json, monkeypatch):
+        captured: dict = {}
+
+        def fake_serve(graph_path, session_log=True):
+            captured["session_log"] = session_log
+
+        import slurp.mcp as _mcp
+        monkeypatch.setattr(_mcp, "serve", fake_serve)
+        _runner().invoke(cli, ["serve", "--graph", str(sample_graph_json)])
+        assert captured["session_log"] is True
+
+    # --- help --------------------------------------------------------------
+
+    def test_session_listed_in_top_level_help(self):
+        result = _runner().invoke(cli, ["--help"])
+        assert "session" in result.output
+
+    def test_session_help_documents_flags(self):
+        result = _runner().invoke(cli, ["session", "--help"])
+        assert "--last" in result.output
+        assert "--tail" in result.output

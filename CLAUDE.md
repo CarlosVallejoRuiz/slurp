@@ -57,7 +57,7 @@ por debajo de la carpeta que abre el editor (`~/Desktop/Slurp/`). Todos los coma
 de este documento (`uv run pytest`, `ruff check`, `uv build`, `git`) se ejecutan
 desde `~/Desktop/Slurp/slurp/`, que es donde vive este CLAUDE.md.
 
-**Estado actual:** v0.6.0 · 911 tests · `ruff check slurp/` limpio.
+**Estado actual:** v0.6.4 · 1038 tests · `ruff check slurp/` limpio.
 
 ```
 ~/Desktop/Slurp/slurp/         ← raíz del repo git — working directory
@@ -358,6 +358,13 @@ slurp diff old.json new.json --budget 4000
 
 # Servidor MCP
 slurp serve --graph graph.json
+slurp serve --graph graph.json --no-log    # desactiva el session log
+
+# Session log del servidor MCP (v0.6.4)
+slurp session
+slurp session --last 10
+slurp session --tail
+slurp session --log-dir .slurp
 
 # Export (v0.3.0)
 slurp export "auth flow" --graph graph.json --budget 4000 --format claude|chatgpt|claudemd
