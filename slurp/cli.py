@@ -67,6 +67,36 @@ def _echo_rich(renderable) -> None:
     click.echo(buf.getvalue(), nl=False)
 
 
+def _deliver_viz(html: str, viz: bool, viz_output: str | None) -> None:
+    """Save and/or open a rendered visualisation.
+
+    DECISION: when both --viz and --viz-output are given, the browser opens the
+    saved file rather than a temp copy, so what the user sees is the artifact
+    they can share.
+
+    Args:
+        html: Rendered HTML document.
+        viz: Whether to open the result in a browser.
+        viz_output: Path to write the HTML to, or None for a temp file. Parent
+            directories are created if missing.
+    """
+    if viz_output:
+        out_path = Path(viz_output)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(html, encoding="utf-8")
+        click.echo(f"✓ Visualization saved to {out_path}")
+        target = out_path
+    else:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".html", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(html)
+            target = Path(f.name)
+
+    if viz:
+        webbrowser.open(target.resolve().as_uri())
+
+
 _LANGUAGE_BY_EXT: dict[str, str] = {
     ".py": "Python",
     ".ts": "TypeScript",
@@ -215,6 +245,9 @@ def cli(ctx: click.Context) -> None:
               help="Minimum relevance score threshold; nodes below this are excluded.")
 @click.option("--viz", is_flag=True, default=False,
               help="Open an interactive graph visualisation in the browser.")
+@click.option("--viz-output", "viz_output", type=click.Path(), default=None,
+              help="Write the visualisation HTML to PATH. Creates parent directories. "
+                   "Does not open a browser unless --viz is also given.")
 @click.option("--ignore-file", "ignore_file", default=".slurpignore", show_default=True,
               help="Path to .slurpignore file for excluding nodes.")
 @click.option("--backend", default="tfidf", show_default=True,
@@ -235,6 +268,7 @@ def run(
     neighbor_decay: float,
     min_score: float,
     viz: bool,
+    viz_output: str | None,
     ignore_file: str,
     backend: str,
     inject_code_flag: bool,
@@ -291,15 +325,9 @@ def run(
     if explain:
         _echo_rich(_build_explain_table(subG, scores, structural, semantic))
 
-    if viz:
+    if viz or viz_output:
         from slurp.viz import build_html
-        html = build_html(subG, stats, scores, query)
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".html", delete=False, encoding="utf-8"
-        ) as f:
-            f.write(html)
-            viz_path = Path(f.name)
-        webbrowser.open(viz_path.as_uri())
+        _deliver_viz(build_html(subG, stats, scores, query), viz, viz_output)
 
 
 def _build_explain_table(
@@ -363,6 +391,9 @@ def stats(graph: str | None) -> None:
               help="Depth of impact neighborhood expansion.")
 @click.option("--viz", is_flag=True, default=False,
               help="Open interactive visualiser of the affected area.")
+@click.option("--viz-output", "viz_output", type=click.Path(), default=None,
+              help="Write the visualisation HTML to PATH. Creates parent directories. "
+                   "Does not open a browser unless --viz is also given.")
 @click.option("--budget", "-b", default=None, type=int,
               help="Token budget; selects most relevant nodes from affected area.")
 def diff_cmd(
@@ -370,6 +401,7 @@ def diff_cmd(
     new_graph: str,
     hops: int,
     viz: bool,
+    viz_output: str | None,
     budget: int | None,
 ) -> None:
     """Compare two graph.json files and show the impact of changes."""
@@ -403,7 +435,7 @@ def diff_cmd(
             click.echo("\n## Token-Budgeted Affected Subgraph\n")
             click.echo(format_subgraph(subG, stats, query=query))
 
-    if viz:
+    if viz or viz_output:
         viz_G, viz_scores, viz_stats = build_diff_viz_graph(G_old, G_new, diff, hops)
         from slurp.viz import build_html
         query = (
@@ -411,13 +443,7 @@ def diff_cmd(
             f"-{len(diff.removed_nodes)} "
             f"~{len(diff.modified_nodes)}"
         )
-        html = build_html(viz_G, viz_stats, viz_scores, query)
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".html", delete=False, encoding="utf-8"
-        ) as f:
-            f.write(html)
-            viz_path = Path(f.name)
-        webbrowser.open(viz_path.as_uri())
+        _deliver_viz(build_html(viz_G, viz_stats, viz_scores, query), viz, viz_output)
 
 
 @cli.command("export")

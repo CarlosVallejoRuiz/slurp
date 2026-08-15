@@ -1431,3 +1431,286 @@ class TestInitCommand:
     def test_init_appears_in_help(self):
         result = _runner().invoke(cli, ["--help"])
         assert "init" in result.output
+
+
+# ---------------------------------------------------------------------------
+# --viz-output
+# ---------------------------------------------------------------------------
+
+
+class TestVizOutputFlag:
+    """Tests for --viz-output on `slurp QUERY` and `slurp diff`."""
+
+    @staticmethod
+    def _no_browser(monkeypatch) -> list[str]:
+        """Stub webbrowser.open and return the list it records into."""
+        opened: list[str] = []
+        monkeypatch.setattr("webbrowser.open", lambda url: opened.append(url))
+        return opened
+
+    @staticmethod
+    def _make_diff_graphs(tmp_path: Path) -> tuple[Path, Path]:
+        """Write two graph.json files that differ by one added node."""
+        old = {
+            "nodes": [
+                {"id": "auth", "label": "authenticate_user", "type": "function"},
+                {"id": "db", "label": "DatabasePool", "type": "class"},
+            ],
+            "links": [{"source": "auth", "target": "db", "relation": "calls"}],
+        }
+        new = {
+            "nodes": [
+                {"id": "auth", "label": "authenticate_user", "type": "function"},
+                {"id": "db", "label": "DatabasePool", "type": "class"},
+                {"id": "jwt", "label": "generate_token", "type": "function"},
+            ],
+            "links": [
+                {"source": "auth", "target": "db", "relation": "calls"},
+                {"source": "auth", "target": "jwt", "relation": "calls"},
+            ],
+        }
+        old_path = tmp_path / "old.json"
+        new_path = tmp_path / "new.json"
+        old_path.write_text(json.dumps(old), encoding="utf-8")
+        new_path.write_text(json.dumps(new), encoding="utf-8")
+        return old_path, new_path
+
+    # --- file generation ---------------------------------------------------
+
+    def test_creates_the_file(self, sample_graph_json, tmp_path, monkeypatch):
+        self._no_browser(monkeypatch)
+        out = tmp_path / "viz.html"
+        result = _runner().invoke(cli, [
+            "auth", "--graph", str(sample_graph_json), "--no-audit",
+            "--viz-output", str(out),
+        ])
+        assert result.exit_code == 0, result.output
+        assert out.exists()
+
+    def test_file_is_nonempty(self, sample_graph_json, tmp_path, monkeypatch):
+        self._no_browser(monkeypatch)
+        out = tmp_path / "viz.html"
+        _runner().invoke(cli, [
+            "auth", "--graph", str(sample_graph_json), "--no-audit",
+            "--viz-output", str(out),
+        ])
+        assert out.stat().st_size > 0
+
+    def test_prints_confirmation(self, sample_graph_json, tmp_path, monkeypatch):
+        self._no_browser(monkeypatch)
+        out = tmp_path / "viz.html"
+        result = _runner().invoke(cli, [
+            "auth", "--graph", str(sample_graph_json), "--no-audit",
+            "--viz-output", str(out),
+        ])
+        assert "Visualization saved to" in result.output
+        assert str(out) in result.output
+
+    def test_still_prints_markdown_to_stdout(self, sample_graph_json, tmp_path, monkeypatch):
+        self._no_browser(monkeypatch)
+        out = tmp_path / "viz.html"
+        result = _runner().invoke(cli, [
+            "auth", "--graph", str(sample_graph_json), "--no-audit",
+            "--viz-output", str(out),
+        ])
+        assert "## Relevant Nodes" in result.output
+
+    # --- parent directory creation ----------------------------------------
+
+    def test_creates_missing_parent_directory(self, sample_graph_json, tmp_path, monkeypatch):
+        self._no_browser(monkeypatch)
+        out = tmp_path / "deeply" / "nested" / "dir" / "viz.html"
+        assert not out.parent.exists()
+        result = _runner().invoke(cli, [
+            "auth", "--graph", str(sample_graph_json), "--no-audit",
+            "--viz-output", str(out),
+        ])
+        assert result.exit_code == 0, result.output
+        assert out.exists()
+
+    def test_bare_filename_needs_no_directory(self, sample_graph_json, tmp_path, monkeypatch):
+        self._no_browser(monkeypatch)
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, [
+            "auth", "--graph", str(sample_graph_json), "--no-audit",
+            "--viz-output", "viz.html",
+        ])
+        assert result.exit_code == 0, result.output
+        assert (tmp_path / "viz.html").exists()
+
+    def test_overwrites_existing_file(self, sample_graph_json, tmp_path, monkeypatch):
+        self._no_browser(monkeypatch)
+        out = tmp_path / "viz.html"
+        out.write_text("stale", encoding="utf-8")
+        _runner().invoke(cli, [
+            "auth", "--graph", str(sample_graph_json), "--no-audit",
+            "--viz-output", str(out),
+        ])
+        assert out.read_text(encoding="utf-8") != "stale"
+
+    # --- HTML content ------------------------------------------------------
+
+    def test_content_is_html(self, sample_graph_json, tmp_path, monkeypatch):
+        self._no_browser(monkeypatch)
+        out = tmp_path / "viz.html"
+        _runner().invoke(cli, [
+            "auth", "--graph", str(sample_graph_json), "--no-audit",
+            "--viz-output", str(out),
+        ])
+        html = out.read_text(encoding="utf-8")
+        assert "<html" in html.lower()
+        assert "</html>" in html.lower()
+
+    def test_content_embeds_vis_network(self, sample_graph_json, tmp_path, monkeypatch):
+        self._no_browser(monkeypatch)
+        out = tmp_path / "viz.html"
+        _runner().invoke(cli, [
+            "auth", "--graph", str(sample_graph_json), "--no-audit",
+            "--viz-output", str(out),
+        ])
+        assert "vis-network" in out.read_text(encoding="utf-8")
+
+    def test_content_contains_the_query(self, sample_graph_json, tmp_path, monkeypatch):
+        self._no_browser(monkeypatch)
+        out = tmp_path / "viz.html"
+        _runner().invoke(cli, [
+            "jwt authentication", "--graph", str(sample_graph_json), "--no-audit",
+            "--viz-output", str(out),
+        ])
+        assert "jwt authentication" in out.read_text(encoding="utf-8")
+
+    def test_saved_html_matches_what_viz_would_open(self, sample_graph_json, tmp_path,
+                                                    monkeypatch):
+        opened = self._no_browser(monkeypatch)
+        out = tmp_path / "viz.html"
+        _runner().invoke(cli, [
+            "auth", "--graph", str(sample_graph_json), "--no-audit",
+            "--viz", "--viz-output", str(out),
+        ])
+        browser_path = Path(unquote(urlparse(opened[0]).path))
+        assert browser_path.read_text(encoding="utf-8") == out.read_text(encoding="utf-8")
+
+    # --- browser interaction ----------------------------------------------
+
+    def test_viz_output_alone_does_not_open_browser(self, sample_graph_json, tmp_path,
+                                                    monkeypatch):
+        opened = self._no_browser(monkeypatch)
+        out = tmp_path / "viz.html"
+        _runner().invoke(cli, [
+            "auth", "--graph", str(sample_graph_json), "--no-audit",
+            "--viz-output", str(out),
+        ])
+        assert opened == []
+
+    def test_with_viz_opens_browser(self, sample_graph_json, tmp_path, monkeypatch):
+        opened = self._no_browser(monkeypatch)
+        out = tmp_path / "viz.html"
+        _runner().invoke(cli, [
+            "auth", "--graph", str(sample_graph_json), "--no-audit",
+            "--viz", "--viz-output", str(out),
+        ])
+        assert len(opened) == 1
+
+    def test_with_viz_saves_the_file_too(self, sample_graph_json, tmp_path, monkeypatch):
+        self._no_browser(monkeypatch)
+        out = tmp_path / "viz.html"
+        _runner().invoke(cli, [
+            "auth", "--graph", str(sample_graph_json), "--no-audit",
+            "--viz", "--viz-output", str(out),
+        ])
+        assert out.exists()
+
+    def test_with_viz_opens_the_saved_file(self, sample_graph_json, tmp_path, monkeypatch):
+        opened = self._no_browser(monkeypatch)
+        out = tmp_path / "viz.html"
+        _runner().invoke(cli, [
+            "auth", "--graph", str(sample_graph_json), "--no-audit",
+            "--viz", "--viz-output", str(out),
+        ])
+        assert Path(unquote(urlparse(opened[0]).path)) == out.resolve()
+
+    def test_no_flags_writes_no_html(self, sample_graph_json, tmp_path, monkeypatch):
+        opened = self._no_browser(monkeypatch)
+        _runner().invoke(cli, [
+            "auth", "--graph", str(sample_graph_json), "--no-audit",
+        ])
+        assert opened == []
+        assert list(tmp_path.glob("*.html")) == []
+
+    # --- slurp diff --------------------------------------------------------
+
+    def test_diff_creates_the_file(self, tmp_path, monkeypatch):
+        self._no_browser(monkeypatch)
+        old_path, new_path = self._make_diff_graphs(tmp_path)
+        out = tmp_path / "diff.html"
+        result = _runner().invoke(cli, [
+            "diff", str(old_path), str(new_path), "--viz-output", str(out),
+        ])
+        assert result.exit_code == 0, result.output
+        assert out.exists()
+
+    def test_diff_prints_confirmation(self, tmp_path, monkeypatch):
+        self._no_browser(monkeypatch)
+        old_path, new_path = self._make_diff_graphs(tmp_path)
+        out = tmp_path / "diff.html"
+        result = _runner().invoke(cli, [
+            "diff", str(old_path), str(new_path), "--viz-output", str(out),
+        ])
+        assert "Visualization saved to" in result.output
+
+    def test_diff_creates_missing_parent_directory(self, tmp_path, monkeypatch):
+        self._no_browser(monkeypatch)
+        old_path, new_path = self._make_diff_graphs(tmp_path)
+        out = tmp_path / "reports" / "impact" / "diff.html"
+        result = _runner().invoke(cli, [
+            "diff", str(old_path), str(new_path), "--viz-output", str(out),
+        ])
+        assert result.exit_code == 0, result.output
+        assert out.exists()
+
+    def test_diff_content_embeds_vis_network(self, tmp_path, monkeypatch):
+        self._no_browser(monkeypatch)
+        old_path, new_path = self._make_diff_graphs(tmp_path)
+        out = tmp_path / "diff.html"
+        _runner().invoke(cli, [
+            "diff", str(old_path), str(new_path), "--viz-output", str(out),
+        ])
+        assert "vis-network" in out.read_text(encoding="utf-8")
+
+    def test_diff_viz_output_alone_does_not_open_browser(self, tmp_path, monkeypatch):
+        opened = self._no_browser(monkeypatch)
+        old_path, new_path = self._make_diff_graphs(tmp_path)
+        out = tmp_path / "diff.html"
+        _runner().invoke(cli, [
+            "diff", str(old_path), str(new_path), "--viz-output", str(out),
+        ])
+        assert opened == []
+
+    def test_diff_with_viz_opens_browser_and_saves(self, tmp_path, monkeypatch):
+        opened = self._no_browser(monkeypatch)
+        old_path, new_path = self._make_diff_graphs(tmp_path)
+        out = tmp_path / "diff.html"
+        _runner().invoke(cli, [
+            "diff", str(old_path), str(new_path), "--viz", "--viz-output", str(out),
+        ])
+        assert len(opened) == 1
+        assert out.exists()
+
+    def test_diff_still_prints_report_to_stdout(self, tmp_path, monkeypatch):
+        self._no_browser(monkeypatch)
+        old_path, new_path = self._make_diff_graphs(tmp_path)
+        out = tmp_path / "diff.html"
+        result = _runner().invoke(cli, [
+            "diff", str(old_path), str(new_path), "--viz-output", str(out),
+        ])
+        assert "generate_token" in result.output or "jwt" in result.output
+
+    # --- help --------------------------------------------------------------
+
+    def test_flag_documented_in_query_help(self):
+        result = _runner().invoke(cli, ["run", "--help"])
+        assert "--viz-output" in result.output
+
+    def test_flag_documented_in_diff_help(self):
+        result = _runner().invoke(cli, ["diff", "--help"])
+        assert "--viz-output" in result.output
