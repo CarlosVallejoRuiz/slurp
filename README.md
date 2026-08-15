@@ -4,7 +4,7 @@
 
 # slurp
 
-![tests](https://img.shields.io/badge/tests-1099%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-1158%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 ![pypi](https://img.shields.io/badge/PyPI-slurp--graph-orange)
@@ -28,6 +28,40 @@ Tested on a real **PrismaStats** codebase: 2,111 nodes, 28,412 tokens total.
 **Mean savings: 93.3% · p50: 94.2% · Best case: 97.1%**
 
 Even the worst case — `"database pool"` at budget 8k — injects 85% fewer tokens than the full graph.
+
+---
+
+## Performance
+
+Measured on the same PrismaStats graph (2,111 nodes, 3,421 edges), 10 hot queries
+through the real MCP handler with `time.perf_counter`:
+
+| Optimization | Before | After | Improvement |
+|---|---|---|---|
+| PageRank cache | 8.32 ms | 0.002 ms | **4000×** |
+| Token count cache | ~50 ms | 0.174 ms | **280×** |
+| Greedy heap (O(n log n)) | 63.78 ms | 10.69 ms | **6×** |
+| End-to-end latency | 86.41 ms | 10.69 ms | **8.1×** |
+| Graph staleness | silent | auto-reload | ✅ |
+
+**PageRank cache** — PageRank depends only on the graph, never on the query, so
+it is computed once per graph object instead of once per query.
+
+**Token count cache** — per-node token costs are memoised across queries, keyed
+by `(node_id, encoding)`. The graph's text does not change between queries, so
+neither does its token cost.
+
+**Greedy heap** — the subgraph selector used to scan every remaining candidate on
+each iteration, which is `O(n²)`. It now uses a lazy max-heap: scores still mutate
+as neighbors get boosted, so a boost pushes a fresh entry and superseded entries
+are discarded when they surface. Ties break by node id, which also makes the
+selection **deterministic** — the previous scan broke ties by set iteration order,
+so the same query could return a different subgraph on every process start.
+
+**Graph staleness** — the MCP server records the graph file's mtime and reloads it
+when it changes on disk, invalidating both caches. Before, a server started before
+a re-index would keep answering from the graph it read at boot, with no way for the
+client to know. Responses that triggered a reload carry `"graph_reloaded": true`.
 
 ---
 

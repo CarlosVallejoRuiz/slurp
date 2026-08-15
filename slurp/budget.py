@@ -1,6 +1,7 @@
 """Selects the optimal subgraph that fits within a token budget."""
 
 import functools
+import heapq
 
 import networkx as nx
 import tiktoken
@@ -22,6 +23,40 @@ def count_tokens(text: str, model: str = "cl100k_base") -> int:
         Number of tokens as an integer.
     """
     return len(_get_encoding(model).encode(text))
+
+
+# DECISION: keyed by (node_id, model), not node_id alone — the same node costs a
+# different number of tokens under a different encoding, and `--model` is a public
+# CLI flag on both `slurp QUERY` and `slurp benchmark`.
+#
+# INVARIANT: entries are only valid while node text is unchanged. One process must
+# not hold two graphs that share node ids with different content without calling
+# clear_node_token_cache() in between. The MCP server does this on reload.
+_node_token_cache: dict[tuple[str, str], int] = {}
+
+
+def clear_node_token_cache() -> None:
+    """Drop every cached per-node token count.
+
+    Call this whenever a graph is replaced in-process — the MCP server does it
+    on reload — so no stale counts survive.
+    """
+    _node_token_cache.clear()
+
+
+def _node_token_cost(G: nx.DiGraph, node_id: str, model: str) -> int:
+    """Token cost of a node, memoised across queries.
+
+    Skips both the string rebuild and the tiktoken encode on a hit, which is
+    where the bulk of select_subgraph's time goes on large graphs.
+    """
+    key = (node_id, model)
+    cached = _node_token_cache.get(key)
+    if cached is not None:
+        return cached
+    cost = count_tokens(_serialize_node(G, node_id), model)
+    _node_token_cache[key] = cost
+    return cost
 
 
 def _serialize_node(G: nx.DiGraph, node_id: str) -> str:
@@ -93,9 +128,9 @@ def select_subgraph(
     if nodes_total == 0 or budget <= 0:
         return nx.DiGraph(), empty_stats
 
-    # Pre-compute token cost for every node once (tiktoken is cached).
+    # Pre-compute token cost for every node once, memoised across queries.
     token_cost: dict[str, int] = {
-        nid: count_tokens(_serialize_node(G, nid), model) for nid in G.nodes
+        nid: _node_token_cost(G, nid, model) for nid in G.nodes
     }
 
     # DECISION: min_score filters before the greedy loop so irrelevant nodes in
@@ -111,12 +146,22 @@ def select_subgraph(
     selected: list[str] = []
     tokens_used: int = 0
 
-    while len(processed) < len(candidates):
-        # Greedily pick the highest-scoring unprocessed candidate.
-        best = max(
-            (nid for nid in candidates if nid not in processed),
-            key=lambda nid: effective.get(nid, 0.0),
-        )
+    # DECISION: a lazy max-heap replaces a max() scan over all unprocessed
+    # candidates, which made the loop O(n²) — on a 2k-node graph that scan, not
+    # tokenisation, was the dominant cost. Scores mutate during the loop (the
+    # neighbour boost below), so a heap built once cannot simply be trusted:
+    # a boost pushes a *new* entry and the node's stale lower-scored entries are
+    # discarded when they surface, because the node is already in `processed`.
+    #
+    # Entries are (-score, node_id): heapq is a min-heap, and the node id makes
+    # ties deterministic instead of depending on set iteration order.
+    heap: list[tuple[float, str]] = [(-effective[nid], nid) for nid in candidates]
+    heapq.heapify(heap)
+
+    while heap:
+        _, best = heapq.heappop(heap)
+        if best in processed:
+            continue  # stale entry superseded by a boosted one
         processed.add(best)
 
         cost = token_cost[best]
@@ -133,6 +178,7 @@ def select_subgraph(
             for nbr in set(G.predecessors(best)) | set(G.successors(best)):
                 if nbr in candidates and nbr not in processed and boosted > effective.get(nbr, 0.0):
                     effective[nbr] = boosted
+                    heapq.heappush(heap, (-boosted, nbr))
 
         # Early exit: remaining budget cannot accommodate any candidate.
         if tokens_used >= budget:

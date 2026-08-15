@@ -10,10 +10,10 @@ from datetime import datetime
 from pathlib import Path
 
 from slurp import __version__
-from slurp.budget import select_subgraph
+from slurp.budget import clear_node_token_cache, select_subgraph
 from slurp.formatter import format_subgraph
 from slurp.loader import SlurpLoadError, load_graph
-from slurp.scorer import score_nodes
+from slurp.scorer import clear_pagerank_cache, score_nodes
 
 _PROTOCOL_VERSION = "2024-11-05"
 
@@ -70,6 +70,52 @@ _TOOL_DEFINITION = {
 
 
 SESSION_LOG_FILE = "session.log"
+
+
+class GraphState:
+    """Owns the served graph and reloads it when the file changes on disk.
+
+    The server loads the graph once at startup; without this, an edit to
+    graph.json (a re-index, a `slurp index --watch` cycle) is invisible and the
+    server keeps answering from the version it read at boot.
+    """
+
+    def __init__(self, graph_path: Path, graph) -> None:
+        self.graph_path = graph_path
+        self.graph = graph
+        self.mtime = self._current_mtime()
+
+    def _current_mtime(self) -> float | None:
+        """mtime of the graph file, or None if it is unreadable right now."""
+        try:
+            return self.graph_path.stat().st_mtime
+        except OSError:
+            return None
+
+    def check_reload(self) -> bool:
+        """Reload the graph if the file changed since it was last read.
+
+        DECISION: caches keyed on the graph object or on node ids must die with
+        the old graph — a reload that kept them would serve fresh nodes with
+        stale ranks and stale token counts.
+
+        Returns:
+            True if the graph was reloaded, False if it was already current.
+
+        Raises:
+            SlurpLoadError: If the changed file could not be loaded. The
+                previously loaded graph is kept so the server stays usable.
+        """
+        current = self._current_mtime()
+        if current is None or current == self.mtime:
+            return False
+
+        reloaded = load_graph(self.graph_path)  # may raise; old graph survives
+        self.graph = reloaded
+        self.mtime = current
+        clear_pagerank_cache()
+        clear_node_token_cache()
+        return True
 
 # DECISION: same 50-tokens-per-node baseline the `slurp audit` table uses, so
 # savings_pct means the same thing everywhere in slurp.
@@ -198,14 +244,17 @@ def _write(obj: dict, out) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _handle(msg: dict, G, out, session_log: bool = True) -> None:
+def _handle(msg: dict, G, out, session_log: bool = True, state: "GraphState | None" = None) -> None:
     """Dispatch one JSON-RPC message and write the response to *out*.
 
     Args:
         msg: Parsed JSON-RPC message dict.
-        G:   Pre-loaded nx.DiGraph, or None for non-query methods.
+        G:   Pre-loaded nx.DiGraph, or None for non-query methods. Ignored when
+             *state* is given, which owns the current graph.
         out: File-like object to write responses to.
         session_log: Whether to append successful queries to .slurp/session.log.
+        state: Optional GraphState enabling on-disk staleness detection. When
+            omitted, *G* is served as-is and no reload check runs.
 
     Notifications (messages without an 'id' field) are silently ignored
     per the JSON-RPC 2.0 spec.
@@ -273,6 +322,20 @@ def _handle(msg: dict, G, out, session_log: bool = True) -> None:
             _write(_err(msg_id, -32602, "'budget' must be a positive integer"), out)
             return
 
+        graph_reloaded = False
+        if state is not None:
+            try:
+                graph_reloaded = state.check_reload()
+            except Exception as exc:
+                _write(_tool_err(
+                    msg_id,
+                    f"graph.json changed on disk but could not be reloaded: "
+                    f"{type(exc).__name__}: {exc}. Still serving the previously "
+                    f"loaded graph — fix the file and query again.",
+                ), out)
+                return
+            G = state.graph
+
         if G is None:
             _write(_err(msg_id, -32603, "Graph not loaded"), out)
             return
@@ -292,10 +355,13 @@ def _handle(msg: dict, G, out, session_log: bool = True) -> None:
         if session_log:
             log_session(query, budget, stats)
 
-        _write(
-            _ok(msg_id, {"content": [{"type": "text", "text": text}]}),
-            out,
-        )
+        # DECISION: the flag is present only when a reload actually happened, so
+        # it reads as an event rather than a status field on every response.
+        result: dict = {"content": [{"type": "text", "text": text}]}
+        if graph_reloaded:
+            result["graph_reloaded"] = True
+
+        _write(_ok(msg_id, result), out)
 
     else:
         _write(_err(msg_id, -32601, f"Method not found: {method!r}"), out)
@@ -325,7 +391,7 @@ def serve(graph_path: Path, inp=None, out=None, session_log: bool = True) -> Non
         out = sys.stdout
 
     try:
-        G = load_graph(graph_path)
+        state = GraphState(graph_path, load_graph(graph_path))
     except SlurpLoadError as exc:
         print(f"slurp: error loading graph: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -353,4 +419,4 @@ def serve(graph_path: Path, inp=None, out=None, session_log: bool = True) -> Non
             )
             continue
 
-        _handle(msg, G, out, session_log=session_log)
+        _handle(msg, state.graph, out, session_log=session_log, state=state)

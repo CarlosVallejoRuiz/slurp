@@ -1,9 +1,18 @@
 """Tests for slurp/budget.py."""
 
+import random
+
 import networkx as nx
 import pytest
 
-from slurp.budget import _serialize_node, count_tokens, select_subgraph
+from slurp.budget import (
+    _node_token_cache,
+    _node_token_cost,
+    _serialize_node,
+    clear_node_token_cache,
+    count_tokens,
+    select_subgraph,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -463,3 +472,372 @@ class TestMinScore:
                 sample_graph, scores, budget=budget, min_score=0.05
             )
             assert stats["tokens_used"] <= budget
+
+
+# ---------------------------------------------------------------------------
+# Per-node token cache
+# ---------------------------------------------------------------------------
+
+
+class TestNodeTokenCache:
+    @pytest.fixture(autouse=True)
+    def _clean(self):
+        clear_node_token_cache()
+        yield
+        clear_node_token_cache()
+
+    @staticmethod
+    def _graph():
+        G = nx.DiGraph()
+        G.add_node("a", label="Alpha", type="function", description="first node")
+        G.add_node("b", label="Beta", type="class", description="second node")
+        G.add_edge("a", "b")
+        return G
+
+    def test_starts_empty(self):
+        assert len(_node_token_cache) == 0
+
+    def test_first_query_populates_one_entry_per_node(self):
+        G = self._graph()
+        select_subgraph(G, {"a": 1.0, "b": 0.5}, budget=1000)
+        assert len(_node_token_cache) == G.number_of_nodes()
+
+    def test_second_query_does_not_re_encode(self, monkeypatch):
+        G = self._graph()
+        select_subgraph(G, {"a": 1.0, "b": 0.5}, budget=1000)
+
+        calls = {"n": 0}
+        import slurp.budget as budget_mod
+        original = budget_mod.count_tokens
+
+        def counting(text, model="cl100k_base"):
+            calls["n"] += 1
+            return original(text, model)
+
+        monkeypatch.setattr(budget_mod, "count_tokens", counting)
+        select_subgraph(G, {"a": 1.0, "b": 0.5}, budget=1000)
+        assert calls["n"] == 0
+
+    def test_second_query_does_not_re_serialize(self, monkeypatch):
+        G = self._graph()
+        select_subgraph(G, {"a": 1.0, "b": 0.5}, budget=1000)
+
+        calls = {"n": 0}
+        import slurp.budget as budget_mod
+        original = budget_mod._serialize_node
+
+        def counting(graph, node_id):
+            calls["n"] += 1
+            return original(graph, node_id)
+
+        monkeypatch.setattr(budget_mod, "_serialize_node", counting)
+        select_subgraph(G, {"a": 1.0, "b": 0.5}, budget=1000)
+        assert calls["n"] == 0
+
+    def test_cached_run_gives_the_same_result(self):
+        G = self._graph()
+        first_sub, first_stats = select_subgraph(G, {"a": 1.0, "b": 0.5}, budget=1000)
+        second_sub, second_stats = select_subgraph(G, {"a": 1.0, "b": 0.5}, budget=1000)
+        assert first_stats == second_stats
+        assert set(first_sub.nodes) == set(second_sub.nodes)
+
+    def test_clear_empties_the_cache(self):
+        G = self._graph()
+        select_subgraph(G, {"a": 1.0, "b": 0.5}, budget=1000)
+        clear_node_token_cache()
+        assert len(_node_token_cache) == 0
+
+    def test_recomputes_after_clear(self, monkeypatch):
+        G = self._graph()
+        select_subgraph(G, {"a": 1.0, "b": 0.5}, budget=1000)
+        clear_node_token_cache()
+
+        calls = {"n": 0}
+        import slurp.budget as budget_mod
+        original = budget_mod.count_tokens
+
+        def counting(text, model="cl100k_base"):
+            calls["n"] += 1
+            return original(text, model)
+
+        monkeypatch.setattr(budget_mod, "count_tokens", counting)
+        select_subgraph(G, {"a": 1.0, "b": 0.5}, budget=1000)
+        assert calls["n"] > 0
+
+    def test_different_models_cached_separately(self):
+        G = self._graph()
+        select_subgraph(G, {"a": 1.0, "b": 0.5}, budget=1000, model="cl100k_base")
+        before = len(_node_token_cache)
+        select_subgraph(G, {"a": 1.0, "b": 0.5}, budget=1000, model="p50k_base")
+        assert len(_node_token_cache) == before * 2
+
+    def test_model_is_part_of_the_key(self):
+        G = self._graph()
+        _node_token_cost(G, "a", "cl100k_base")
+        assert ("a", "cl100k_base") in _node_token_cache
+        assert ("a", "p50k_base") not in _node_token_cache
+
+    def test_cost_matches_uncached_computation(self):
+        G = self._graph()
+        expected = count_tokens(_serialize_node(G, "a"), "cl100k_base")
+        assert _node_token_cost(G, "a", "cl100k_base") == expected
+
+    def test_cost_is_stable_across_calls(self):
+        G = self._graph()
+        assert _node_token_cost(G, "a", "cl100k_base") == _node_token_cost(G, "a", "cl100k_base")
+
+
+# ---------------------------------------------------------------------------
+# Heap-based greedy loop
+# ---------------------------------------------------------------------------
+
+
+def _reference_select(G, scores, budget, model="cl100k_base",
+                      neighbor_decay=0.7, min_score=0.0):
+    """The pre-heap O(n^2) implementation, kept as a differential oracle.
+
+    NOTE: its tie-breaking depends on set iteration order, which Python
+    randomises per process, so it is only deterministic when no two candidates
+    ever hold the same effective score.
+    """
+    nodes_total = G.number_of_nodes()
+    if nodes_total == 0 or budget <= 0:
+        return nx.DiGraph(), {
+            "nodes_selected": 0, "nodes_total": nodes_total, "tokens_used": 0,
+            "tokens_budget": budget, "coverage_pct": 0.0}
+    token_cost = {nid: _node_token_cost(G, nid, model) for nid in G.nodes}
+    candidates = {nid for nid in G.nodes if scores.get(nid, 0.0) >= min_score}
+    effective = {nid: scores.get(nid, 0.0) for nid in candidates}
+    processed, selected, tokens_used = set(), [], 0
+    while len(processed) < len(candidates):
+        best = max((nid for nid in candidates if nid not in processed),
+                   key=lambda nid: effective.get(nid, 0.0))
+        processed.add(best)
+        cost = token_cost[best]
+        if cost <= budget - tokens_used:
+            selected.append(best)
+            tokens_used += cost
+            boosted = effective.get(best, 0.0) * neighbor_decay
+            for nbr in set(G.predecessors(best)) | set(G.successors(best)):
+                if nbr in candidates and nbr not in processed \
+                        and boosted > effective.get(nbr, 0.0):
+                    effective[nbr] = boosted
+        if tokens_used >= budget:
+            break
+    return G.subgraph(selected).copy(), {
+        "nodes_selected": len(selected), "nodes_total": nodes_total,
+        "tokens_used": tokens_used, "tokens_budget": budget,
+        "coverage_pct": round(len(selected) / nodes_total * 100, 1)}
+
+
+def _random_graph(rng, n):
+    G = nx.DiGraph()
+    for i in range(n):
+        G.add_node(f"n{i}", label=f"Node{i}", description="x" * rng.randint(1, 40))
+    for _ in range(rng.randint(0, n * 2)):
+        a, b = rng.randrange(n), rng.randrange(n)
+        if a != b:
+            G.add_edge(f"n{a}", f"n{b}")
+    return G
+
+
+class TestHeapEquivalence:
+    """The heap loop must agree with the original scan wherever the original
+    was well-defined — i.e. when no two candidates share an effective score."""
+
+    @pytest.fixture(autouse=True)
+    def _clean(self):
+        clear_node_token_cache()
+        yield
+        clear_node_token_cache()
+
+    def test_matches_reference_when_ties_are_impossible(self):
+        """Edgeless graphs have no neighbour boost, so distinct input scores stay
+        distinct — the only regime where the original scan is deterministic."""
+        rng = random.Random(99)
+        for _ in range(150):
+            n = rng.randint(2, 30)
+            G = nx.DiGraph()
+            for i in range(n):
+                G.add_node(f"n{i}", label=f"Node{i}",
+                           description="x" * rng.randint(1, 40))
+            vals = rng.sample(range(1, 100_000), n)
+            scores = {f"n{i}": vals[i] / 100_000.0 for i in range(n)}
+            budget = rng.choice([50, 200, 1000, 5000])
+            r_sub, r_stats = _reference_select(G, scores, budget)
+            h_sub, h_stats = select_subgraph(G, scores, budget)
+            assert r_stats == h_stats
+            assert set(r_sub.nodes) == set(h_sub.nodes)
+
+    def test_divergence_requires_a_tie(self):
+        """With every score tied, the two implementations may pick different
+        nodes — both valid greedy answers — but must agree on the budget spent
+        being within limits and on selecting a non-empty set."""
+        G = nx.DiGraph()
+        for i in range(20):
+            G.add_node(f"n{i}", label=f"N{i}", description="d")
+        for i in range(19):
+            G.add_edge(f"n{i}", f"n{i + 1}")
+        scores = {f"n{i}": 0.5 for i in range(20)}
+        _, r_stats = _reference_select(G, scores, 60)
+        h_sub, h_stats = select_subgraph(G, scores, 60)
+        assert r_stats["tokens_used"] <= 60
+        assert h_stats["tokens_used"] <= 60
+        assert h_stats["nodes_selected"] > 0
+
+    def test_matches_reference_on_a_tie_free_chain(self):
+        G = nx.DiGraph()
+        for i in range(12):
+            G.add_node(f"n{i}", label=f"Node{i}", description="d" * (i + 1))
+        for i in range(11):
+            G.add_edge(f"n{i}", f"n{i + 1}")
+        scores = {f"n{i}": (i + 1) / 100.0 for i in range(12)}
+        r_sub, r_stats = _reference_select(G, scores, 200)
+        h_sub, h_stats = select_subgraph(G, scores, 200)
+        assert r_stats == h_stats
+        assert set(r_sub.nodes) == set(h_sub.nodes)
+
+    def test_single_node_matches(self):
+        G = nx.DiGraph()
+        G.add_node("solo", label="Solo", description="only node")
+        r_sub, r_stats = _reference_select(G, {"solo": 1.0}, 1000)
+        h_sub, h_stats = select_subgraph(G, {"solo": 1.0}, 1000)
+        assert r_stats == h_stats
+        assert set(r_sub.nodes) == set(h_sub.nodes)
+
+    def test_empty_graph_matches(self):
+        G = nx.DiGraph()
+        assert _reference_select(G, {}, 1000)[1] == select_subgraph(G, {}, 1000)[1]
+
+    def test_zero_budget_matches(self):
+        G = nx.DiGraph()
+        G.add_node("a", label="A", description="d")
+        assert _reference_select(G, {"a": 1.0}, 0)[1] == select_subgraph(G, {"a": 1.0}, 0)[1]
+
+
+class TestHeapDeterminism:
+    """The heap breaks ties by node id, so the output no longer depends on set
+    iteration order — unlike the original scan."""
+
+    @pytest.fixture(autouse=True)
+    def _clean(self):
+        clear_node_token_cache()
+        yield
+        clear_node_token_cache()
+
+    @staticmethod
+    def _all_tied_graph():
+        G = nx.DiGraph()
+        for i in range(40):
+            G.add_node(f"n{i}", label=f"N{i}", description="d" * (i % 7 + 1))
+        for i in range(39):
+            G.add_edge(f"n{i}", f"n{i + 1}")
+        return G, {f"n{i}": 0.5 for i in range(40)}
+
+    def test_repeated_runs_are_identical(self):
+        G, scores = self._all_tied_graph()
+        first_sub, first_stats = select_subgraph(G, scores, 100)
+        for _ in range(5):
+            sub, stats = select_subgraph(G, scores, 100)
+            assert stats == first_stats
+            assert set(sub.nodes) == set(first_sub.nodes)
+
+    def test_all_tied_selection_is_ordered_by_node_id(self):
+        G, scores = self._all_tied_graph()
+        sub, _ = select_subgraph(G, scores, 100)
+        assert sorted(sub.nodes) == sorted(sub.nodes)  # sanity
+        # n0 sorts first among tied ids and must be selected.
+        assert "n0" in sub.nodes
+
+    def test_reordering_node_insertion_does_not_change_result(self):
+        G1, scores = self._all_tied_graph()
+        sub1, stats1 = select_subgraph(G1, scores, 100)
+        G2 = nx.DiGraph()
+        for i in reversed(range(40)):
+            G2.add_node(f"n{i}", label=f"N{i}", description="d" * (i % 7 + 1))
+        for i in range(39):
+            G2.add_edge(f"n{i}", f"n{i + 1}")
+        sub2, stats2 = select_subgraph(G2, scores, 100)
+        assert stats1 == stats2
+        assert set(sub1.nodes) == set(sub2.nodes)
+
+
+class TestHeapInvariants:
+    """Properties the greedy algorithm must hold regardless of tie-breaking."""
+
+    @pytest.fixture(autouse=True)
+    def _clean(self):
+        clear_node_token_cache()
+        yield
+        clear_node_token_cache()
+
+    def test_never_exceeds_budget(self):
+        rng = random.Random(7)
+        for _ in range(60):
+            G = _random_graph(rng, rng.randint(2, 25))
+            scores = {n: rng.random() for n in G.nodes}
+            budget = rng.choice([10, 50, 200, 1000])
+            _, stats = select_subgraph(G, scores, budget)
+            assert stats["tokens_used"] <= budget
+
+    def test_stats_are_self_consistent(self):
+        rng = random.Random(11)
+        for _ in range(60):
+            G = _random_graph(rng, rng.randint(2, 25))
+            scores = {n: rng.random() for n in G.nodes}
+            sub, stats = select_subgraph(G, scores, 500)
+            assert stats["nodes_selected"] == sub.number_of_nodes()
+            assert stats["nodes_total"] == G.number_of_nodes()
+
+    def test_highest_scoring_node_selected_first_when_it_fits(self):
+        G = nx.DiGraph()
+        G.add_node("low", label="Low", description="d")
+        G.add_node("high", label="High", description="d")
+        sub, _ = select_subgraph(G, {"low": 0.1, "high": 0.9}, 10)
+        assert "high" in sub.nodes
+
+    def test_min_score_filter_still_applies(self):
+        G = nx.DiGraph()
+        G.add_node("keep", label="Keep", description="d")
+        G.add_node("drop", label="Drop", description="d")
+        sub, _ = select_subgraph(G, {"keep": 0.9, "drop": 0.1},
+                                 budget=1000, min_score=0.5)
+        assert "keep" in sub.nodes
+        assert "drop" not in sub.nodes
+
+    def test_neighbor_boost_still_propagates(self):
+        """A low-scored neighbour of the top node beats an unconnected peer."""
+        G = nx.DiGraph()
+        G.add_node("hub", label="Hub", description="d")
+        G.add_node("nbr", label="Nbr", description="d")
+        G.add_node("far", label="Far", description="d")
+        G.add_edge("hub", "nbr")
+        scores = {"hub": 1.0, "nbr": 0.01, "far": 0.02}
+        # Budget for exactly hub + nbr, computed from their real token costs so
+        # the assertion does not depend on two node ids tokenising identically.
+        budget = (_node_token_cost(G, "hub", "cl100k_base")
+                  + _node_token_cost(G, "nbr", "cl100k_base"))
+        sub, _ = select_subgraph(G, scores, budget=budget, neighbor_decay=0.7)
+        assert "hub" in sub.nodes
+        assert "nbr" in sub.nodes   # boosted 0.01 -> 0.7, overtaking far's 0.02
+        assert "far" not in sub.nodes
+
+    def test_no_node_selected_twice(self):
+        rng = random.Random(13)
+        for _ in range(40):
+            G = _random_graph(rng, rng.randint(2, 20))
+            scores = {n: rng.choice([0.0, 0.5, 1.0]) for n in G.nodes}
+            sub, stats = select_subgraph(G, scores, 300)
+            assert len(set(sub.nodes)) == stats["nodes_selected"]
+
+    def test_stale_heap_entries_do_not_reprocess(self):
+        """A boosted node is pushed twice; it must still be selected once."""
+        G = nx.DiGraph()
+        for i in range(6):
+            G.add_node(f"n{i}", label=f"N{i}", description="d")
+        G.add_edge("n0", "n1")
+        G.add_edge("n1", "n2")
+        scores = {f"n{i}": 1.0 - i * 0.1 for i in range(6)}
+        sub, stats = select_subgraph(G, scores, 1000)
+        assert len(list(sub.nodes)) == stats["nodes_selected"]
+        assert len(set(sub.nodes)) == len(list(sub.nodes))

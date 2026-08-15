@@ -4,9 +4,27 @@ from __future__ import annotations
 
 import math
 import re
+import weakref
 from collections import Counter
 
 import networkx as nx
+
+
+# DECISION: PageRank depends only on G, never on the query, so it is cached for
+# the lifetime of the graph object. The value keeps a weakref alongside the
+# result because CPython recycles id() after garbage collection — without it a
+# freshly loaded graph could land on a dead graph's address and silently inherit
+# its ranks. That is exactly the case the MCP server hits when it reloads.
+_pagerank_cache: dict[int, tuple["weakref.ref", dict[str, float]]] = {}
+
+
+def clear_pagerank_cache() -> None:
+    """Drop every cached PageRank result.
+
+    Call this whenever a graph is replaced in-process — the MCP server does it
+    on reload — so no stale ranks survive.
+    """
+    _pagerank_cache.clear()
 
 
 def _pagerank(
@@ -19,7 +37,20 @@ def _pagerank(
 
     Handles dangling nodes (no out-edges) by redistributing their rank
     uniformly across all nodes, matching the standard Google-matrix formula.
+
+    Results are cached per graph object; see clear_pagerank_cache(). Only the
+    default parameters are cached — a call with non-default alpha/max_iter/tol
+    always recomputes and never poisons the cache.
     """
+    cacheable = (alpha, max_iter, tol) == (0.85, 100, 1e-6)
+    key = id(G)
+    if cacheable and (hit := _pagerank_cache.get(key)) is not None:
+        ref, ranks = hit
+        if ref() is G:
+            return ranks
+        # id() was recycled by a different object — drop the stale entry.
+        del _pagerank_cache[key]
+
     nodes = list(G.nodes)
     N = len(nodes)
     rank: dict[str, float] = {n: 1.0 / N for n in nodes}
@@ -41,6 +72,12 @@ def _pagerank(
 
         if sum(abs(rank[n] - prev[n]) for n in nodes) < N * tol:
             break
+
+    if cacheable:
+        try:
+            _pagerank_cache[key] = (weakref.ref(G), rank)
+        except TypeError:
+            pass  # graph type does not support weak references — skip caching
 
     return rank
 

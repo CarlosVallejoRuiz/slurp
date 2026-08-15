@@ -6,7 +6,12 @@ from unittest.mock import patch
 import networkx as nx
 import pytest
 
+import weakref
+
 from slurp.scorer import (
+    _pagerank,
+    _pagerank_cache,
+    clear_pagerank_cache,
     _cosine_sim,
     _embed_anthropic,
     _embed_openai,
@@ -642,3 +647,111 @@ class TestBackendCLI:
             "auth", "--graph", str(sample_graph_json), "--backend", "gpt4"
         ])
         assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# PageRank cache
+# ---------------------------------------------------------------------------
+
+
+class TestPagerankCache:
+    @pytest.fixture(autouse=True)
+    def _clean(self):
+        clear_pagerank_cache()
+        yield
+        clear_pagerank_cache()
+
+    @staticmethod
+    def _graph():
+        G = nx.DiGraph()
+        G.add_edge("a", "b")
+        G.add_edge("b", "c")
+        G.add_edge("c", "a")
+        return G
+
+    def test_first_call_populates_cache(self):
+        G = self._graph()
+        assert len(_pagerank_cache) == 0
+        _pagerank(G)
+        assert len(_pagerank_cache) == 1
+
+    def test_second_call_returns_identical_object(self):
+        G = self._graph()
+        assert _pagerank(G) is _pagerank(G)
+
+    def test_second_call_does_not_recompute(self, monkeypatch):
+        G = self._graph()
+        _pagerank(G)
+
+        calls = {"n": 0}
+        original = nx.DiGraph.predecessors
+
+        def counting(self, n):
+            calls["n"] += 1
+            return original(self, n)
+
+        monkeypatch.setattr(nx.DiGraph, "predecessors", counting)
+        _pagerank(G)
+        assert calls["n"] == 0
+
+    def test_values_match_between_calls(self):
+        G = self._graph()
+        first = dict(_pagerank(G))
+        assert _pagerank(G) == first
+
+    def test_separate_graphs_cached_separately(self):
+        G1, G2 = self._graph(), self._graph()
+        G2.add_edge("c", "d")
+        _pagerank(G1)
+        _pagerank(G2)
+        assert len(_pagerank_cache) == 2
+
+    def test_clear_empties_the_cache(self):
+        _pagerank(self._graph())
+        clear_pagerank_cache()
+        assert len(_pagerank_cache) == 0
+
+    def test_recomputes_after_clear(self, monkeypatch):
+        G = self._graph()
+        _pagerank(G)
+        clear_pagerank_cache()
+
+        calls = {"n": 0}
+        original = nx.DiGraph.predecessors
+
+        def counting(self, n):
+            calls["n"] += 1
+            return original(self, n)
+
+        monkeypatch.setattr(nx.DiGraph, "predecessors", counting)
+        _pagerank(G)
+        assert calls["n"] > 0
+
+    def test_non_default_params_are_not_cached(self):
+        G = self._graph()
+        _pagerank(G, alpha=0.5)
+        assert len(_pagerank_cache) == 0
+
+    def test_non_default_params_do_not_read_the_cache(self):
+        G = self._graph()
+        default = _pagerank(G)
+        tweaked = _pagerank(G, alpha=0.5)
+        assert tweaked is not default
+
+    def test_recycled_id_does_not_return_stale_ranks(self):
+        """A dead graph's id() must never hand its ranks to a new graph."""
+        G1 = self._graph()
+        ranks1 = _pagerank(G1)
+        key = id(G1)
+        # Forge the exact hazard: a live id entry whose weakref is dead.
+        _pagerank_cache[key] = (weakref.ref(nx.DiGraph()), ranks1)
+        G2 = nx.DiGraph()
+        G2.add_edge("x", "y")
+        # If the guard were missing and id(G2) collided, we would get ranks1 back.
+        result = _pagerank(G2)
+        assert set(result) == {"x", "y"}
+
+    def test_score_nodes_benefits_from_the_cache(self):
+        G = self._graph()
+        score_nodes(G, "a")
+        assert len(_pagerank_cache) == 1

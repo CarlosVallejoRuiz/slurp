@@ -2,6 +2,8 @@
 
 import io
 import json
+import os
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -11,6 +13,7 @@ from slurp import __version__
 from slurp.loader import load_graph
 from slurp.mcp import (
     SESSION_LOG_FILE,
+    GraphState,
     _PROTOCOL_VERSION,
     _TOOL_DEFINITION,
     _handle,
@@ -674,3 +677,180 @@ class TestHandlerSessionLog:
         self._call(sample_graph, out, True, tmp_path, monkeypatch)
         resp = json.loads(out.getvalue())
         assert resp["result"]["content"][0]["type"] == "text"
+
+
+# ---------------------------------------------------------------------------
+# GraphState — on-disk staleness detection
+# ---------------------------------------------------------------------------
+
+
+class TestGraphState:
+    @staticmethod
+    def _write_graph(path, node_id, label):
+        path.write_text(json.dumps({
+            "nodes": [{"id": node_id, "label": label, "type": "function",
+                       "description": f"{label} description"}],
+            "links": [],
+        }), encoding="utf-8")
+
+    @pytest.fixture
+    def graph_file(self, tmp_path):
+        path = tmp_path / "graph.json"
+        self._write_graph(path, "alpha", "AlphaNode")
+        return path
+
+    def test_records_mtime_at_construction(self, graph_file):
+        state = GraphState(graph_file, load_graph(graph_file))
+        assert state.mtime == graph_file.stat().st_mtime
+
+    def test_no_reload_when_unchanged(self, graph_file):
+        state = GraphState(graph_file, load_graph(graph_file))
+        assert state.check_reload() is False
+
+    def test_repeated_checks_stay_false(self, graph_file):
+        state = GraphState(graph_file, load_graph(graph_file))
+        assert [state.check_reload() for _ in range(3)] == [False, False, False]
+
+    def test_reloads_when_file_changes(self, graph_file):
+        state = GraphState(graph_file, load_graph(graph_file))
+        self._write_graph(graph_file, "beta", "BetaNode")
+        os.utime(graph_file, (time.time() + 10, time.time() + 10))
+        assert state.check_reload() is True
+
+    def test_reload_swaps_in_the_new_graph(self, graph_file):
+        state = GraphState(graph_file, load_graph(graph_file))
+        assert "alpha" in state.graph
+        self._write_graph(graph_file, "beta", "BetaNode")
+        os.utime(graph_file, (time.time() + 10, time.time() + 10))
+        state.check_reload()
+        assert "beta" in state.graph
+        assert "alpha" not in state.graph
+
+    def test_reload_updates_mtime(self, graph_file):
+        state = GraphState(graph_file, load_graph(graph_file))
+        before = state.mtime
+        self._write_graph(graph_file, "beta", "BetaNode")
+        os.utime(graph_file, (time.time() + 10, time.time() + 10))
+        state.check_reload()
+        assert state.mtime != before
+
+    def test_second_check_after_reload_is_false(self, graph_file):
+        state = GraphState(graph_file, load_graph(graph_file))
+        self._write_graph(graph_file, "beta", "BetaNode")
+        os.utime(graph_file, (time.time() + 10, time.time() + 10))
+        state.check_reload()
+        assert state.check_reload() is False
+
+    def test_reload_clears_pagerank_cache(self, graph_file):
+        from slurp.scorer import _pagerank, _pagerank_cache
+        state = GraphState(graph_file, load_graph(graph_file))
+        _pagerank(state.graph)
+        assert len(_pagerank_cache) > 0
+        self._write_graph(graph_file, "beta", "BetaNode")
+        os.utime(graph_file, (time.time() + 10, time.time() + 10))
+        state.check_reload()
+        assert len(_pagerank_cache) == 0
+
+    def test_reload_clears_node_token_cache(self, graph_file):
+        from slurp.budget import _node_token_cache, select_subgraph
+        state = GraphState(graph_file, load_graph(graph_file))
+        select_subgraph(state.graph, {"alpha": 1.0}, budget=1000)
+        assert len(_node_token_cache) > 0
+        self._write_graph(graph_file, "beta", "BetaNode")
+        os.utime(graph_file, (time.time() + 10, time.time() + 10))
+        state.check_reload()
+        assert len(_node_token_cache) == 0
+
+    def test_missing_file_does_not_reload(self, graph_file):
+        state = GraphState(graph_file, load_graph(graph_file))
+        graph_file.unlink()
+        assert state.check_reload() is False
+
+    def test_missing_file_keeps_serving_old_graph(self, graph_file):
+        state = GraphState(graph_file, load_graph(graph_file))
+        graph_file.unlink()
+        state.check_reload()
+        assert "alpha" in state.graph
+
+    def test_corrupt_file_raises(self, graph_file):
+        state = GraphState(graph_file, load_graph(graph_file))
+        graph_file.write_text("{not valid json", encoding="utf-8")
+        os.utime(graph_file, (time.time() + 10, time.time() + 10))
+        with pytest.raises(Exception):
+            state.check_reload()
+
+    def test_corrupt_file_keeps_the_old_graph(self, graph_file):
+        state = GraphState(graph_file, load_graph(graph_file))
+        graph_file.write_text("{not valid json", encoding="utf-8")
+        os.utime(graph_file, (time.time() + 10, time.time() + 10))
+        with pytest.raises(Exception):
+            state.check_reload()
+        assert "alpha" in state.graph
+
+
+class TestHandlerGraphReload:
+    @staticmethod
+    def _call(state, query="alpha"):
+        msg = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+               "params": {"name": "slurp_query", "arguments": {"query": query}}}
+        out = io.StringIO()
+        _handle(msg, state.graph, out, session_log=False, state=state)
+        return json.loads(out.getvalue())
+
+    @pytest.fixture
+    def state(self, tmp_path):
+        path = tmp_path / "graph.json"
+        TestGraphState._write_graph(path, "alpha", "AlphaNode")
+        return GraphState(path, load_graph(path))
+
+    def test_no_reload_flag_when_unchanged(self, state):
+        assert "graph_reloaded" not in self._call(state)["result"]
+
+    def test_reload_flag_when_file_changed(self, state):
+        TestGraphState._write_graph(state.graph_path, "beta", "BetaNode")
+        os.utime(state.graph_path, (time.time() + 10, time.time() + 10))
+        assert self._call(state, "beta")["result"]["graph_reloaded"] is True
+
+    def test_next_query_uses_the_new_graph(self, state):
+        assert "AlphaNode" in self._call(state)["result"]["content"][0]["text"]
+        TestGraphState._write_graph(state.graph_path, "beta", "BetaNode")
+        os.utime(state.graph_path, (time.time() + 10, time.time() + 10))
+        text = self._call(state, "beta")["result"]["content"][0]["text"]
+        assert "BetaNode" in text
+        assert "AlphaNode" not in text
+
+    def test_flag_absent_again_on_the_query_after_reload(self, state):
+        TestGraphState._write_graph(state.graph_path, "beta", "BetaNode")
+        os.utime(state.graph_path, (time.time() + 10, time.time() + 10))
+        self._call(state, "beta")
+        assert "graph_reloaded" not in self._call(state, "beta")["result"]
+
+    def test_corrupt_reload_returns_tool_error(self, state):
+        state.graph_path.write_text("{not valid json", encoding="utf-8")
+        os.utime(state.graph_path, (time.time() + 10, time.time() + 10))
+        result = self._call(state)["result"]
+        assert result["isError"] is True
+
+    def test_corrupt_reload_message_is_actionable(self, state):
+        state.graph_path.write_text("{not valid json", encoding="utf-8")
+        os.utime(state.graph_path, (time.time() + 10, time.time() + 10))
+        text = self._call(state)["result"]["content"][0]["text"]
+        assert "could not be reloaded" in text
+        assert "previously loaded graph" in text
+
+    def test_server_survives_a_corrupt_reload(self, state):
+        state.graph_path.write_text("{not valid json", encoding="utf-8")
+        os.utime(state.graph_path, (time.time() + 10, time.time() + 10))
+        self._call(state)
+        # A ping after the failure still works — the loop was not killed.
+        out = io.StringIO()
+        _handle({"jsonrpc": "2.0", "id": 9, "method": "ping"}, state.graph, out)
+        assert json.loads(out.getvalue())["result"] == {}
+
+    def test_without_state_no_staleness_check(self, sample_graph):
+        """Backwards compatible: _handle(msg, G, out) behaves as before."""
+        msg = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+               "params": {"name": "slurp_query", "arguments": {"query": "auth"}}}
+        out = io.StringIO()
+        _handle(msg, sample_graph, out, session_log=False)
+        assert "graph_reloaded" not in json.loads(out.getvalue())["result"]
