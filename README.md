@@ -4,7 +4,7 @@
 
 # slurp
 
-![tests](https://img.shields.io/badge/tests-1477%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-1521%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 ![pypi](https://img.shields.io/badge/PyPI-slurp--graph-orange)
@@ -494,6 +494,7 @@ slurp index .                              # index current directory
 slurp index /path/to/project              # specific path
 slurp index . --output custom/graph.json  # custom output path
 slurp index . --watch                     # re-index on file changes
+slurp index . --smart                     # only re-index what changed
 ```
 
 ```
@@ -508,7 +509,35 @@ Next: slurp "your query" --graph /path/to/project/graphify-out/graph.json
 |---|---|---|
 | `--output`, `-o` | `<path>/graphify-out/graph.json` | Output path for graph.json. |
 | `--watch` | off | Re-index on file changes (requires watchdog, installed by default). |
+| `--smart` | off | Git-aware incremental re-index — only re-indexes changed files and their dependents. |
+| `--dry-run` | off | Show what `--smart` would re-index without making changes. |
 | `--ignore-file` | `.slurpignore` | Path to .slurpignore rules. |
+
+#### Incremental re-indexing with `--smart`
+
+Re-parsing every file after a two-line edit is wasted work. `--smart` asks git which
+files changed since the last commit — unstaged, staged, and untracked — widens that
+set to the files that import them (2 hops), and rewrites only that slice of the graph.
+
+```bash
+slurp index . --smart
+# → Detected 1 changed file (git diff)
+# ✓ Updated 47 nodes · 46 edges in 0.1s
+#   Full index would take: ~2.2s (21× faster)
+```
+
+The resulting graph is identical to a full index — nodes from re-parsed files are
+replaced, nodes from deleted files are dropped, and no dangling edges are left behind.
+
+`--dry-run` lists the files it would touch and exits without writing:
+
+```bash
+slurp index . --smart --dry-run
+```
+
+It falls back to a full index, with a message, when there is no git repository or no
+existing graph to update. Speedup depends on what you touched: editing a leaf module
+is near-instant, while editing something the whole project imports pulls in most of it.
 
 #### Supported languages
 

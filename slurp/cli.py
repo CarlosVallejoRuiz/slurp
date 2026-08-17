@@ -760,6 +760,78 @@ def _format_session_line(line: str) -> str:
     )
 
 
+def _rel_display(path: Path, root: Path) -> str:
+    """Render *path* relative to *root* when possible, for compact output."""
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def _run_smart(root: Path, out: Path, ignore, dry_run: bool) -> bool:
+    """Run one incremental re-index and report it.
+
+    Args:
+        root: Project root.
+        out: Graph path to update.
+        ignore: SlurpIgnore rules.
+        dry_run: List the work without writing the graph.
+
+    Returns:
+        True if the incremental path handled the request. False means the caller
+        must fall back to a full index; the reason has already been printed.
+    """
+    from slurp.smart import smart_reindex
+
+    mode = "smart mode, dry run" if dry_run else "smart mode"
+    click.echo(f"Indexing {root} ({mode}) ...")
+
+    result = smart_reindex(root, out, ignore, dry_run=dry_run)
+
+    if not result.is_git_repo:
+        click.echo("  No git repository found — running full index")
+        return False
+    if not result.graph_found:
+        click.echo(f"  No existing graph at {out} — running full index")
+        return False
+
+    if not result.changed_files:
+        click.echo("✓ No changes detected since last commit — index is up to date")
+        return True
+
+    click.echo(f"→ Detected {len(result.changed_files)} changed "
+               f"{_plural(len(result.changed_files), 'file')} (git diff)")
+    if result.dependents_added:
+        click.echo(f"→ Expanding to {len(result.expanded_files)} files "
+                   f"({result.dependents_added} "
+                   f"{_plural(result.dependents_added, 'dependent')} added)")
+
+    if dry_run:
+        click.echo(f"\nWould re-index {len(result.expanded_files)} "
+                   f"{_plural(len(result.expanded_files), 'file')}:")
+        for path in result.expanded_files:
+            click.echo(f"  {_rel_display(path, root)}")
+        deleted = [p for p in result.changed_files if not p.is_file()]
+        for path in deleted:
+            click.echo(f"  {_rel_display(path, root)} (deleted — nodes dropped)")
+        click.echo("\nNo changes written (--dry-run).")
+        return True
+
+    click.echo(f"✓ Updated {result.updated_nodes} nodes · "
+               f"{result.updated_edges} edges in {result.elapsed_ms / 1000:.1f}s")
+    if result.speedup >= 1.0:
+        click.echo(f"  Full index would take: "
+                   f"~{result.full_index_ms_estimate / 1000:.1f}s "
+                   f"({result.speedup:.0f}× faster)")
+    click.echo(f"  Saved: {out}")
+    click.echo(f'\nNext: slurp "your query" --graph {out}')
+    return True
+
+
+def _plural(count: int, word: str) -> str:
+    return word if count == 1 else f"{word}s"
+
+
 @cli.command("index")
 @click.argument("path", default=".", type=click.Path(exists=True, file_okay=False))
 @click.option("--output", "-o", "output_path", default=None, type=click.Path(),
@@ -768,7 +840,18 @@ def _format_session_line(line: str) -> str:
               help="Re-index on file changes (requires watchdog).")
 @click.option("--ignore-file", "ignore_file", default=".slurpignore", show_default=True,
               help="Path to .slurpignore rules.")
-def index_cmd(path: str, output_path: str | None, watch: bool, ignore_file: str) -> None:
+@click.option("--smart", is_flag=True, default=False,
+              help="Re-index only files changed since the last commit, plus their dependents.")
+@click.option("--dry-run", is_flag=True, default=False,
+              help="With --smart, list the files that would be re-indexed and exit.")
+def index_cmd(
+    path: str,
+    output_path: str | None,
+    watch: bool,
+    ignore_file: str,
+    smart: bool,
+    dry_run: bool,
+) -> None:
     """Generate graph.json by statically indexing the project.
 
     No graphify or LLM required. Supports Python (ast), TypeScript/JS
@@ -812,7 +895,17 @@ def index_cmd(path: str, output_path: str | None, watch: bool, ignore_file: str)
         click.echo(f"  Saved: {out}")
         click.echo(f'\nNext: slurp "your query" --graph {out}')
 
-    _run()
+    if dry_run and not smart:
+        raise click.ClickException("--dry-run only applies with --smart.")
+
+    if dry_run:
+        _run_smart(root, out, ignore, dry_run=True)
+        return
+
+    # _run_smart returns False when it could not run incrementally (no git repo,
+    # no existing graph); the reason is reported and a full index takes over.
+    if not smart or not _run_smart(root, out, ignore, dry_run=False):
+        _run()
 
     if watch:
         try:
