@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.png" alt="slurp logo" width="120">
+  <img src="https://raw.githubusercontent.com/CarlosVallejoRuiz/slurp/main/assets/logo.png" alt="slurp logo" width="120">
 </p>
 
 # slurp

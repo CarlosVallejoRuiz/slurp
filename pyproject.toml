@@ -106,3 +106,13 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["slurp"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+  "assets/",
+  "images/",
+  "tests/",
+  "uv.lock",
+  "scratchpad/",
+  ".slurp/",
+]
