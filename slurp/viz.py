@@ -198,6 +198,7 @@ def build_html(
             "description": attrs.get("description") or "",
             "file_path": attrs.get("file_path") or attrs.get("source_file") or "",
             "importance": attrs.get("importance"),
+            "project": attrs.get("_project") or "",
         })
 
     edges = []
@@ -215,6 +216,10 @@ def build_html(
         {"type": t, "color": _type_color(t)}
         for t in sorted(present_types)
     ]
+
+    # Federated graphs carry _project; the legend names the projects in view so
+    # a cross-project result is readable without clicking every node.
+    projects = sorted({n["project"] for n in nodes if n["project"]})
 
     # Token savings vs naively injecting the full graph (≈ 50 tokens/node baseline).
     baseline = stats["nodes_total"] * 50
@@ -238,6 +243,7 @@ def build_html(
         .replace("<<<TOP_BADGE>>>",      top_badge)
         .replace("<<<PALETTE_JSON>>>",   json.dumps(palette))
         .replace("<<<LEGEND_JSON>>>",    json.dumps(legend, ensure_ascii=False))
+        .replace("<<<PROJECTS_JSON>>>",  json.dumps(projects, ensure_ascii=False))
         .replace("<<<INLINE_MAX>>>",     str(_INLINE_LABEL_MAX))
         .replace("<<<IMPORT_SIZE>>>",    str(_IMPORT_SIZE))
         .replace("<<<QUIET_SCORE>>>",    str(_QUIET_LABEL_SCORE))
@@ -372,6 +378,17 @@ _HTML_TEMPLATE = """\
       width: 8px; height: 8px; border-radius: 50%;
       flex-shrink: 0;
     }
+    .lg-sec {
+      margin-top: 8px;
+      padding-top: 7px;
+      border-top: 1px solid var(--border);
+      color: var(--ink-mute);
+      text-transform: uppercase;
+      letter-spacing: .7px;
+      font-size: 9px;
+      font-weight: 700;
+    }
+    .lg-proj { color: var(--ink); padding-left: 1px; }
 
     /* ---- panel ---- */
     #panel {
@@ -444,6 +461,16 @@ _HTML_TEMPLATE = """\
       box-shadow: 0 0 10px rgba(249, 115, 22, .5);
     }
     .relevance { font-size: 11.5px; color: var(--ink-dim); line-height: 1.55; }
+    .proj-tag {
+      display: inline-block;
+      padding: 2px 9px;
+      border-radius: 999px;
+      background: #16202e;
+      border: 1px solid var(--border);
+      color: var(--cyan);
+      font-size: 11px;
+      font-weight: 600;
+    }
     .src {
       color: var(--cyan);
       font-size: 11px;
@@ -497,6 +524,7 @@ _HTML_TEMPLATE = """\
 <script>
 var PALETTE = <<<PALETTE_JSON>>>;
 var LEGEND  = <<<LEGEND_JSON>>>;
+var PROJECTS = <<<PROJECTS_JSON>>>;
 var INLINE_MAX = <<<INLINE_MAX>>>;
 var IMPORT_SIZE = <<<IMPORT_SIZE>>>;
 var QUIET_SCORE = <<<QUIET_SCORE>>>;
@@ -593,10 +621,17 @@ net.on("blurNode", function(p){
   var box = document.getElementById("legend");
   if(!LEGEND.length){ box.style.display = "none"; return; }
   var items = document.getElementById("legend-items");
-  items.innerHTML = LEGEND.map(function(l){
+  var html = LEGEND.map(function(l){
     return '<div class="lg-row"><span class="lg-dot" style="background:'+l.color+
            ';box-shadow:0 0 6px '+l.color+'"></span>'+x(l.type)+'</div>';
   }).join("");
+  // Only worth a section when more than one project is actually in view.
+  if(PROJECTS.length > 1){
+    html += '<div class="lg-sec">Projects</div>' + PROJECTS.map(function(p){
+      return '<div class="lg-row lg-proj">'+x(p)+'</div>';
+    }).join("");
+  }
+  items.innerHTML = html;
   document.getElementById("legend-hd").addEventListener("click", function(){
     var hidden = items.classList.toggle("hidden");
     document.getElementById("legend-tog").innerHTML = hidden ? "+" : "&minus;";
@@ -633,6 +668,7 @@ net.on("click",function(p){
 
   h+=fld("Relevance",'<div class="relevance">'+relevanceText(d.score)+'</div>');
 
+  if(d.project){h+=fld("Project",'<span class="proj-tag">'+x(d.project)+"</span>");}
   if(d.description){h+=fld("Description",'<span style="color:var(--ink-dim)">'+x(d.description)+"</span>");}
   if(d.file_path){
     h+=fld("Source",'<a class="src" href="file://'+x(d.file_path)+'">'+x(d.file_path)+"</a>");

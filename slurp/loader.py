@@ -68,6 +68,21 @@ def _build_graph(data: dict) -> nx.DiGraph:
     return G
 
 
+def build_graph(data: dict) -> nx.DiGraph:
+    """Build a DiGraph from an already-parsed graph.json dict.
+
+    The public entry point for graphs that never touch disk — a federated merge,
+    for instance. File-backed graphs should use :func:`load_graph`.
+
+    Args:
+        data: Dict with 'nodes' and 'links' (or 'edges').
+
+    Returns:
+        The constructed DiGraph.
+    """
+    return _build_graph(data)
+
+
 def _load_json(path: Path) -> nx.DiGraph:
     """Load a JSON graph file (graphify or generic format)."""
     if not path.exists():

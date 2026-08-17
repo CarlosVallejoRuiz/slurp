@@ -19,7 +19,7 @@ from slurp.benchmark import MODEL_PRICES_PER_MTok
 from slurp.budget import select_subgraph
 from slurp.formatter import format_subgraph
 from slurp.ignore import apply_ignore, load_ignore
-from slurp.loader import SlurpLoadError, load_graph
+from slurp.loader import SlurpLoadError, build_graph, load_graph
 from slurp.scorer import score_nodes, score_nodes_detailed
 
 _GRAPH_SEARCH_PATHS = [
@@ -249,8 +249,12 @@ def cli(ctx: click.Context) -> None:
 
 @cli.command("run", hidden=True)
 @click.argument("query")
-@click.option("--graph", "-g", type=click.Path(), default=None,
-              help="Path to graph.json (auto-discovered if omitted).")
+@click.option("--graph", "-g", type=click.Path(), multiple=True,
+              help="Path to graph.json (auto-discovered if omitted). "
+                   "Repeat to query several projects as one federated graph.")
+@click.option("--graph-label", "graph_labels", multiple=True,
+              help="Name for each --graph, in the same order. Used to namespace "
+                   "node ids. Defaults to a name derived from each path.")
 @click.option("--budget", "-b", default=4000, show_default=True,
               help="Token budget for subgraph selection.")
 @click.option("--format", "-f", "fmt",
@@ -282,7 +286,8 @@ def cli(ctx: click.Context) -> None:
               help="Root directory for resolving source_file paths (default: graph.json directory).")
 def run(
     query: str,
-    graph: str | None,
+    graph: tuple[str, ...],
+    graph_labels: tuple[str, ...],
     budget: int,
     fmt: str,
     model: str,
@@ -298,16 +303,56 @@ def run(
     project_root: str | None,
 ) -> None:
     """Run a query against the graph."""
-    graph_path = Path(graph) if graph else _find_graph()
-    if graph_path is None:
+    graph_paths = [Path(g) for g in graph]
+    if not graph_paths:
+        found = _find_graph()
+        if found is None:
+            raise click.ClickException(
+                "No graph.json found. Pass --graph or run from a directory "
+                "with graph.json."
+            )
+        graph_paths = [found]
+
+    if graph_labels and len(graph_labels) != len(graph_paths):
         raise click.ClickException(
-            "No graph.json found. Pass --graph or run from a directory with graph.json."
+            f"Got {len(graph_labels)} --graph-label values for "
+            f"{len(graph_paths)} --graph paths — pass one label per graph."
         )
 
+    # The audit log records a single graph path; for a federation, the first one
+    # identifies the query well enough to keep the log's shape unchanged.
+    graph_path = graph_paths[0]
+    fed_stats = None
+
     try:
-        G = load_graph(graph_path)
+        if len(graph_paths) == 1:
+            G = load_graph(graph_path)
+        else:
+            from slurp.federation import (
+                derive_labels,
+                load_graphs,
+                merge_graphs_with_stats,
+            )
+            labels = list(graph_labels) or derive_labels(graph_paths)
+            merged, fed_stats = merge_graphs_with_stats(
+                load_graphs(graph_paths), labels
+            )
+            G = build_graph(merged)
     except SlurpLoadError as exc:
         raise click.ClickException(str(exc)) from exc
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from None
+
+    if fed_stats is not None:
+        from slurp.federation import format_federation_header
+        click.echo(format_federation_header(fed_stats))
+        if fed_stats.collision_count:
+            click.echo(
+                f"  {fed_stats.collision_count} node "
+                f"{'id' if fed_stats.collision_count == 1 else 'ids'} appeared in "
+                "more than one graph — namespaced by project, none lost."
+            )
+        click.echo()
 
     G = apply_ignore(G, load_ignore(Path(ignore_file)))
 
@@ -650,19 +695,37 @@ def benchmark_cmd(
 
 
 @cli.command()
-@click.option("--graph", "-g", type=click.Path(), default=None,
-              help="Path to graph.json (auto-discovered if omitted).")
+@click.option("--graph", "-g", type=click.Path(), multiple=True,
+              help="Path to graph.json (auto-discovered if omitted). "
+                   "Repeat to serve several projects as one federated graph.")
+@click.option("--graph-label", "graph_labels", multiple=True,
+              help="Name for each --graph, in the same order.")
 @click.option("--log/--no-log", "log", default=True, show_default=True,
               help="Append served queries to .slurp/session.log (only if .slurp/ exists).")
-def serve(graph: str | None, log: bool) -> None:
+def serve(graph: tuple[str, ...], graph_labels: tuple[str, ...], log: bool) -> None:
     """Start an MCP stdio server exposing the slurp_query tool."""
-    graph_path = Path(graph) if graph else _find_graph()
-    if graph_path is None:
+    graph_paths = [Path(g) for g in graph]
+    if not graph_paths:
+        found = _find_graph()
+        if found is None:
+            raise click.ClickException(
+                "No graph.json found. Pass --graph or run from a directory "
+                "with graph.json."
+            )
+        graph_paths = [found]
+
+    if graph_labels and len(graph_labels) != len(graph_paths):
         raise click.ClickException(
-            "No graph.json found. Pass --graph or run from a directory with graph.json."
+            f"Got {len(graph_labels)} --graph-label values for "
+            f"{len(graph_paths)} --graph paths — pass one label per graph."
         )
+
     import slurp.mcp as _mcp
-    _mcp.serve(graph_path, session_log=log)
+    _mcp.serve(
+        graph_paths[0] if len(graph_paths) == 1 else graph_paths,
+        session_log=log,
+        labels=list(graph_labels) or None,
+    )
 
 
 @cli.command("advisor")

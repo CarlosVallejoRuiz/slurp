@@ -4,7 +4,7 @@
 
 # slurp
 
-![tests](https://img.shields.io/badge/tests-1585%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-1643%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 ![pypi](https://img.shields.io/badge/PyPI-slurp--graph-orange)
@@ -227,7 +227,8 @@ slurp "prisma models" --backend openai
 
 | Flag | Default | Description |
 |---|---|---|
-| `--graph`, `-g` | auto-discover | Path to `graph.json`. |
+| `--graph`, `-g` | auto-discover | Path to `graph.json`. Repeatable — see [federation](#multi-graph-federation). |
+| `--graph-label` | derived from path | Project name for each `--graph`, in the same order. |
 | `--budget`, `-b` | `4000` | Token budget for subgraph selection. |
 | `--format`, `-f` | `markdown` | Output format: `markdown`, `json`, or `yaml`. |
 | `--model`, `-m` | `cl100k_base` | Tiktoken encoding for token counting. |
@@ -247,6 +248,70 @@ slurp "prisma models" --backend openai
 1. `./graph.json`
 2. `./graphify-out/graph.json`
 3. `./.graphify/graph.json`
+
+---
+
+### Multi-graph federation
+
+Query across multiple codebases simultaneously.
+
+A system split across repos is still one system, but slurp normally sees one graph at
+a time — a question about "auth flow" stops at the boundary of whichever repo you
+pointed it at. Pass `--graph` more than once to merge them into a single queryable
+graph:
+
+```bash
+slurp "auth flow" --graph services/auth/graph.json --graph services/api/graph.json
+```
+
+```
+Federated: 2 graphs · 4,521 nodes total
+
+╭─ Slurp — Subgraph for: "auth flow" (budget: 4,000 tokens) ─╮
+│ Selected 12/4521 nodes · 1,204/4,000 tokens used (0.3%)    │
+╰────────────────────────────────────────────────────────────╯
+```
+
+**Node ids are namespaced automatically.** Two services can both define `main` or
+`authenticate_user` without one silently overwriting the other — every id is prefixed
+with its project, as `auth::authenticate_user`. If any original ids did appear in more
+than one graph, slurp says so:
+
+```
+  3 node ids appeared in more than one graph — namespaced by project, none lost.
+```
+
+**Project names** come from the graph paths by default. Since most projects keep their
+graph at `<project>/graphify-out/graph.json` — where every file stem is just `graph` —
+slurp walks up the path for a name that actually identifies the project. Override it
+with `--graph-label`, one per `--graph`, in the same order:
+
+```bash
+slurp "auth flow" \
+  --graph services/auth/graphify-out/graph.json \
+  --graph services/api/graphify-out/graph.json \
+  --graph apps/web/graphify-out/graph.json \
+  --graph-label auth --graph-label api --graph-label frontend
+```
+
+The MCP server federates too, so your AI assistant can query every service at once
+through the same `slurp_query` tool. Responses carry `graphs_count` when more than one
+graph is being served:
+
+```bash
+slurp serve --graph services/auth/graph.json --graph services/api/graph.json
+```
+
+In `--viz`, federated nodes show a **Project** field in the detail panel, and the legend
+gains a **Projects** section listing every project on screen.
+
+> **One graph behaves exactly as before** — no prefixes, no `_project` attribute, no
+> federation header. Federation only engages from the second `--graph` onward.
+>
+> Merging does not invent edges *between* projects: if `api` imports `auth`, that
+> relationship exists in neither `graph.json`, so slurp does not fabricate it. Each
+> project stays internally connected, and neighbor expansion does not cross project
+> boundaries.
 
 ---
 
@@ -493,7 +558,8 @@ slurp serve --graph graph.json --no-log
 
 | Flag | Default | Description |
 |---|---|---|
-| `--graph`, `-g` | auto-discover | Path to `graph.json`. |
+| `--graph`, `-g` | auto-discover | Path to `graph.json`. Repeatable — see [federation](#multi-graph-federation). |
+| `--graph-label` | derived from path | Project name for each `--graph`, in the same order. |
 | `--log` / `--no-log` | `--log` | Append served queries to `.slurp/session.log` (only if `.slurp/` exists). |
 
 See [MCP Integration](#mcp-integration) for configuration.

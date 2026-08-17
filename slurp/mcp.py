@@ -80,6 +80,9 @@ class GraphState:
     server keeps answering from the version it read at boot.
     """
 
+    #: How many source graphs this state serves. Federated states override it.
+    graphs_count = 1
+
     def __init__(self, graph_path: Path, graph) -> None:
         self.graph_path = graph_path
         self.graph = graph
@@ -116,6 +119,72 @@ class GraphState:
         clear_pagerank_cache()
         clear_node_token_cache()
         return True
+
+
+class FederatedGraphState(GraphState):
+    """Serves several graphs merged into one, reloading when any of them changes.
+
+    Node ids are namespaced by project, so a query can cross project boundaries
+    without ids colliding. See slurp.federation.
+    """
+
+    def __init__(self, graph_paths: list[Path], labels: list[str] | None = None) -> None:
+        from slurp.federation import derive_labels, load_graphs, merge_graphs
+        from slurp.loader import build_graph
+
+        self.graph_paths = list(graph_paths)
+        self.labels = list(labels) if labels else derive_labels(self.graph_paths)
+        self._merge_graphs = merge_graphs
+        self._load_graphs = load_graphs
+        self._build_graph = build_graph
+
+        self.graph_path = self.graph_paths[0]
+        self.graph = self._rebuild()
+        self.mtimes = self._current_mtimes()
+        self.mtime = self.mtimes[0] if self.mtimes else None
+
+    @property
+    def graphs_count(self) -> int:  # type: ignore[override]
+        return len(self.graph_paths)
+
+    def _rebuild(self):
+        merged = self._merge_graphs(self._load_graphs(self.graph_paths), self.labels)
+        return self._build_graph(merged)
+
+    def _current_mtimes(self) -> list[float | None]:
+        result: list[float | None] = []
+        for path in self.graph_paths:
+            try:
+                result.append(path.stat().st_mtime)
+            except OSError:
+                result.append(None)
+        return result
+
+    def check_reload(self) -> bool:
+        """Re-merge every graph if any one of them changed on disk.
+
+        A federated graph is only as fresh as its stalest member, so a change to
+        any single file invalidates the whole merge.
+
+        Returns:
+            True if the graphs were re-merged.
+
+        Raises:
+            SlurpLoadError: If the changed set could not be re-read. The
+                previously merged graph is kept so the server stays usable.
+        """
+        current = self._current_mtimes()
+        if any(m is None for m in current) or current == self.mtimes:
+            return False
+
+        rebuilt = self._rebuild()  # may raise; old graph survives
+        self.graph = rebuilt
+        self.mtimes = current
+        self.mtime = current[0]
+        clear_pagerank_cache()
+        clear_node_token_cache()
+        return True
+
 
 # DECISION: same 50-tokens-per-node baseline the `slurp audit` table uses, so
 # savings_pct means the same thing everywhere in slurp.
@@ -360,6 +429,9 @@ def _handle(msg: dict, G, out, session_log: bool = True, state: "GraphState | No
         result: dict = {"content": [{"type": "text", "text": text}]}
         if graph_reloaded:
             result["graph_reloaded"] = True
+        # Only present when federating, so single-graph responses are unchanged.
+        if state is not None and state.graphs_count > 1:
+            result["graphs_count"] = state.graphs_count
 
         _write(_ok(msg_id, result), out)
 
@@ -372,7 +444,13 @@ def _handle(msg: dict, G, out, session_log: bool = True, state: "GraphState | No
 # ---------------------------------------------------------------------------
 
 
-def serve(graph_path: Path, inp=None, out=None, session_log: bool = True) -> None:
+def serve(
+    graph_path: "Path | list[Path]",
+    inp=None,
+    out=None,
+    session_log: bool = True,
+    labels: list[str] | None = None,
+) -> None:
     """Run the MCP stdio server.
 
     Loads the graph once at startup, then reads newline-delimited JSON-RPC
@@ -380,20 +458,30 @@ def serve(graph_path: Path, inp=None, out=None, session_log: bool = True) -> Non
     (defaults to sys.stdout) until EOF.
 
     Args:
-        graph_path: Path to the graph.json file.
+        graph_path: Path to the graph.json file, or a list of paths to serve
+            several projects as one federated graph.
         inp:        Readable file-like object (defaults to sys.stdin).
         out:        Writable file-like object (defaults to sys.stdout).
         session_log: Whether to append served queries to .slurp/session.log.
+        labels:     Project labels for a federated graph, one per path.
     """
     if inp is None:
         inp = sys.stdin
     if out is None:
         out = sys.stdout
 
+    paths = [graph_path] if isinstance(graph_path, Path) else list(graph_path)
+
     try:
-        state = GraphState(graph_path, load_graph(graph_path))
+        if len(paths) == 1:
+            state: GraphState = GraphState(paths[0], load_graph(paths[0]))
+        else:
+            state = FederatedGraphState(paths, labels)
     except SlurpLoadError as exc:
         print(f"slurp: error loading graph: {exc}", file=sys.stderr)
+        sys.exit(1)
+    except ValueError as exc:
+        print(f"slurp: error federating graphs: {exc}", file=sys.stderr)
         sys.exit(1)
 
     for raw_line in inp:
