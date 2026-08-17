@@ -125,7 +125,7 @@ por debajo de la carpeta que abre el editor (`~/Desktop/Slurp/`). Todos los coma
 de este documento (`uv run pytest`, `ruff check`, `uv build`, `git`) se ejecutan
 desde `~/Desktop/Slurp/slurp/`, que es donde vive este CLAUDE.md.
 
-**Estado actual:** v0.8.0 · 1451 tests · `ruff check slurp/` limpio.
+**Estado actual:** v0.8.0 · 1477 tests · `ruff check slurp/` limpio.
 
 ```
 ~/Desktop/Slurp/slurp/         ← raíz del repo git — working directory

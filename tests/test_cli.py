@@ -1,7 +1,6 @@
 """Tests for slurp/cli.py."""
 
 import json
-import re
 from pathlib import Path
 from urllib.parse import urlparse, unquote
 
@@ -11,7 +10,7 @@ from click.testing import CliRunner
 
 from slurp import __version__
 from slurp.cli import cli
-from slurp.viz import build_html
+from slurp.viz import _resolve_node_type, build_html
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -646,7 +645,7 @@ class TestVizFlag:
 
     def test_viz_html_updated_physics_spring_length(self, sample_graph_json, monkeypatch):
         html, _ = _viz_html(monkeypatch, sample_graph_json, query="auth")
-        assert "springLength:80" in html or "springLength: 80" in html
+        assert "springLength:60" in html or "springLength: 60" in html
 
     def test_viz_html_updated_physics_stabilization(self, sample_graph_json, monkeypatch):
         html, _ = _viz_html(monkeypatch, sample_graph_json, query="auth")
@@ -662,14 +661,18 @@ class TestVizFlag:
         assert "stabilized" in html
         assert "physics" in html and "enabled" in html
 
-    def test_viz_html_node_font_size_13(self, sample_graph_json, monkeypatch):
+    def test_viz_html_node_font_size_12(self, sample_graph_json, monkeypatch):
         html, _ = _viz_html(monkeypatch, sample_graph_json, query="auth")
-        # Template uses a ternary: size:isDiff?11:13 — 13 is the normal-mode size.
-        assert "isDiff?11:13" in html
+        assert "size: 12," in html
+
+    def test_viz_html_node_font_is_monospace(self, sample_graph_json, monkeypatch):
+        html, _ = _viz_html(monkeypatch, sample_graph_json, query="auth")
+        assert "JetBrains Mono" in html
 
     def test_viz_html_node_font_stroke(self, sample_graph_json, monkeypatch):
+        """White label text needs a dark stroke to stay legible over any fill."""
         html, _ = _viz_html(monkeypatch, sample_graph_json, query="auth")
-        assert "strokeWidth:isDiff?2:3" in html
+        assert "strokeWidth: 4" in html
         assert "strokeColor" in html
 
     def test_viz_html_diff_type_detection_present(self, sample_graph_json, monkeypatch):
@@ -681,9 +684,15 @@ class TestVizFlag:
         html, _ = _viz_html(monkeypatch, sample_graph_json, query="auth")
         assert "vadjust" in html
 
-    def test_viz_html_node_chosen_false(self, sample_graph_json, monkeypatch):
+    def test_viz_html_node_selection_thickens_border(self, sample_graph_json, monkeypatch):
+        """Selecting a node must give visible feedback without resizing it."""
         html, _ = _viz_html(monkeypatch, sample_graph_json, query="auth")
-        assert "chosen: false" in html or "chosen:false" in html
+        assert "borderWidth: 2," in html
+        assert "borderWidthSelected: 3" in html
+
+    def test_viz_html_node_glow_uses_own_hue(self, sample_graph_json, monkeypatch):
+        html, _ = _viz_html(monkeypatch, sample_graph_json, query="auth")
+        assert "shadow: {enabled: true, color: col.fill, size: 12" in html
 
     def test_viz_html_no_top_badge_when_under_limit(self, sample_graph_json, monkeypatch):
         # sample_graph has 7 nodes — well under default max_nodes=50
@@ -798,6 +807,86 @@ def _extract_edges_json(html: str) -> list:
     return json.loads(html[start:end])
 
 
+class TestResolveNodeType:
+    """Graphify graphs carry no per-symbol `type`; colour comes from inference."""
+
+    def test_explicit_type_wins(self):
+        assert _resolve_node_type({"type": "class", "label": "foo()"}) == "class"
+
+    def test_unknown_explicit_type_falls_back_to_label(self):
+        assert _resolve_node_type({"type": "zzz", "label": "run()"}) == "function"
+
+    @pytest.mark.parametrize("label", ["useAuth()", "login()", "a.b.c()"])
+    def test_trailing_parens_is_function(self, label):
+        assert _resolve_node_type({"file_type": "code", "label": label}) == "function"
+
+    @pytest.mark.parametrize(
+        "label",
+        ["login.tsx", "src/auth/index.ts", "handlers.py", "main.go", "lib.rs", "App.jsx"],
+    )
+    def test_source_extension_is_module(self, label):
+        assert _resolve_node_type({"file_type": "code", "label": label}) == "module"
+
+    @pytest.mark.parametrize("label", ["AuthProvider", "TokenPair", "app.UserModel"])
+    def test_capitalised_without_extension_is_class(self, label):
+        assert _resolve_node_type({"file_type": "code", "label": label}) == "class"
+
+    @pytest.mark.parametrize("label", ["helper_fn", "some value", "x"])
+    def test_lowercase_bare_label_is_default(self, label):
+        assert _resolve_node_type({"file_type": "code", "label": label}) == "default"
+
+    def test_document_file_type_is_module(self):
+        assert _resolve_node_type({"file_type": "document", "label": "notes"}) == "module"
+
+    def test_empty_label_is_default(self):
+        assert _resolve_node_type({}) == "default"
+
+    def test_graphify_graph_yields_multiple_colours(self, tmp_path, monkeypatch):
+        """The whole point of the fix: a file_type-only graph is not monochrome."""
+        G = nx.DiGraph()
+        labels = ["useAuth()", "login.tsx", "AuthProvider", "helper_fn"]
+        for lbl in labels:
+            G.add_node(lbl, label=lbl, file_type="code")
+        G.add_edge("useAuth()", "AuthProvider")
+        scores = dict.fromkeys(labels, 0.5)
+        stats = {
+            "nodes_total": 4, "nodes_selected": 4, "tokens_used": 100,
+            "tokens_budget": 500, "coverage_pct": 50,
+        }
+        html = build_html(G, stats, scores, "auth")
+        rendered = {n["node_type"] for n in _extract_nodes_json(html)}
+        assert rendered == {"function", "module", "class", "default"}
+
+
+class TestQuietLabels:
+    """Nodes below the score threshold hold their label back until hover."""
+
+    def _html(self, score: float) -> str:
+        G = nx.DiGraph()
+        G.add_node("n1", label="thing", type="function")
+        stats = {
+            "nodes_total": 1, "nodes_selected": 1, "tokens_used": 10,
+            "tokens_budget": 100, "coverage_pct": 50,
+        }
+        return build_html(G, stats, {"n1": score}, "q")
+
+    def test_threshold_is_exposed_to_js(self):
+        assert "var QUIET_SCORE = 0.3;" in self._html(0.5)
+
+    def test_low_score_node_starts_unlabelled(self):
+        html = self._html(0.1)
+        assert 'label: quiet ? "" : n.label' in html
+        assert _extract_nodes_json(html)[0]["score"] == 0.1
+
+    def test_every_node_carries_a_title_for_hover(self):
+        assert "title: n.label" in self._html(0.1)
+
+    def test_hover_handlers_present(self):
+        html = self._html(0.1)
+        assert 'net.on("hoverNode"' in html
+        assert 'net.on("blurNode"' in html
+
+
 class TestBuildHtmlMaxNodes:
     def test_default_max_nodes_is_50(self):
         G, stats, scores = _make_graph_n(100)
@@ -848,8 +937,8 @@ class TestBuildHtmlMaxNodes:
     def test_stats_header_unchanged_after_truncation(self):
         G, stats, scores = _make_graph_n(100)
         html = build_html(G, stats, scores, "test", max_nodes=10)
-        # nodes_selected=100 must still appear in the header chip
-        assert "<strong>100</strong>" in html
+        # nodes_selected=100 must still appear in the header, not the truncated 10.
+        assert "<b>100</b>" in html
 
     def test_sample_graph_under_limit_unaffected(self, sample_graph):
         """sample_graph has 7 nodes — well under default max_nodes=50."""
