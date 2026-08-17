@@ -114,6 +114,19 @@ _LANGUAGE_BY_EXT: dict[str, str] = {
     ".kts": "Kotlin",
     ".scala": "Scala",
     ".swift": "Swift",
+    ".c": "C",
+    ".h": "C",
+    ".cpp": "C++",
+    ".cc": "C++",
+    ".cxx": "C++",
+    ".hpp": "C++",
+    ".hh": "C++",
+    ".hxx": "C++",
+    ".lua": "Lua",
+    ".ex": "Elixir",
+    ".exs": "Elixir",
+    ".ps1": "PowerShell",
+    ".psm1": "PowerShell",
 }
 
 

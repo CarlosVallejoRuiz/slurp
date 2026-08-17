@@ -1,6 +1,6 @@
 [project]
 name = "slurp-graph"
-version = "0.7.0"
+version = "0.8.0"
 description = "Token-budget-aware graph navigation for AI coding agents. Serve exactly the noodles your LLM needs."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -63,6 +63,11 @@ swift = [
     "tree-sitter>=0.22.0",
     "tree-sitter-swift>=0.7.0",
 ]
+cpp = [
+    "tree-sitter>=0.22.0",
+    "tree-sitter-c>=0.23.0",
+    "tree-sitter-cpp>=0.23.0",
+]
 all-languages = [
     "tree-sitter>=0.22.0",
     "tree-sitter-typescript>=0.23.0",
@@ -74,6 +79,8 @@ all-languages = [
     "tree-sitter-kotlin>=1.1.0",
     "tree-sitter-scala>=0.23.0",
     "tree-sitter-swift>=0.7.0",
+    "tree-sitter-c>=0.23.0",
+    "tree-sitter-cpp>=0.23.0",
 ]
 
 [project.urls]

@@ -12,7 +12,9 @@ from click.testing import CliRunner
 from slurp.cli import cli
 import slurp.indexer as indexer_mod
 from slurp.indexer import (
+    _CPP_TS_AVAILABLE,
     _CSHARP_TS_AVAILABLE,
+    _C_TS_AVAILABLE,
     _KOTLIN_TS_AVAILABLE,
     _PHP_TS_AVAILABLE,
     _JAVA_TS_AVAILABLE,
@@ -22,6 +24,7 @@ from slurp.indexer import (
     _SWIFT_TS_AVAILABLE,
     _TREE_SITTER_AVAILABLE,
     _file_id,
+    _index_c_regex,
     _index_csharp_regex,
     _index_java_regex,
     _index_ruby_regex,
@@ -32,8 +35,13 @@ from slurp.indexer import (
     _index_swift_regex,
     _tree_is_broken,
     format_parser_summary,
+    index_c,
+    index_cpp,
     index_csharp,
+    index_elixir,
     index_java,
+    index_lua,
+    index_powershell,
     index_kotlin,
     index_php,
     index_ruby,
@@ -2164,3 +2172,349 @@ class TestParserSummaryWrappingCLI:
         result = CliRunner().invoke(
             cli, ["index", str(tmp_path), "--output", str(tmp_path / "g.json")])
         assert "  Parsers: Python (ast)" in result.output
+
+
+# ---------------------------------------------------------------------------
+# C / C++ / Lua / Elixir / PowerShell — sample sources
+# ---------------------------------------------------------------------------
+
+C_HEADER_SOURCE = '''\
+#include <stdio.h>
+#define SQUARE(x) ((x)*(x))
+typedef struct { int x; } Point;
+enum Color { RED, GREEN };
+int helper(int a);
+'''
+
+C_IMPL_SOURCE = '''\
+#include "point.h"
+static int helper(int a) { return a; }
+int main(void) { return 0; }
+'''
+
+CPP_SOURCE = '''\
+#include <vector>
+namespace app {
+template<typename T>
+class Repo {
+public:
+    Repo();
+    T get(int id);
+};
+struct Point { int x; };
+}
+extern "C" { void c_api(void); }
+'''
+
+LUA_SOURCE = '''\
+local M = {}
+local function helper(x) return x end
+function M.create(a) return a end
+function M:method(b) return b end
+function globalFn(c) return c end
+'''
+
+ELIXIR_SOURCE = '''\
+defmodule App.Web.Router do
+  use Phoenix.Router
+  import Plug.Conn
+  alias App.Repo
+  defstruct [:id, :name]
+  def index(conn), do: conn
+  defp helper(x), do: x
+  defmacro route(p), do: p
+end
+'''
+
+POWERSHELL_SOURCE = '''\
+#requires -Version 5.1
+class Config {
+    [string] GetPath() { return "x" }
+}
+[CmdletBinding()]
+function Get-User {
+    param([string]$Name)
+    return $Name
+}
+function Set-Config { return 1 }
+'''
+
+
+class TestIndexC:
+    @pytest.mark.skipif(not _C_TS_AVAILABLE, reason="requires the 'cpp' extra")
+    def test_function_prototype_in_header(self, tmp_path):
+        nodes, _ = index_c(_write(tmp_path, "point.h", C_HEADER_SOURCE), tmp_path)
+        assert "point.helper" in _ids(nodes)
+
+    @pytest.mark.skipif(not _C_TS_AVAILABLE, reason="requires the 'cpp' extra")
+    def test_header_flagged(self, tmp_path):
+        nodes, _ = index_c(_write(tmp_path, "point.h", C_HEADER_SOURCE), tmp_path)
+        assert _node(nodes, "point.helper")["is_header"] is True
+
+    @pytest.mark.skipif(not _C_TS_AVAILABLE, reason="requires the 'cpp' extra")
+    def test_implementation_not_flagged_as_header(self, tmp_path):
+        nodes, _ = index_c(_write(tmp_path, "point.c", C_IMPL_SOURCE), tmp_path)
+        assert "is_header" not in _node(nodes, "point.main")
+
+    @pytest.mark.skipif(not _C_TS_AVAILABLE, reason="requires the 'cpp' extra")
+    def test_macro_with_params(self, tmp_path):
+        nodes, _ = index_c(_write(tmp_path, "point.h", C_HEADER_SOURCE), tmp_path)
+        assert _node(nodes, "point.SQUARE")["type"] == "macro"
+
+    @pytest.mark.skipif(not _C_TS_AVAILABLE, reason="requires the 'cpp' extra")
+    def test_typedef_and_enum(self, tmp_path):
+        nodes, _ = index_c(_write(tmp_path, "point.h", C_HEADER_SOURCE), tmp_path)
+        assert _node(nodes, "point.Point")["type"] == "typedef"
+        assert _node(nodes, "point.Color")["type"] == "enum"
+
+    @pytest.mark.skipif(not _C_TS_AVAILABLE, reason="requires the 'cpp' extra")
+    def test_include_creates_import_edge(self, tmp_path):
+        _, edges = index_c(_write(tmp_path, "point.h", C_HEADER_SOURCE), tmp_path)
+        assert any(e["relation"] == "imports_from" for e in edges)
+
+    def test_regex_fallback_extracts_symbols(self):
+        nodes, _ = _index_c_regex(C_HEADER_SOURCE, Path("point.h"), "point")
+        ids = _ids(nodes)
+        assert "point.SQUARE" in ids
+        assert "point.Color" in ids
+
+    def test_regex_fallback_marks_header(self):
+        nodes, _ = _index_c_regex(C_HEADER_SOURCE, Path("point.h"), "point")
+        assert _node(nodes, "point.SQUARE")["is_header"] is True
+
+    def test_regex_fallback_impl_not_header(self):
+        nodes, _ = _index_c_regex(C_IMPL_SOURCE, Path("point.c"), "point")
+        assert _node(nodes, "point.main")["is_header"] is False
+
+    def test_regex_fallback_skips_control_flow(self):
+        nodes, _ = _index_c_regex("int f(void) { if (x) { return 1; } }\n",
+                                  Path("a.c"), "a")
+        assert "a.if" not in _ids(nodes)
+
+
+class TestIndexCpp:
+    @pytest.mark.skipif(not _CPP_TS_AVAILABLE, reason="requires the 'cpp' extra")
+    def test_namespace_nested_in_id(self, tmp_path):
+        nodes, _ = index_cpp(_write(tmp_path, "repo.cpp", CPP_SOURCE), tmp_path)
+        assert "repo.app.Repo" in _ids(nodes)
+
+    @pytest.mark.skipif(not _CPP_TS_AVAILABLE, reason="requires the 'cpp' extra")
+    def test_template_flagged_with_params(self, tmp_path):
+        nodes, _ = index_cpp(_write(tmp_path, "repo.cpp", CPP_SOURCE), tmp_path)
+        node = _node(nodes, "repo.app.Repo")
+        assert node["is_template"] is True
+        assert node["template_params"] == "<typename T>"
+
+    @pytest.mark.skipif(not _CPP_TS_AVAILABLE, reason="requires the 'cpp' extra")
+    def test_method_and_constructor(self, tmp_path):
+        nodes, _ = index_cpp(_write(tmp_path, "repo.cpp", CPP_SOURCE), tmp_path)
+        assert _node(nodes, "repo.app.Repo.get")["type"] == "method"
+        assert _node(nodes, "repo.app.Repo.Repo")["type"] == "method"
+
+    @pytest.mark.skipif(not _CPP_TS_AVAILABLE, reason="requires the 'cpp' extra")
+    def test_extern_c_flagged(self, tmp_path):
+        nodes, _ = index_cpp(_write(tmp_path, "repo.cpp", CPP_SOURCE), tmp_path)
+        assert _node(nodes, "repo.c_api")["is_extern_c"] is True
+
+    @pytest.mark.skipif(not _CPP_TS_AVAILABLE, reason="requires the 'cpp' extra")
+    def test_non_extern_not_flagged(self, tmp_path):
+        nodes, _ = index_cpp(_write(tmp_path, "repo.cpp", CPP_SOURCE), tmp_path)
+        assert "is_extern_c" not in _node(nodes, "repo.app.Point")
+
+    @pytest.mark.skipif(not _CPP_TS_AVAILABLE, reason="requires the 'cpp' extra")
+    def test_hpp_is_a_header(self, tmp_path):
+        nodes, _ = index_cpp(_write(tmp_path, "r.hpp", "struct S { int f(); };\n"), tmp_path)
+        assert _node(nodes, "r.S")["is_header"] is True
+
+    def test_regex_fallback_template(self):
+        nodes, _ = _index_c_regex(CPP_SOURCE, Path("repo.cpp"), "repo")
+        assert _node(nodes, "repo.app.Repo")["is_template"] is True
+
+    def test_regex_fallback_namespace(self):
+        nodes, _ = _index_c_regex(CPP_SOURCE, Path("repo.cpp"), "repo")
+        assert any(n["type"] == "namespace" for n in nodes)
+
+    def test_regex_fallback_extern_c(self):
+        nodes, _ = _index_c_regex(CPP_SOURCE, Path("repo.cpp"), "repo")
+        assert _node(nodes, "repo.app.c_api")["is_extern_c"] is True
+
+
+class TestIndexLua:
+    def test_local_function_flagged(self, tmp_path):
+        nodes, _ = index_lua(_write(tmp_path, "mod.lua", LUA_SOURCE), tmp_path)
+        assert _node(nodes, "mod.helper")["is_local"] is True
+
+    def test_global_function_not_local(self, tmp_path):
+        nodes, _ = index_lua(_write(tmp_path, "mod.lua", LUA_SOURCE), tmp_path)
+        assert _node(nodes, "mod.globalFn")["is_local"] is False
+
+    def test_table_indexed_as_module(self, tmp_path):
+        nodes, _ = index_lua(_write(tmp_path, "mod.lua", LUA_SOURCE), tmp_path)
+        assert _node(nodes, "mod.M")["type"] == "module"
+
+    def test_table_function_nested_under_table(self, tmp_path):
+        nodes, _ = index_lua(_write(tmp_path, "mod.lua", LUA_SOURCE), tmp_path)
+        assert "mod.M.create" in _ids(nodes)
+
+    def test_colon_method_nested_and_typed(self, tmp_path):
+        nodes, _ = index_lua(_write(tmp_path, "mod.lua", LUA_SOURCE), tmp_path)
+        assert _node(nodes, "mod.M.method")["type"] == "method"
+
+    def test_contains_edge_table_to_method(self, tmp_path):
+        _, edges = index_lua(_write(tmp_path, "mod.lua", LUA_SOURCE), tmp_path)
+        assert ("mod.M", "mod.M.method") in _relations(edges, "contains")
+
+    def test_colon_method_on_unknown_table_creates_it(self, tmp_path):
+        nodes, _ = index_lua(_write(tmp_path, "c.lua",
+                                    "function Klass:go() end\n"), tmp_path)
+        assert "c.Klass" in _ids(nodes)
+        assert "c.Klass.go" in _ids(nodes)
+
+    def test_no_tree_sitter_warning(self, tmp_path, capsys):
+        index_lua(_write(tmp_path, "mod.lua", LUA_SOURCE), tmp_path)
+        captured = capsys.readouterr()
+        assert captured.err == ""
+        assert captured.out == ""
+
+
+class TestIndexElixir:
+    def test_nested_module_id(self, tmp_path):
+        nodes, _ = index_elixir(_write(tmp_path, "router.ex", ELIXIR_SOURCE), tmp_path)
+        assert "router.App.Web.Router" in _ids(nodes)
+
+    def test_def_is_public(self, tmp_path):
+        nodes, _ = index_elixir(_write(tmp_path, "router.ex", ELIXIR_SOURCE), tmp_path)
+        assert _node(nodes, "router.App.Web.Router.index")["is_private"] is False
+
+    def test_defp_is_private(self, tmp_path):
+        nodes, _ = index_elixir(_write(tmp_path, "router.ex", ELIXIR_SOURCE), tmp_path)
+        assert _node(nodes, "router.App.Web.Router.helper")["is_private"] is True
+
+    def test_defmacro_typed_as_macro(self, tmp_path):
+        nodes, _ = index_elixir(_write(tmp_path, "router.ex", ELIXIR_SOURCE), tmp_path)
+        assert _node(nodes, "router.App.Web.Router.route")["type"] == "macro"
+
+    def test_defstruct_records_fields(self, tmp_path):
+        nodes, _ = index_elixir(_write(tmp_path, "router.ex", ELIXIR_SOURCE), tmp_path)
+        node = _node(nodes, "router.App.Web.Router.__struct__")
+        assert node["type"] == "struct"
+        assert node["fields"] == ["id", "name"]
+
+    @pytest.mark.parametrize("relation,target", [
+        ("use", "Phoenix.Router"), ("import", "Plug.Conn"), ("alias", "App.Repo"),
+    ])
+    def test_directive_edges(self, relation, target, tmp_path):
+        _, edges = index_elixir(_write(tmp_path, "router.ex", ELIXIR_SOURCE), tmp_path)
+        assert ("router.App.Web.Router", target) in _relations(edges, relation)
+
+    def test_pipelines_are_not_nodes(self, tmp_path):
+        source = ("defmodule A do\n  def go(x) do\n    x |> String.trim() |> ok()\n"
+                  "  end\nend\n")
+        nodes, _ = index_elixir(_write(tmp_path, "a.ex", source), tmp_path)
+        labels = {n["label"] for n in nodes}
+        assert "trim" not in labels
+        assert "ok" not in labels
+
+    def test_no_tree_sitter_warning(self, tmp_path, capsys):
+        index_elixir(_write(tmp_path, "router.ex", ELIXIR_SOURCE), tmp_path)
+        assert capsys.readouterr().err == ""
+
+
+class TestIndexPowerShell:
+    def test_function_extracted(self, tmp_path):
+        nodes, _ = index_powershell(_write(tmp_path, "Mod.ps1", POWERSHELL_SOURCE), tmp_path)
+        assert "Mod.Get-User" in _ids(nodes)
+
+    def test_verb_and_noun_split(self, tmp_path):
+        nodes, _ = index_powershell(_write(tmp_path, "Mod.ps1", POWERSHELL_SOURCE), tmp_path)
+        node = _node(nodes, "Mod.Get-User")
+        assert node["verb"] == "Get"
+        assert node["noun"] == "User"
+
+    def test_second_verb_noun_pair(self, tmp_path):
+        nodes, _ = index_powershell(_write(tmp_path, "Mod.ps1", POWERSHELL_SOURCE), tmp_path)
+        assert _node(nodes, "Mod.Set-Config")["verb"] == "Set"
+
+    def test_attribute_recorded(self, tmp_path):
+        nodes, _ = index_powershell(_write(tmp_path, "Mod.ps1", POWERSHELL_SOURCE), tmp_path)
+        assert "[CmdletBinding]" in _node(nodes, "Mod.Get-User")["attributes"]
+
+    def test_has_params_flag(self, tmp_path):
+        nodes, _ = index_powershell(_write(tmp_path, "Mod.ps1", POWERSHELL_SOURCE), tmp_path)
+        assert _node(nodes, "Mod.Get-User")["has_params"] is True
+
+    def test_function_without_params_not_flagged(self, tmp_path):
+        nodes, _ = index_powershell(_write(tmp_path, "Mod.ps1", POWERSHELL_SOURCE), tmp_path)
+        assert "has_params" not in _node(nodes, "Mod.Set-Config")
+
+    def test_class_and_method(self, tmp_path):
+        nodes, _ = index_powershell(_write(tmp_path, "Mod.ps1", POWERSHELL_SOURCE), tmp_path)
+        assert _node(nodes, "Mod.Config")["type"] == "class"
+        assert _node(nodes, "Mod.Config.GetPath")["type"] == "method"
+
+    def test_requires_edge(self, tmp_path):
+        _, edges = index_powershell(_write(tmp_path, "Mod.ps1", POWERSHELL_SOURCE), tmp_path)
+        assert any(e["relation"] == "requires" for e in edges)
+
+    def test_non_verb_noun_function_has_no_verb(self, tmp_path):
+        nodes, _ = index_powershell(_write(tmp_path, "P.ps1", "function Helper { 1 }\n"), tmp_path)
+        assert "verb" not in _node(nodes, "P.Helper")
+
+    def test_no_tree_sitter_warning(self, tmp_path, capsys):
+        index_powershell(_write(tmp_path, "Mod.ps1", POWERSHELL_SOURCE), tmp_path)
+        assert capsys.readouterr().err == ""
+
+
+class TestThirdBatchWiring:
+    @pytest.mark.parametrize("ext", [
+        ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx",
+        ".lua", ".ex", ".exs", ".ps1", ".psm1",
+    ])
+    def test_extension_registered(self, ext):
+        from slurp.indexer import _INDEXED_EXTENSIONS
+        assert ext in _INDEXED_EXTENSIONS
+
+    @pytest.mark.parametrize("ext,language", [
+        (".c", "C"), (".cpp", "C++"), (".lua", "Lua"),
+        (".ex", "Elixir"), (".ps1", "PowerShell"),
+    ])
+    def test_parser_summary_lists_language(self, ext, language):
+        assert any(lang == language for lang, _, _ in parser_summary({ext}))
+
+    @pytest.mark.parametrize("ext", [".lua", ".ex", ".ps1"])
+    def test_regex_only_languages_are_not_fallbacks(self, ext):
+        """Regex is the design for these, so they must never show as degraded."""
+        _, parser, is_fallback = parser_summary({ext})[0]
+        assert parser == "regex"
+        assert is_fallback is False
+
+    @pytest.mark.parametrize("ext,flag", [
+        (".c", "_C_TS_AVAILABLE"), (".cpp", "_CPP_TS_AVAILABLE"),
+    ])
+    def test_c_family_reports_fallback(self, ext, flag, monkeypatch):
+        monkeypatch.setattr(indexer_mod, flag, False)
+        _, parser, is_fallback = parser_summary({ext})[0]
+        assert parser == "regex fallback"
+        assert is_fallback is True
+
+    def test_index_project_picks_up_all_five(self, tmp_path):
+        _write(tmp_path, "a.c", C_IMPL_SOURCE)
+        _write(tmp_path, "b.cpp", CPP_SOURCE)
+        _write(tmp_path, "c.lua", LUA_SOURCE)
+        _write(tmp_path, "d.ex", ELIXIR_SOURCE)
+        _write(tmp_path, "e.ps1", POWERSHELL_SOURCE)
+        graph = index_project(tmp_path)
+        files = {n["source_file"] for n in graph["nodes"] if n.get("source_file")}
+        assert {"a.c", "b.cpp", "c.lua", "d.ex", "e.ps1"} <= files
+
+    @pytest.mark.parametrize("flag,fn,name,source", [
+        ("_C_TS_AVAILABLE", "index_c", "a.c", C_IMPL_SOURCE),
+        ("_CPP_TS_AVAILABLE", "index_cpp", "b.cpp", CPP_SOURCE),
+    ])
+    def test_missing_grammar_is_silent(self, flag, fn, name, source,
+                                       tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(indexer_mod, flag, False)
+        nodes, _ = getattr(indexer_mod, fn)(_write(tmp_path, name, source), tmp_path)
+        captured = capsys.readouterr()
+        assert captured.err == ""
+        assert len(nodes) > 1

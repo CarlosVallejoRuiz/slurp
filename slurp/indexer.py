@@ -53,6 +53,8 @@ _tsphp = _load_grammar("tree_sitter_php")
 _tskotlin = _load_grammar("tree_sitter_kotlin")
 _tsscala = _load_grammar("tree_sitter_scala")
 _tsswift = _load_grammar("tree_sitter_swift")
+_tsc = _load_grammar("tree_sitter_c")
+_tscpp = _load_grammar("tree_sitter_cpp")
 
 _TREE_SITTER_AVAILABLE = _tsts is not None
 _JAVA_TS_AVAILABLE = _tsjava is not None
@@ -63,6 +65,8 @@ _PHP_TS_AVAILABLE = _tsphp is not None
 _KOTLIN_TS_AVAILABLE = _tskotlin is not None
 _SCALA_TS_AVAILABLE = _tsscala is not None
 _SWIFT_TS_AVAILABLE = _tsswift is not None
+_C_TS_AVAILABLE = _tsc is not None
+_CPP_TS_AVAILABLE = _tscpp is not None
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -2449,6 +2453,552 @@ def index_swift(path: Path, root: Path | None = None) -> tuple[list[dict], list[
     return _index_with_grammar(path, root, _tsswift, _SWIFT_TS_AVAILABLE,
                                _SwiftVisitor, _index_swift_regex, "Swift")
 
+
+# ---------------------------------------------------------------------------
+# C / C++
+# ---------------------------------------------------------------------------
+
+_HEADER_SUFFIXES = frozenset({".h", ".hpp", ".hh", ".hxx"})
+
+
+def _is_header(rel_path: Path) -> bool:
+    """True for a declaration file (.h/.hpp/.hh/.hxx) rather than an implementation."""
+    return rel_path.suffix.lower() in _HEADER_SUFFIXES
+
+
+class _CVisitor(_BaseVisitor):
+    """tree-sitter C visitor.
+
+    Every node carries `is_header` because in C the same symbol name means
+    something different in a header (a promise) and in a .c (the body), and a
+    reader looking for an implementation should not land on the prototype.
+    """
+
+    def __init__(self, rel_path: Path, file_id: str) -> None:
+        super().__init__(rel_path, file_id)
+        self.is_header = _is_header(rel_path)
+        self._extern_c = False
+        self._class_depth = 0
+
+    def _emit_c(self, name: str, ntype: str, lineno: int, **extra) -> str:
+        return self._emit(name, ntype, lineno, is_header=self.is_header or None,
+                          is_extern_c=self._extern_c or None, **extra)
+
+    @staticmethod
+    def _declarator_name(node) -> str:
+        """Dig through pointer/array/parenthesised declarators to the identifier."""
+        stack = [node]
+        while stack:
+            current = stack.pop(0)
+            if current.type in ("identifier", "field_identifier",
+                                "qualified_identifier", "operator_name",
+                                "destructor_name", "type_identifier"):
+                return current.text.decode("utf-8", "replace")
+            stack.extend(current.children)
+        return ""
+
+    def visit_preproc_include(self, node) -> None:
+        target = ""
+        for child in node.children:
+            if child.type in ("system_lib_string", "string_literal"):
+                target = self._text(child).strip('<>"')
+        if not target:
+            return
+        safe = re.sub(r"\W", "_", target)
+        nid = f"{self._parent}.import_{safe}"
+        self.nodes.append({
+            "id": nid, "label": target, "type": "import", "description": "",
+            "source_file": str(self.rel_path),
+            "source_location": f"L{node.start_point[0] + 1}",
+            "file_type": "code",
+        })
+        self._edge(self._parent, nid, "imports_from")
+
+    def visit_preproc_function_def(self, node) -> None:
+        name = self._ts_name(node)
+        if name:
+            self._emit_c(name, "macro", node.start_point[0] + 1)
+
+    def visit_preproc_def(self, node) -> None:
+        name = self._ts_name(node)
+        if name:
+            self._emit_c(name, "macro", node.start_point[0] + 1)
+
+    def visit_function_definition(self, node) -> None:
+        declarator = node.child_by_field_name("declarator")
+        name = self._declarator_name(declarator) if declarator else ""
+        if name:
+            self._emit_c(name, "function", node.start_point[0] + 1)
+
+    def visit_declaration(self, node) -> None:
+        """A prototype: a header's function, a class member, or an extern "C" entry.
+
+        All three are `declaration` nodes carrying a function_declarator, and all
+        three are symbols a reader searches for — a C++ constructor only ever
+        appears this way inside a class body.
+        """
+        for child in node.children:
+            if child.type == "function_declarator":
+                name = self._declarator_name(child)
+                if name:
+                    ntype = "method" if self._class_depth else "function"
+                    self._emit_c(name, ntype, node.start_point[0] + 1)
+                return
+        self._recurse(node)
+
+    def visit_type_definition(self, node) -> None:
+        name = ""
+        for child in node.children:
+            if child.type == "type_identifier":
+                name = self._text(child)
+        if name:
+            self._emit_c(name, "typedef", node.start_point[0] + 1)
+
+    def _visit_tagged(self, node, ntype: str) -> None:
+        name = ""
+        for child in node.children:
+            if child.type == "type_identifier":
+                name = self._text(child)
+                break
+        if name:
+            nid = self._emit_c(name, ntype, node.start_point[0] + 1)
+            if ntype in ("class", "struct"):
+                self._class_depth += 1
+                self._descend(node, nid)
+                self._class_depth -= 1
+            else:
+                self._descend(node, nid)
+        else:
+            self._recurse(node)
+
+    def visit_struct_specifier(self, node) -> None:
+        self._visit_tagged(node, "struct")
+
+    def visit_union_specifier(self, node) -> None:
+        self._visit_tagged(node, "struct")
+
+    def visit_enum_specifier(self, node) -> None:
+        self._visit_tagged(node, "enum")
+
+    def visit_linkage_specification(self, node) -> None:
+        """`extern "C" { ... }` — everything inside is C-linkage."""
+        previous = self._extern_c
+        self._extern_c = True
+        self._recurse(node)
+        self._extern_c = previous
+
+
+class _CppVisitor(_CVisitor):
+    """tree-sitter C++ visitor — adds namespaces, classes and templates."""
+
+    def __init__(self, rel_path: Path, file_id: str) -> None:
+        super().__init__(rel_path, file_id)
+        self._template_params = ""
+
+    def visit_namespace_definition(self, node) -> None:
+        name = ""
+        for child in node.children:
+            if child.type in ("namespace_identifier", "identifier"):
+                name = self._text(child)
+                break
+        if not name:
+            self._recurse(node)
+            return
+        nid = self._emit_c(name, "namespace", node.start_point[0] + 1)
+        self._descend(node, nid)
+
+    def visit_template_declaration(self, node) -> None:
+        """Carry the template parameters down to the declaration they wrap."""
+        params = ""
+        for child in node.children:
+            if child.type == "template_parameter_list":
+                params = self._text(child)
+                break
+        previous = self._template_params
+        self._template_params = params
+        self._recurse(node)
+        self._template_params = previous
+
+    def _emit_c(self, name: str, ntype: str, lineno: int, **extra) -> str:
+        if self._template_params:
+            extra.setdefault("is_template", True)
+            extra.setdefault("template_params", self._template_params)
+        return super()._emit_c(name, ntype, lineno, **extra)
+
+    def visit_class_specifier(self, node) -> None:
+        self._visit_tagged(node, "class")
+
+    def visit_field_declaration(self, node) -> None:
+        for child in node.children:
+            if child.type == "function_declarator":
+                name = self._declarator_name(child)
+                if name:
+                    self._emit_c(name, "method", node.start_point[0] + 1)
+                return
+
+
+_C_INCLUDE_RE = re.compile(r'(?m)^\s*#\s*include\s*[<"]([^>"]+)[>"]')
+_C_DEFINE_RE = re.compile(r"(?m)^\s*#\s*define\s+(\w+)")
+_C_TYPEDEF_RE = re.compile(r"(?m)^\s*typedef\s+.*?\b(\w+)\s*;")
+_C_TAGGED_RE = re.compile(r"(?m)^[ \t]*(?:typedef\s+)?(struct|union|enum|class)\s+(\w+)")
+_C_NAMESPACE_RE = re.compile(r"(?m)^[ \t]*namespace\s+(\w+)")
+_C_TEMPLATE_RE = re.compile(r"(?m)^[ \t]*template\s*(<[^\n]*>)")
+_C_FUNC_RE = re.compile(
+    # A one-line `extern "C" { void f(void); }` is common in headers, so the
+    # linkage prefix is allowed before the return type as well as on its own line.
+    r"(?m)^[ \t]*(?:extern\s+\"[^\"]*\"\s*\{\s*)?"
+    r"(?:(?:static|inline|extern|const|constexpr|virtual|explicit|friend)\s+)*"
+    r"(?:[\w:<>,\s\*&]+?[\s\*&]+)(\w+)\s*\([^;{]*\)\s*(?:const\s*)?[;{]")
+_C_NOT_FUNCS = frozenset({
+    "if", "for", "while", "switch", "return", "sizeof", "catch", "do", "else",
+    "typedef", "struct", "union", "enum", "class", "namespace", "template",
+})
+
+
+def _index_c_regex(source: str, rel_path: Path, file_id: str) -> tuple[list[dict], list[dict]]:
+    """Regex fallback shared by C and C++."""
+    nodes: list[dict] = []
+    edges: list[dict] = []
+    is_header = _is_header(rel_path)
+    extern_spans = [
+        (m.start(), _class_body_span(source, m.start()))
+        for m in re.finditer(r'extern\s+"C"\s*\{', source)
+    ]
+
+    def _in_extern(pos: int) -> bool:
+        return any(span and span[0] <= pos < span[1] for _, span in extern_spans)
+
+    def _add(name: str, ntype: str, lineno: int, parent: str = file_id, **extra) -> str:
+        nid = f"{parent}.{name}"
+        node = {
+            "id": nid, "label": name, "type": ntype, "description": "",
+            "source_file": str(rel_path), "source_location": f"L{lineno}",
+            "file_type": "code",
+        }
+        node["is_header"] = is_header
+        node.update({k: v for k, v in extra.items() if v not in (None, "", [], False)})
+        nodes.append(node)
+        edges.append({"source": parent, "target": nid, "relation": "contains"})
+        return nid
+
+    for m in _C_INCLUDE_RE.finditer(source):
+        target = m.group(1)
+        nid = f"{file_id}.import_{re.sub(r'\W', '_', target)}"
+        nodes.append({
+            "id": nid, "label": target, "type": "import", "description": "",
+            "source_file": str(rel_path),
+            "source_location": f"L{_lineno(source, m.start())}",
+            "file_type": "code",
+        })
+        edges.append({"source": file_id, "target": nid, "relation": "imports_from"})
+
+    for m in _C_DEFINE_RE.finditer(source):
+        _add(m.group(1), "macro", _lineno(source, m.start()))
+
+    namespace_nid = file_id
+    if (ns := _C_NAMESPACE_RE.search(source)) is not None:
+        namespace_nid = _add(ns.group(1), "namespace", _lineno(source, ns.start()))
+
+    template_lines = {_lineno(source, m.start()): m.group(1)
+                      for m in _C_TEMPLATE_RE.finditer(source)}
+
+    for m in _C_TAGGED_RE.finditer(source):
+        kind, name = m.group(1), m.group(2)
+        line = _lineno(source, m.start())
+        ntype = {"struct": "struct", "union": "struct",
+                 "enum": "enum", "class": "class"}[kind]
+        params = template_lines.get(line - 1, "")
+        _add(name, ntype, line, namespace_nid,
+             is_template=bool(params), template_params=params)
+
+    for m in _C_TYPEDEF_RE.finditer(source):
+        _add(m.group(1), "typedef", _lineno(source, m.start()), namespace_nid)
+
+    for m in _C_FUNC_RE.finditer(source):
+        name = m.group(1)
+        if name in _C_NOT_FUNCS:
+            continue
+        line = _lineno(source, m.start())
+        params = template_lines.get(line - 1, "")
+        # Test the name's position, not the match start — the match may begin at
+        # an `extern "C" {` prefix that sits outside the block it opens.
+        _add(name, "function", line, namespace_nid,
+             is_extern_c=_in_extern(m.start(1)),
+             is_template=bool(params), template_params=params)
+
+    return nodes, edges
+
+
+def index_c(path: Path, root: Path | None = None) -> tuple[list[dict], list[dict]]:
+    """Index a C file (tree-sitter with the 'cpp' extra, else regex)."""
+    return _index_with_grammar(path, root, _tsc, _C_TS_AVAILABLE,
+                               _CVisitor, _index_c_regex, "C")
+
+
+def index_cpp(path: Path, root: Path | None = None) -> tuple[list[dict], list[dict]]:
+    """Index a C++ file (tree-sitter with the 'cpp' extra, else regex)."""
+    return _index_with_grammar(path, root, _tscpp, _CPP_TS_AVAILABLE,
+                               _CppVisitor, _index_c_regex, "C++")
+
+
+# ---------------------------------------------------------------------------
+# Lua
+# ---------------------------------------------------------------------------
+
+_LUA_LOCAL_FUNC_RE = re.compile(r"(?m)^[ \t]*local\s+function\s+([\w.]+)\s*\(")
+_LUA_FUNC_RE = re.compile(r"(?m)^[ \t]*function\s+([\w.]+)(?::(\w+))?\s*\(")
+_LUA_TABLE_RE = re.compile(r"(?m)^[ \t]*(?:local\s+)?(\w+)\s*=\s*\{\s*\}")
+_LUA_TABLE_FUNC_RE = re.compile(r"(?m)^[ \t]*(\w+)\.(\w+)\s*=\s*function\s*\(")
+_LUA_LOCAL_ASSIGN_FUNC_RE = re.compile(r"(?m)^[ \t]*local\s+(\w+)\s*=\s*function\s*\(")
+
+
+def _index_lua_regex(source: str, rel_path: Path, file_id: str) -> tuple[list[dict], list[dict]]:
+    """Regex indexer for Lua — regex is the primary parser, not a fallback.
+
+    Lua's module convention is a bare table (`local M = {}`) whose fields are
+    functions, so tables are indexed as modules and their functions nested
+    underneath. `function Class:method()` is the method form and nests the same
+    way.
+    """
+    nodes: list[dict] = []
+    edges: list[dict] = []
+    tables: dict[str, str] = {}
+
+    def _add(name: str, ntype: str, lineno: int, parent: str = file_id, **extra) -> str:
+        nid = f"{parent}.{name}"
+        node = {
+            "id": nid, "label": name, "type": ntype, "description": "",
+            "source_file": str(rel_path), "source_location": f"L{lineno}",
+            "file_type": "code",
+        }
+        node.update({k: v for k, v in extra.items() if v not in (None, "", [])})
+        nodes.append(node)
+        edges.append({"source": parent, "target": nid, "relation": "contains"})
+        return nid
+
+    for m in _LUA_TABLE_RE.finditer(source):
+        name = m.group(1)
+        tables[name] = _add(name, "module", _lineno(source, m.start()),
+                            is_local=source[m.start():m.end()].lstrip().startswith("local"))
+
+    for m in _LUA_LOCAL_FUNC_RE.finditer(source):
+        _add(m.group(1), "function", _lineno(source, m.start()), is_local=True)
+
+    for m in _LUA_LOCAL_ASSIGN_FUNC_RE.finditer(source):
+        if m.group(1) not in tables:
+            _add(m.group(1), "function", _lineno(source, m.start()), is_local=True)
+
+    for m in _LUA_FUNC_RE.finditer(source):
+        owner, method = m.group(1), m.group(2)
+        line = _lineno(source, m.start())
+        if method:
+            # `function Class:method()` — the colon form binds to its table.
+            parent = tables.get(owner) or _add(owner, "module", line, is_local=False)
+            tables.setdefault(owner, parent)
+            _add(method, "method", line, parent, is_local=False)
+        elif "." in owner:
+            table, _, field = owner.rpartition(".")
+            parent = tables.get(table, file_id)
+            _add(field, "function", line, parent, is_local=False)
+        else:
+            _add(owner, "function", line, is_local=False)
+
+    for m in _LUA_TABLE_FUNC_RE.finditer(source):
+        table, field = m.group(1), m.group(2)
+        parent = tables.get(table, file_id)
+        _add(field, "function", _lineno(source, m.start()), parent, is_local=False)
+
+    return nodes, edges
+
+
+def index_lua(path: Path, root: Path | None = None) -> tuple[list[dict], list[dict]]:
+    """Index a Lua file. Regex is the only parser — no tree-sitter extra."""
+    return _index_regex_only(path, root, _index_lua_regex, "Lua")
+
+
+# ---------------------------------------------------------------------------
+# Elixir
+# ---------------------------------------------------------------------------
+
+_EX_MODULE_RE = re.compile(r"(?m)^[ \t]*defmodule\s+([\w.]+)\s+do")
+_EX_DEF_RE = re.compile(r"(?m)^[ \t]*(defp?|defmacrop?)\s+([\w?!]+)")
+_EX_STRUCT_RE = re.compile(r"(?m)^[ \t]*defstruct\s+(.+)$")
+_EX_DIRECTIVE_RE = re.compile(r"(?m)^[ \t]*(use|import|alias|require)\s+([\w.]+)")
+
+
+def _index_elixir_regex(source: str, rel_path: Path, file_id: str) -> tuple[list[dict], list[dict]]:
+    """Regex indexer for Elixir — regex is the primary parser.
+
+    Nesting follows indentation, the same approach the Ruby indexer uses, since
+    Elixir has no braces either.
+    """
+    nodes: list[dict] = []
+    edges: list[dict] = []
+
+    def _add(name: str, ntype: str, lineno: int, parent: str, **extra) -> str:
+        nid = f"{parent}.{name}"
+        node = {
+            "id": nid, "label": name, "type": ntype, "description": "",
+            "source_file": str(rel_path), "source_location": f"L{lineno}",
+            "file_type": "code",
+        }
+        node.update({k: v for k, v in extra.items() if v not in (None, "", [])})
+        nodes.append(node)
+        edges.append({"source": parent, "target": nid, "relation": "contains"})
+        return nid
+
+    scopes: list[tuple[int, str]] = [(-1, file_id)]
+
+    for lineno, raw in enumerate(source.splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip())
+        while len(scopes) > 1 and indent <= scopes[-1][0]:
+            scopes.pop()
+        parent = scopes[-1][1]
+
+        if (m := _EX_MODULE_RE.match(raw)) is not None:
+            nid = _add(m.group(1), "module", lineno, parent)
+            scopes.append((indent, nid))
+            continue
+
+        if (m := _EX_DIRECTIVE_RE.match(raw)) is not None:
+            edges.append({"source": parent, "target": m.group(2),
+                          "relation": m.group(1)})
+            continue
+
+        if (m := _EX_STRUCT_RE.match(raw)) is not None:
+            fields = re.findall(r":(\w+)", m.group(1))
+            _add("__struct__", "struct", lineno, parent, fields=fields)
+            continue
+
+        if (m := _EX_DEF_RE.match(raw)) is not None:
+            kind, name = m.group(1), m.group(2)
+            ntype = "macro" if kind.startswith("defmacro") else "function"
+            _add(name, ntype, lineno, parent, is_private=kind.endswith("p"))
+
+    return nodes, edges
+
+
+def index_elixir(path: Path, root: Path | None = None) -> tuple[list[dict], list[dict]]:
+    """Index an Elixir file. Regex is the only parser — no tree-sitter extra."""
+    return _index_regex_only(path, root, _index_elixir_regex, "Elixir")
+
+
+# ---------------------------------------------------------------------------
+# PowerShell
+# ---------------------------------------------------------------------------
+
+_PS_FUNC_RE = re.compile(r"(?mi)^[ \t]*function\s+([\w-]+)")
+_PS_CLASS_RE = re.compile(r"(?mi)^[ \t]*class\s+(\w+)")
+_PS_METHOD_RE = re.compile(r"^[ \t]*(?:\[[\w\[\]]+\]\s*)?(\w+)\s*\(")
+_PS_REQUIRES_RE = re.compile(r"(?mi)^\s*#requires\s+-(\w+)\s*(.*)$")
+_PS_ATTR_RE = re.compile(r"\[(\w+)\s*\(")
+_PS_NOT_METHODS = frozenset({"if", "for", "foreach", "while", "switch", "return", "param"})
+
+
+def _index_powershell_regex(source: str, rel_path: Path, file_id: str) -> tuple[list[dict], list[dict]]:
+    """Regex indexer for PowerShell — regex is the primary parser.
+
+    Splits Verb-Noun names because PowerShell's naming convention is a real
+    contract: `Get-User` and `Set-User` act on the same noun, and being able to
+    query by verb or by noun is what makes a large script module navigable.
+    """
+    nodes: list[dict] = []
+    edges: list[dict] = []
+    lines = source.splitlines()
+
+    def _add(name: str, ntype: str, lineno: int, parent: str = file_id, **extra) -> str:
+        nid = f"{parent}.{name}"
+        node = {
+            "id": nid, "label": name, "type": ntype, "description": "",
+            "source_file": str(rel_path), "source_location": f"L{lineno}",
+            "file_type": "code",
+        }
+        node.update({k: v for k, v in extra.items() if v not in (None, "", [], False)})
+        nodes.append(node)
+        edges.append({"source": parent, "target": nid, "relation": "contains"})
+        return nid
+
+    def _attrs_above(idx: int) -> list[str]:
+        found: list[str] = []
+        i = idx - 1
+        while i >= 0 and (stripped := lines[i].strip()).startswith("["):
+            found = [f"[{a}]" for a in _PS_ATTR_RE.findall(stripped)] + found
+            i -= 1
+        return found
+
+    for m in _PS_REQUIRES_RE.finditer(source):
+        target = (m.group(2) or m.group(1)).strip() or m.group(1)
+        edges.append({"source": file_id, "target": target, "relation": "requires"})
+
+    class_spans: list[tuple[int, int, str]] = []
+    class_matches = list(_PS_CLASS_RE.finditer(source))
+    for i, m in enumerate(class_matches):
+        limit = class_matches[i + 1].start() if i + 1 < len(class_matches) else None
+        idx = _lineno(source, m.start()) - 1
+        nid = _add(m.group(1), "class", idx + 1, attributes=_attrs_above(idx))
+        span = _class_body_span(source, m.start(), limit)
+        if span:
+            class_spans.append((span[0], span[1], nid))
+
+    for start, end, class_nid in class_spans:
+        body_line = _lineno(source, start)
+        depth = 0
+        for offset, raw in enumerate(source[start:end].splitlines()):
+            line = raw.strip()
+            if depth == 0 and line and not line.startswith("#"):
+                if (mm := _PS_METHOD_RE.match(line)) is not None:
+                    member = mm.group(1)
+                    if member.lower() not in _PS_NOT_METHODS:
+                        _add(member, "method", body_line + offset, class_nid)
+            depth += raw.count("{") - raw.count("}")
+            if depth < 0:
+                break
+
+    for m in _PS_FUNC_RE.finditer(source):
+        name = m.group(1)
+        idx = _lineno(source, m.start()) - 1
+        verb, _, noun = name.partition("-")
+        body_end = source.find("}", m.start())
+        header = source[m.start():body_end if body_end != -1 else len(source)]
+        _add(name, "function", idx + 1,
+             attributes=_attrs_above(idx),
+             verb=verb if noun else "",
+             noun=noun,
+             has_params=bool(re.search(r"(?i)\bparam\s*\(", header)))
+
+    return nodes, edges
+
+
+def index_powershell(path: Path, root: Path | None = None) -> tuple[list[dict], list[dict]]:
+    """Index a PowerShell file. Regex is the only parser — no tree-sitter extra."""
+    return _index_regex_only(path, root, _index_powershell_regex, "PowerShell")
+
+
+def _index_regex_only(
+    path: Path, root: Path | None, regex_fn, language_label: str,
+) -> tuple[list[dict], list[dict]]:
+    """Entry point for languages whose regex parser is the only parser.
+
+    DECISION: no tree-sitter attempt and no fallback warning — for these
+    languages regex is the design, not a degradation, exactly like Go.
+    """
+    rel = _rel(path, root) if root else path
+    fid = _file_id(rel)
+    module_node = {
+        "id": fid, "label": rel.stem, "type": "module",
+        "description": f"{language_label} file {rel.name}", "source_file": str(rel),
+        "source_location": "L1", "file_type": "code",
+    }
+    try:
+        source_text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return [module_node], []
+    nodes, edges = regex_fn(source_text, rel, fid)
+    return [module_node] + nodes, edges
+
 _INDEXED_EXTENSIONS: dict[str, object] = {
     ".py": index_python,
     ".ts": index_typescript,
@@ -2465,6 +3015,19 @@ _INDEXED_EXTENSIONS: dict[str, object] = {
     ".kts": index_kotlin,
     ".scala": index_scala,
     ".swift": index_swift,
+    ".c": index_c,
+    ".h": index_c,
+    ".cpp": index_cpp,
+    ".cc": index_cpp,
+    ".cxx": index_cpp,
+    ".hpp": index_cpp,
+    ".hh": index_cpp,
+    ".hxx": index_cpp,
+    ".lua": index_lua,
+    ".ex": index_elixir,
+    ".exs": index_elixir,
+    ".ps1": index_powershell,
+    ".psm1": index_powershell,
 }
 
 
@@ -2493,14 +3056,23 @@ def parser_summary(extensions: set[str]) -> list[tuple[str, str, bool]]:
         ("Kotlin", {".kt", ".kts"}, _KOTLIN_TS_AVAILABLE),
         ("Scala", {".scala"}, _SCALA_TS_AVAILABLE),
         ("Swift", {".swift"}, _SWIFT_TS_AVAILABLE),
+        ("C", {".c", ".h"}, _C_TS_AVAILABLE),
+        ("C++", {".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx"}, _CPP_TS_AVAILABLE),
     ):
         if extensions & suffixes:
             summary.append(
                 (language, "tree-sitter", False) if available
                 else (language, "regex fallback", True)
             )
-    if extensions & {".go"}:
-        summary.append(("Go", "regex", False))
+    # Regex is the design for these, not a degradation — never flagged as fallback.
+    for language, suffixes in (
+        ("Go", {".go"}),
+        ("Lua", {".lua"}),
+        ("Elixir", {".ex", ".exs"}),
+        ("PowerShell", {".ps1", ".psm1"}),
+    ):
+        if extensions & suffixes:
+            summary.append((language, "regex", False))
     return summary
 
 

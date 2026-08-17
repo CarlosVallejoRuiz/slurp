@@ -51,7 +51,12 @@ Slurp es una herramienta CLI open source de **token-budget-aware graph navigatio
 | Kotlin | tree-sitter ⚠️ | `kotlin` |
 | Scala | tree-sitter | `scala` |
 | Swift | tree-sitter | `swift` |
-| Go | regex | — (no hay gramática cableada) |
+| C | tree-sitter | `cpp` |
+| C++ | tree-sitter | `cpp` |
+| Go | regex | — (regex es el parser principal) |
+| Lua | regex | — (regex es el parser principal) |
+| Elixir | regex | — (regex es el parser principal) |
+| PowerShell | regex | — (regex es el parser principal) |
 
 ⚠️ **Kotlin:** `tree-sitter-kotlin 1.1.0` falla al parsear una clase con cuerpo
 seguida de un `object` — Kotlin corriente. La guarda `_tree_is_broken()` lo
@@ -59,13 +64,17 @@ detecta y en la práctica Kotlin se indexa por regex. El extra se mantiene
 declarado para que una versión corregida de la gramática entre sin tocar código.
 
 ```bash
-uv sync --extra all-languages   # las 8 gramáticas de golpe
+uv sync --extra all-languages   # las 10 gramáticas de golpe
 uv sync --extra rust            # solo una
 ```
 
 **Invariantes del indexador:**
 - Cada gramática es un extra **independiente**: su ausencia es una configuración
   soportada y debe degradar en silencio al fallback regex.
+- **Regex principal vs regex fallback**: Go, Lua, Elixir y PowerShell no tienen
+  gramática cableada — su regex es el diseño, entran por `_index_regex_only()`,
+  no intentan tree-sitter y `parser_summary()` los marca `is_fallback=False`.
+  Marcarlos como fallback sería mentir sobre un grafo que no está degradado.
 - Un fallo de parseo **con** la gramática instalada sí se avisa por stderr —
   los dos casos nunca comparten el mismo `except`.
 - `slurp index` imprime siempre qué parser usó por lenguaje; un grafo degradado
@@ -86,9 +95,12 @@ uv sync --extra rust            # solo una
   `is_class_method` y accessors (Ruby), magic methods (PHP),
   `is_data_class`/`is_sealed`/`is_suspend`/`extends_type` (Kotlin),
   `is_case`/`is_implicit` y `def`/`val`/`var` como tipos (Scala),
-  `is_computed` y protocolos (Swift). Edges tipados: `extends`, `implements`
+  `is_computed` y protocolos (Swift), `is_header`/`is_template`/`is_extern_c`
+  (C/C++), `is_local` y tables como módulos (Lua), `is_private` (Elixir),
+  `verb`/`noun`/`has_params` (PowerShell). Edges tipados: `extends`, `implements`
   (incluido `impl Trait for Type` de Rust), `with` (Scala), `conforms_to`
-  (Swift) y `mixin` (Ruby `include`/`extend`/`prepend`, PHP `use` de traits).
+  (Swift), `mixin` (Ruby `include`/`extend`/`prepend`, PHP `use` de traits),
+  `use`/`import`/`alias`/`require` (Elixir) y `requires` (PowerShell).
 - Los companion objects (Kotlin, Scala) se anidan bajo su clase — si no,
   colisionan con ella en el mismo node id.
 
@@ -113,7 +125,7 @@ por debajo de la carpeta que abre el editor (`~/Desktop/Slurp/`). Todos los coma
 de este documento (`uv run pytest`, `ruff check`, `uv build`, `git`) se ejecutan
 desde `~/Desktop/Slurp/slurp/`, que es donde vive este CLAUDE.md.
 
-**Estado actual:** v0.7.0 · 1378 tests · `ruff check slurp/` limpio.
+**Estado actual:** v0.8.0 · 1451 tests · `ruff check slurp/` limpio.
 
 ```
 ~/Desktop/Slurp/slurp/         ← raíz del repo git — working directory

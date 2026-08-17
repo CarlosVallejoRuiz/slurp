@@ -4,7 +4,7 @@
 
 # slurp
 
-![tests](https://img.shields.io/badge/tests-1378%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-1451%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 ![pypi](https://img.shields.io/badge/PyPI-slurp--graph-orange)
@@ -516,7 +516,6 @@ Next: slurp "your query" --graph /path/to/project/graphify-out/graph.json
 |---|---|
 | Python | stdlib `ast` |
 | TypeScript / JavaScript | tree-sitter |
-| Go | regex |
 | Java | tree-sitter |
 | Rust | tree-sitter |
 | C# | tree-sitter |
@@ -525,6 +524,12 @@ Next: slurp "your query" --graph /path/to/project/graphify-out/graph.json
 | Kotlin | tree-sitter ⚠️ |
 | Scala | tree-sitter |
 | Swift | tree-sitter |
+| C | tree-sitter |
+| C++ | tree-sitter |
+| Go | regex |
+| Lua | regex |
+| Elixir | regex |
+| PowerShell | regex |
 
 > ⚠️ **Kotlin:** the `tree-sitter-kotlin` grammar has known parsing issues — it
 > fails on a class with a body followed by an `object` declaration, which is
@@ -542,8 +547,10 @@ reach into method bodies — so `slurp index` always prints which parser it used
   Install the 'ts' extra for full TypeScript support: uv sync --extra ts
 ```
 
-Python needs no extra (it uses the standard library) and Go has no grammar wired
-up, so its regex parser is not a fallback.
+Python needs no extra (it uses the standard library). **Go, Lua, Elixir and
+PowerShell are indexed by regex as their primary parser** — no grammar is wired
+up for them, so their regex parser is the design rather than a degradation and
+is never reported as a fallback.
 
 #### Optional extras
 
@@ -558,6 +565,7 @@ up, so its regex parser is not a fallback.
 | `kotlin` | Kotlin | `uv sync --extra kotlin` |
 | `scala` | Scala | `uv sync --extra scala` |
 | `swift` | Swift | `uv sync --extra swift` |
+| `cpp` | C, C++ | `uv sync --extra cpp` |
 | `all-languages` | All of the above | `uv sync --extra all-languages` |
 
 Each language records what matters for navigating that ecosystem: Java and C#
@@ -567,7 +575,8 @@ methods (`__get`, `__call`), Kotlin `data`/`sealed`/`suspend` and extension
 receivers, Scala `case` classes and `implicit`, Swift computed properties and
 `async`. Relationships become typed edges — `extends`, `implements` (including
 Rust's `impl Trait for Type`), `with` (Scala), `conforms_to` (Swift), and
-`mixin` for Ruby's `include`/`extend`/`prepend` and PHP's trait `use`.
+`mixin` for Ruby's `include`/`extend`/`prepend` and PHP's trait `use`, Elixir's
+`use`/`import`/`alias`/`require`, and PowerShell's `requires`.
 
 **Broken-grammar guard.** A tree-sitter grammar that returns a parse tree
 containing `ERROR` nodes silently drops whole declarations. Slurp checks for that
