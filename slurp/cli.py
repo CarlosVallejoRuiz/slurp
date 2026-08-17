@@ -10,6 +10,7 @@ from rich.console import Console
 from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from slurp import __version__
 from slurp.audit import log_query, read_audit, top_nodes_from_audit
@@ -753,7 +754,12 @@ def index_cmd(path: str, output_path: str | None, watch: bool, ignore_file: str)
     """
     import json as _json
 
-    from slurp.indexer import _INDEXED_EXTENSIONS, index_project
+    from slurp.indexer import (
+        _INDEXED_EXTENSIONS,
+        index_project,
+        iter_source_files,
+        parser_summary,
+    )
 
     root = Path(path).resolve()
     out = Path(output_path) if output_path else root / "graphify-out" / "graph.json"
@@ -768,6 +774,21 @@ def index_cmd(path: str, output_path: str | None, watch: bool, ignore_file: str)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(_json.dumps(graph, indent=2), encoding="utf-8")
         click.echo(f"✓ {n_nodes} nodes · {n_edges} edges · {files_processed} files")
+
+        extensions = {p.suffix.lower() for p in iter_source_files(root)}
+        if summary := parser_summary(extensions):
+            # DECISION: a degraded parser is shown in orange rather than hidden —
+            # regex extracts strictly less than tree-sitter, and silently getting
+            # a thinner graph is the failure mode this line exists to prevent.
+            parts = [
+                f"[orange1]{lang} ({parser})[/]" if fallback else f"{lang} ({parser})"
+                for lang, parser, fallback in summary
+            ]
+            _echo_rich(Text.from_markup("  Parsers: " + " · ".join(parts)))
+            if any(fallback for _, _, fallback in summary):
+                click.echo("  Install the 'ts' extra for full TypeScript support: "
+                           "uv sync --extra ts")
+
         click.echo(f"  Saved: {out}")
         click.echo(f'\nNext: slurp "your query" --graph {out}')
 

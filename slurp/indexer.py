@@ -11,6 +11,20 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+# DECISION: resolved once at import, not per file. tree-sitter is an optional
+# extra (`uv sync --extra ts`), so its absence is a supported configuration and
+# must stay silent — but a parse failure while it IS installed is a real problem
+# and gets reported. The two cases never share an except block.
+try:
+    from tree_sitter import Language as _TSLanguage
+    from tree_sitter import Parser as _TSParser
+    import tree_sitter_typescript as _tsts
+
+    _TREE_SITTER_AVAILABLE = True
+except ImportError:  # optional extra not installed — regex fallback is expected
+    _TSLanguage = _TSParser = _tsts = None  # type: ignore[assignment]
+    _TREE_SITTER_AVAILABLE = False
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
@@ -198,20 +212,92 @@ _TS_INTERFACE_RE = re.compile(
 _TS_ARROW_RE = re.compile(
     r"(?m)^[ \t]*(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:\([^\n]*?\)|[\w]+)\s*(?::[^\n]*?)?\s*=>"
 )
+# Class members, matched only at the top level of a class body (see
+# _iter_class_members). Modifiers are optional and may appear in any order.
+_TS_MODIFIERS = r"(?:(?:public|private|protected|readonly|static|abstract|override|async|declare)\s+)*"
+_TS_METHOD_RE = re.compile(
+    rf"^{_TS_MODIFIERS}(?:\*\s*)?(\w+)\s*(?:<[^>()]*>)?\s*\("
+)
+_TS_ACCESSOR_RE = re.compile(
+    rf"^{_TS_MODIFIERS}(get|set)\s+(\w+)\s*\("
+)
+_TS_PROP_ARROW_RE = re.compile(
+    rf"^{_TS_MODIFIERS}(\w+)\s*(?:\?)?\s*(?::[^=\n]*?)?=\s*"
+    r"(?:async\s+)?(?:\([^\n]*?\)|\w+)\s*(?::[^\n]*?)?=>"
+)
+# Words that look like a call but are control flow, not a member declaration.
+_TS_NOT_MEMBERS = frozenset({
+    "if", "for", "while", "switch", "catch", "do", "return", "typeof", "new",
+    "super", "this", "function", "await", "yield", "throw", "else", "case",
+    "delete", "void", "in", "of", "import", "export",
+})
+
 _TS_IMPORT_RE = re.compile(
     r'import\s+(?:type\s+)?(?:\{[^}]+\}|[\w*][^"\']*)\s+from\s+[\'"]([^\'"]+)[\'"]'
 )
 
 
+def _class_body_span(source: str, class_start: int) -> tuple[int, int] | None:
+    """Locate the brace-delimited body of the class beginning at *class_start*.
+
+    Returns:
+        (first_index_inside, index_of_closing_brace), or None if unbalanced.
+    """
+    open_idx = source.find("{", class_start)
+    if open_idx == -1:
+        return None
+    depth = 0
+    for i in range(open_idx, len(source)):
+        ch = source[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return open_idx + 1, i
+    return None
+
+
+def _iter_class_members(body: str):
+    """Yield (name, type, line_offset) for members declared directly in a class body.
+
+    DECISION: a brace-depth counter keeps this to the class's own members —
+    without it, every local function and callback inside a method body would be
+    indexed as a method of the class. Braces inside strings can skew the depth;
+    that is an accepted limit of a regex fallback.
+    """
+    depth = 0
+    for offset, raw in enumerate(body.splitlines()):
+        line = raw.strip()
+        if depth == 0 and line and not line.startswith(("//", "/*", "*")):
+            if (m := _TS_ACCESSOR_RE.match(line)) is not None:
+                yield m.group(2), "function", offset
+            elif (m := _TS_PROP_ARROW_RE.match(line)) is not None:
+                yield m.group(1), "function", offset
+            elif (m := _TS_METHOD_RE.match(line)) is not None:
+                name = m.group(1)
+                if name not in _TS_NOT_MEMBERS:
+                    yield name, "function", offset
+        depth += raw.count("{") - raw.count("}")
+        if depth < 0:  # defensive: malformed source
+            break
+
+
 def _index_typescript_regex(
     source: str, rel_path: Path, file_id: str
 ) -> tuple[list[dict], list[dict]]:
-    """Regex-based TypeScript/JavaScript parser (fallback when tree-sitter is unavailable)."""
+    """Regex-based TypeScript/JavaScript parser (fallback when tree-sitter is unavailable).
+
+    Extracts top-level functions, classes, interfaces and arrow consts, plus the
+    members declared inside each class body. Class members are nested under the
+    class exactly as the tree-sitter visitor nests them, so both parsers produce
+    the same node ids and the same class -> member "contains" edges.
+    """
     nodes: list[dict] = []
     edges: list[dict] = []
 
-    def _add(name: str, ntype: str, lineno: int) -> None:
-        nid = f"{file_id}.{name}"
+    def _add(name: str, ntype: str, lineno: int, parent: str = file_id) -> str:
+        nid = f"{parent}.{name}"
         nodes.append({
             "id": nid,
             "label": name,
@@ -221,18 +307,36 @@ def _index_typescript_regex(
             "source_location": f"L{lineno}",
             "file_type": "code",
         })
-        edges.append({"source": file_id, "target": nid, "relation": "contains"})
+        edges.append({"source": parent, "target": nid, "relation": "contains"})
+        return nid
 
     for m in _TS_FUNC_RE.finditer(source):
         _add(m.group(1), "function", _lineno(source, m.start()))
 
+    class_spans: list[tuple[int, int]] = []
     for m in _TS_CLASS_RE.finditer(source):
-        _add(m.group(1), "class", _lineno(source, m.start()))
+        class_line = _lineno(source, m.start())
+        class_nid = _add(m.group(1), "class", class_line)
+
+        span = _class_body_span(source, m.start())
+        if span is None:
+            continue
+        class_spans.append(span)
+        body_start, body_end = span
+        body = source[body_start:body_end]
+        body_line = _lineno(source, body_start)
+        for name, ntype, offset in _iter_class_members(body):
+            _add(name, ntype, body_line + offset, parent=class_nid)
 
     for m in _TS_INTERFACE_RE.finditer(source):
         _add(m.group(1), "interface", _lineno(source, m.start()))
 
+    # DECISION: an arrow const declared inside a class body belongs to a method,
+    # not to the file. Attaching it at file level would invent a top-level symbol
+    # that does not exist; tree-sitter nests it under the enclosing method.
     for m in _TS_ARROW_RE.finditer(source):
+        if any(start <= m.start() < end for start, end in class_spans):
+            continue
         _add(m.group(1), "function", _lineno(source, m.start()))
 
     for m in _TS_IMPORT_RE.finditer(source):
@@ -367,12 +471,16 @@ class _TSVisitor:
 
 
 def _parse_ts_tree(source_bytes: bytes, is_tsx: bool = False):
-    """Parse TypeScript source with tree-sitter. Raises ImportError if unavailable."""
-    from tree_sitter import Language, Parser  # noqa: PLC0415
-    import tree_sitter_typescript as tsts  # noqa: PLC0415
+    """Parse TypeScript source with tree-sitter.
 
-    lang = Language(tsts.language_tsx() if is_tsx else tsts.language_typescript())
-    return Parser(lang).parse(source_bytes)
+    Raises:
+        RuntimeError: If tree-sitter is not installed. Callers should check
+            _TREE_SITTER_AVAILABLE first rather than relying on this.
+    """
+    if not _TREE_SITTER_AVAILABLE:
+        raise RuntimeError("tree-sitter is not installed (install the 'ts' extra)")
+    lang = _TSLanguage(_tsts.language_tsx() if is_tsx else _tsts.language_typescript())
+    return _TSParser(lang).parse(source_bytes)
 
 
 def index_typescript(path: Path, root: Path | None = None) -> tuple[list[dict], list[dict]]:
@@ -407,15 +515,22 @@ def index_typescript(path: Path, root: Path | None = None) -> tuple[list[dict], 
     except OSError:
         return [module_node], []
 
-    try:
-        tree = _parse_ts_tree(source_text.encode("utf-8"), is_tsx=is_tsx)
-        visitor = _TSVisitor(rel, fid)
-        visitor.visit(tree.root_node)
-        return [module_node] + visitor.nodes, visitor.edges
-    except ImportError:
-        pass
-    except Exception:
-        pass
+    if _TREE_SITTER_AVAILABLE:
+        try:
+            tree = _parse_ts_tree(source_text.encode("utf-8"), is_tsx=is_tsx)
+            visitor = _TSVisitor(rel, fid)
+            visitor.visit(tree.root_node)
+            return [module_node] + visitor.nodes, visitor.edges
+        except Exception as exc:
+            # Installed but broken on this file — the user needs to know, because
+            # the regex fallback below extracts strictly less.
+            import click  # noqa: PLC0415
+
+            click.echo(
+                f"  Warning: tree-sitter failed on {path}, "
+                f"falling back to regex: {exc}",
+                err=True,
+            )
 
     nodes, edges = _index_typescript_regex(source_text, rel, fid)
     return [module_node] + nodes, edges
@@ -546,6 +661,30 @@ _INDEXED_EXTENSIONS: dict[str, object] = {
     ".jsx": index_typescript,
     ".go": index_go,
 }
+
+
+def parser_summary(extensions: set[str]) -> list[tuple[str, str, bool]]:
+    """Describe which parser handles each language present in a set of extensions.
+
+    Args:
+        extensions: Lowercase file suffixes seen while indexing (e.g. {".py"}).
+
+    Returns:
+        List of (language, parser, is_fallback) for the languages present, in a
+        stable display order. is_fallback marks a degraded parser — currently
+        only TypeScript/JS when the optional tree-sitter extra is missing.
+    """
+    summary: list[tuple[str, str, bool]] = []
+    if extensions & {".py"}:
+        summary.append(("Python", "ast", False))
+    if extensions & {".ts", ".tsx", ".js", ".jsx"}:
+        if _TREE_SITTER_AVAILABLE:
+            summary.append(("TypeScript", "tree-sitter", False))
+        else:
+            summary.append(("TypeScript", "regex fallback", True))
+    if extensions & {".go"}:
+        summary.append(("Go", "regex", False))
+    return summary
 
 
 def iter_source_files(root: Path) -> Iterator[Path]:

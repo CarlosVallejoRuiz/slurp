@@ -9,8 +9,13 @@ import pytest
 from click.testing import CliRunner
 
 from slurp.cli import cli
+import slurp.indexer as indexer_mod
 from slurp.indexer import (
+    _TREE_SITTER_AVAILABLE,
     _file_id,
+    _index_typescript_regex,
+    _parse_ts_tree,
+    parser_summary,
     _should_skip,
     index_go,
     index_project,
@@ -724,3 +729,384 @@ class TestIndexCLI:
         data = json.loads(out.read_text())
         assert "built_at_commit" in data
         assert data["built_at_commit"] is None
+
+
+# ---------------------------------------------------------------------------
+# Fixtures for parser tests
+# ---------------------------------------------------------------------------
+
+TS_RICH_CLASS = '''\
+export class UserService {
+  private cache = new Map<string, User>();
+  constructor(private db: Database) {}
+  async findUser(id: string): Promise<User | null> {
+    const localHelper = () => { return null; };
+    return this.db.get(id);
+  }
+  static create(): UserService { return new UserService(null); }
+  get size(): number { return this.cache.size; }
+  set limit(v: number) { this._limit = v; }
+  private handle = (e: Event) => { console.log(e); };
+}
+export function formatName(u: User): string { return u.first; }
+'''
+
+
+def _regex_nodes(source: str, name: str = "svc.ts"):
+    """Run the regex fallback directly and return (nodes, edges)."""
+    rel = Path(name)
+    return _index_typescript_regex(source, rel, _file_id(rel))
+
+
+def _ids(nodes) -> set[str]:
+    return {n["id"] for n in nodes}
+
+
+# ---------------------------------------------------------------------------
+# Fix 1 + 2 — tree-sitter availability
+# ---------------------------------------------------------------------------
+
+
+class TestTreeSitterAvailable:
+    def test_flag_is_a_bool(self):
+        assert isinstance(_TREE_SITTER_AVAILABLE, bool)
+
+    def test_flag_true_when_package_importable(self):
+        try:
+            import tree_sitter  # noqa: F401
+            import tree_sitter_typescript  # noqa: F401
+        except ImportError:
+            pytest.skip("tree-sitter not installed in this environment")
+        assert _TREE_SITTER_AVAILABLE is True
+
+    @pytest.mark.skipif(not _TREE_SITTER_AVAILABLE, reason="requires the 'ts' extra")
+    def test_tree_sitter_path_extracts_constructor(self, tmp_path):
+        path = tmp_path / "svc.ts"
+        path.write_text(TS_RICH_CLASS, encoding="utf-8")
+        nodes, _ = index_typescript(path, tmp_path)
+        assert "svc.UserService.constructor" in _ids(nodes)
+
+    @pytest.mark.skipif(not _TREE_SITTER_AVAILABLE, reason="requires the 'ts' extra")
+    def test_tree_sitter_nests_local_function_under_method(self, tmp_path):
+        """The distinguishing capability: regex cannot reach this depth."""
+        path = tmp_path / "svc.ts"
+        path.write_text(TS_RICH_CLASS, encoding="utf-8")
+        nodes, _ = index_typescript(path, tmp_path)
+        assert "svc.UserService.findUser.localHelper" in _ids(nodes)
+
+    @pytest.mark.skipif(not _TREE_SITTER_AVAILABLE, reason="requires the 'ts' extra")
+    def test_parse_ts_tree_returns_a_tree(self):
+        tree = _parse_ts_tree(b"class A { foo() {} }")
+        assert tree.root_node.type == "program"
+
+    def test_parse_ts_tree_raises_when_unavailable(self, monkeypatch):
+        monkeypatch.setattr(indexer_mod, "_TREE_SITTER_AVAILABLE", False)
+        with pytest.raises(RuntimeError, match="not installed"):
+            _parse_ts_tree(b"class A {}")
+
+
+# ---------------------------------------------------------------------------
+# Fix 3 — regex fallback captures class members
+# ---------------------------------------------------------------------------
+
+
+class TestTSRegexFallback:
+    def test_constructor_extracted(self):
+        nodes, _ = _regex_nodes(TS_RICH_CLASS)
+        assert "svc.UserService.constructor" in _ids(nodes)
+
+    def test_async_method_extracted(self):
+        nodes, _ = _regex_nodes(TS_RICH_CLASS)
+        assert "svc.UserService.findUser" in _ids(nodes)
+
+    def test_static_method_extracted(self):
+        nodes, _ = _regex_nodes(TS_RICH_CLASS)
+        assert "svc.UserService.create" in _ids(nodes)
+
+    def test_getter_extracted(self):
+        nodes, _ = _regex_nodes(TS_RICH_CLASS)
+        assert "svc.UserService.size" in _ids(nodes)
+
+    def test_setter_extracted(self):
+        nodes, _ = _regex_nodes(TS_RICH_CLASS)
+        assert "svc.UserService.limit" in _ids(nodes)
+
+    def test_arrow_property_extracted(self):
+        nodes, _ = _regex_nodes(TS_RICH_CLASS)
+        assert "svc.UserService.handle" in _ids(nodes)
+
+    def test_generator_method_extracted(self):
+        nodes, _ = _regex_nodes(
+            "class S {\n  protected async *stream() { yield 1; }\n}\n"
+        )
+        assert "svc.S.stream" in _ids(nodes)
+
+    def test_members_are_functions(self):
+        nodes, _ = _regex_nodes(TS_RICH_CLASS)
+        member = next(n for n in nodes if n["id"] == "svc.UserService.findUser")
+        assert member["type"] == "function"
+
+    def test_contains_edge_links_class_to_method(self):
+        _, edges = _regex_nodes(TS_RICH_CLASS)
+        assert {"source": "svc.UserService", "target": "svc.UserService.findUser",
+                "relation": "contains"} in edges
+
+    def test_no_file_to_method_edge(self):
+        """The method must hang off the class, never off the module."""
+        _, edges = _regex_nodes(TS_RICH_CLASS)
+        assert not any(
+            e["source"] == "svc" and e["target"] == "svc.UserService.findUser"
+            for e in edges
+        )
+
+    def test_local_function_not_a_top_level_symbol(self):
+        nodes, _ = _regex_nodes(TS_RICH_CLASS)
+        assert "svc.localHelper" not in _ids(nodes)
+
+    def test_nested_ids_use_module_class_method(self):
+        nodes, _ = _regex_nodes(TS_RICH_CLASS)
+        for nid in ("svc.UserService.constructor", "svc.UserService.create"):
+            assert nid.count(".") == 2
+            assert nid.startswith("svc.UserService.")
+
+    def test_top_level_function_still_extracted(self):
+        nodes, _ = _regex_nodes(TS_RICH_CLASS)
+        assert "svc.formatName" in _ids(nodes)
+
+    def test_top_level_arrow_const_still_extracted(self):
+        nodes, _ = _regex_nodes("export const run = () => 1;\n")
+        assert "svc.run" in _ids(nodes)
+
+    def test_control_flow_is_not_a_member(self):
+        source = (
+            "class S {\n"
+            "  go() {\n"
+            "    if (x) { return 1; }\n"
+            "    for (const a of b) { while (c) {} }\n"
+            "  }\n"
+            "}\n"
+        )
+        ids = _ids(_regex_nodes(source)[0])
+        for keyword in ("if", "for", "while", "return"):
+            assert f"svc.S.{keyword}" not in ids
+
+    def test_nested_callback_is_not_a_member(self):
+        source = (
+            "class S {\n"
+            "  run() {\n"
+            "    items.forEach(function inner() { return 1; });\n"
+            "  }\n"
+            "}\n"
+        )
+        assert "svc.S.inner" not in _ids(_regex_nodes(source)[0])
+
+    def test_comment_lines_are_ignored(self):
+        source = (
+            "class S {\n"
+            "  // fake() is only mentioned in a comment\n"
+            "  /* other() too */\n"
+            "  real() {}\n"
+            "}\n"
+        )
+        ids = _ids(_regex_nodes(source)[0])
+        assert "svc.S.real" in ids
+        assert "svc.S.fake" not in ids
+
+    def test_two_classes_keep_their_own_members(self):
+        source = (
+            "class A {\n  alpha() {}\n}\n"
+            "class B {\n  beta() {}\n}\n"
+        )
+        ids = _ids(_regex_nodes(source)[0])
+        assert "svc.A.alpha" in ids
+        assert "svc.B.beta" in ids
+        assert "svc.A.beta" not in ids
+
+    def test_empty_class_yields_only_the_class(self):
+        ids = _ids(_regex_nodes("class Empty {}\n")[0])
+        assert ids == {"svc.Empty"}
+
+    def test_unterminated_class_does_not_raise(self):
+        nodes, _ = _regex_nodes("class Broken {\n  method() {\n")
+        assert "svc.Broken" in _ids(nodes)
+
+
+# ---------------------------------------------------------------------------
+# Fix 4 — parser summary
+# ---------------------------------------------------------------------------
+
+
+class TestParserSummary:
+    def test_python_only(self):
+        assert parser_summary({".py"}) == [("Python", "ast", False)]
+
+    def test_empty_set_yields_nothing(self):
+        assert parser_summary(set()) == []
+
+    def test_unknown_extension_ignored(self):
+        assert parser_summary({".md", ".txt"}) == []
+
+    @pytest.mark.skipif(not _TREE_SITTER_AVAILABLE, reason="requires the 'ts' extra")
+    def test_python_and_ts_with_tree_sitter(self):
+        assert parser_summary({".py", ".ts"}) == [
+            ("Python", "ast", False),
+            ("TypeScript", "tree-sitter", False),
+        ]
+
+    def test_python_and_ts_without_tree_sitter(self, monkeypatch):
+        monkeypatch.setattr(indexer_mod, "_TREE_SITTER_AVAILABLE", False)
+        assert parser_summary({".py", ".ts"}) == [
+            ("Python", "ast", False),
+            ("TypeScript", "regex fallback", True),
+        ]
+
+    def test_python_and_go(self):
+        assert parser_summary({".py", ".go"}) == [
+            ("Python", "ast", False),
+            ("Go", "regex", False),
+        ]
+
+    def test_jsx_counts_as_typescript(self, monkeypatch):
+        monkeypatch.setattr(indexer_mod, "_TREE_SITTER_AVAILABLE", True)
+        assert parser_summary({".jsx"}) == [("TypeScript", "tree-sitter", False)]
+
+    def test_order_is_python_typescript_go(self, monkeypatch):
+        monkeypatch.setattr(indexer_mod, "_TREE_SITTER_AVAILABLE", True)
+        langs = [lang for lang, _, _ in parser_summary({".go", ".ts", ".py"})]
+        assert langs == ["Python", "TypeScript", "Go"]
+
+
+class TestParserSummaryCLI:
+    @staticmethod
+    def _project(tmp_path, python=True, ts=False, go=False):
+        if python:
+            (tmp_path / "a.py").write_text("def hello():\n    pass\n", encoding="utf-8")
+        if ts:
+            (tmp_path / "b.ts").write_text(TS_RICH_CLASS, encoding="utf-8")
+        if go:
+            (tmp_path / "c.go").write_text(
+                "package main\n\nfunc Handle() error { return nil }\n", encoding="utf-8")
+        return tmp_path
+
+    def _run(self, tmp_path, **kw):
+        root = self._project(tmp_path, **kw)
+        return CliRunner().invoke(
+            cli, ["index", str(root), "--output", str(tmp_path / "g.json")]
+        )
+
+    def test_python_only_output(self, tmp_path):
+        result = self._run(tmp_path)
+        assert result.exit_code == 0, result.output
+        assert "Parsers: Python (ast)" in result.output
+
+    @pytest.mark.skipif(not _TREE_SITTER_AVAILABLE, reason="requires the 'ts' extra")
+    def test_python_and_ts_output(self, tmp_path):
+        result = self._run(tmp_path, ts=True)
+        assert "Python (ast)" in result.output
+        assert "TypeScript (tree-sitter)" in result.output
+
+    def test_python_and_go_output(self, tmp_path):
+        result = self._run(tmp_path, go=True)
+        assert "Python (ast)" in result.output
+        assert "Go (regex)" in result.output
+
+    def test_fallback_shown_without_tree_sitter(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(indexer_mod, "_TREE_SITTER_AVAILABLE", False)
+        result = self._run(tmp_path, ts=True)
+        assert "TypeScript (regex fallback)" in result.output
+
+    def test_install_hint_shown_on_fallback(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(indexer_mod, "_TREE_SITTER_AVAILABLE", False)
+        result = self._run(tmp_path, ts=True)
+        assert "uv sync --extra ts" in result.output
+
+    @pytest.mark.skipif(not _TREE_SITTER_AVAILABLE, reason="requires the 'ts' extra")
+    def test_no_install_hint_when_tree_sitter_present(self, tmp_path):
+        result = self._run(tmp_path, ts=True)
+        assert "uv sync --extra ts" not in result.output
+
+    def test_no_hint_for_a_python_only_project(self, tmp_path):
+        result = self._run(tmp_path)
+        assert "uv sync --extra ts" not in result.output
+
+    def test_parsers_line_precedes_saved_line(self, tmp_path):
+        result = self._run(tmp_path)
+        assert result.output.index("Parsers:") < result.output.index("Saved:")
+
+
+# ---------------------------------------------------------------------------
+# Fix 2 — warning only when tree-sitter is installed but fails
+# ---------------------------------------------------------------------------
+
+
+class TestStaleWarning:
+    @pytest.mark.skipif(not _TREE_SITTER_AVAILABLE, reason="requires the 'ts' extra")
+    def test_parse_failure_warns_on_stderr(self, tmp_path, capsys):
+        path = tmp_path / "svc.ts"
+        path.write_text(TS_RICH_CLASS, encoding="utf-8")
+
+        def boom(*_a, **_kw):
+            raise ValueError("simulated parser explosion")
+
+        original = indexer_mod._parse_ts_tree
+        indexer_mod._parse_ts_tree = boom
+        try:
+            index_typescript(path, tmp_path)
+        finally:
+            indexer_mod._parse_ts_tree = original
+
+        assert "tree-sitter failed" in capsys.readouterr().err
+
+    @pytest.mark.skipif(not _TREE_SITTER_AVAILABLE, reason="requires the 'ts' extra")
+    def test_warning_names_the_file_and_the_error(self, tmp_path, capsys):
+        path = tmp_path / "svc.ts"
+        path.write_text(TS_RICH_CLASS, encoding="utf-8")
+
+        def boom(*_a, **_kw):
+            raise ValueError("simulated parser explosion")
+
+        original = indexer_mod._parse_ts_tree
+        indexer_mod._parse_ts_tree = boom
+        try:
+            index_typescript(path, tmp_path)
+        finally:
+            indexer_mod._parse_ts_tree = original
+
+        err = capsys.readouterr().err
+        assert "svc.ts" in err
+        assert "simulated parser explosion" in err
+        assert "falling back to regex" in err
+
+    @pytest.mark.skipif(not _TREE_SITTER_AVAILABLE, reason="requires the 'ts' extra")
+    def test_parse_failure_still_returns_regex_nodes(self, tmp_path):
+        path = tmp_path / "svc.ts"
+        path.write_text(TS_RICH_CLASS, encoding="utf-8")
+
+        def boom(*_a, **_kw):
+            raise ValueError("simulated parser explosion")
+
+        original = indexer_mod._parse_ts_tree
+        indexer_mod._parse_ts_tree = boom
+        try:
+            nodes, _ = index_typescript(path, tmp_path)
+        finally:
+            indexer_mod._parse_ts_tree = original
+
+        assert "svc.UserService.findUser" in _ids(nodes)
+
+    def test_missing_tree_sitter_is_silent(self, tmp_path, monkeypatch, capsys):
+        """An absent optional extra must never print anything."""
+        monkeypatch.setattr(indexer_mod, "_TREE_SITTER_AVAILABLE", False)
+        path = tmp_path / "svc.ts"
+        path.write_text(TS_RICH_CLASS, encoding="utf-8")
+        index_typescript(path, tmp_path)
+        captured = capsys.readouterr()
+        assert captured.err == ""
+        assert captured.out == ""
+
+    def test_missing_tree_sitter_still_indexes(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(indexer_mod, "_TREE_SITTER_AVAILABLE", False)
+        path = tmp_path / "svc.ts"
+        path.write_text(TS_RICH_CLASS, encoding="utf-8")
+        nodes, _ = index_typescript(path, tmp_path)
+        assert "svc.UserService.constructor" in _ids(nodes)
