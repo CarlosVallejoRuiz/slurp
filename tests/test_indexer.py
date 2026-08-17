@@ -11,8 +11,20 @@ from click.testing import CliRunner
 from slurp.cli import cli
 import slurp.indexer as indexer_mod
 from slurp.indexer import (
+    _CSHARP_TS_AVAILABLE,
+    _JAVA_TS_AVAILABLE,
+    _RUBY_TS_AVAILABLE,
+    _RUST_TS_AVAILABLE,
     _TREE_SITTER_AVAILABLE,
     _file_id,
+    _index_csharp_regex,
+    _index_java_regex,
+    _index_ruby_regex,
+    _index_rust_regex,
+    index_csharp,
+    index_java,
+    index_ruby,
+    index_rust,
     _index_typescript_regex,
     _parse_ts_tree,
     parser_summary,
@@ -1110,3 +1122,508 @@ class TestStaleWarning:
         path.write_text(TS_RICH_CLASS, encoding="utf-8")
         nodes, _ = index_typescript(path, tmp_path)
         assert "svc.UserService.constructor" in _ids(nodes)
+
+
+# ---------------------------------------------------------------------------
+# Java / Rust / C# / Ruby — sample sources
+# ---------------------------------------------------------------------------
+
+JAVA_SOURCE = '''\
+package com.example.app;
+import java.util.List;
+
+@Service
+public class UserService extends BaseService implements Repo, Closeable {
+    @Autowired
+    private final UserRepo repo;
+    public UserService(UserRepo r) { this.repo = r; }
+    @Override
+    public <T extends Comparable<T>> List<T> findAll(int page) { return null; }
+    protected void helper() { if (true) { return; } }
+}
+'''
+
+RUST_SOURCE = '''\
+use std::collections::HashMap;
+pub mod config {
+    pub struct Settings { pub name: String }
+}
+pub trait Storage { fn get(&self, k: &str) -> Option<String>; }
+pub struct Db { conn: String }
+impl Storage for Db {
+    fn get(&self, k: &str) -> Option<String> { None }
+}
+impl Db { pub fn new() -> Self { Db { conn: String::new() } } }
+pub enum Mode { Fast, Slow }
+macro_rules! my_macro { () => {}; }
+pub fn helper<'a, T: Clone>(x: &'a T) -> &'a T { x }
+fn private_fn() {}
+'''
+
+CSHARP_SOURCE = '''\
+using System.Threading.Tasks;
+namespace MyApp.Controllers {
+    public interface IRepo { void Save(); }
+    [Authorize]
+    public class HomeController : ControllerBase, IRepo {
+        [HttpGet]
+        public async Task<IActionResult> Index(int id) { return null; }
+        public string Name { get; set; }
+        public HomeController() {}
+        public void Save() {}
+    }
+}
+'''
+
+RUBY_SOURCE = '''\
+module Auth
+  CONFIG = 5
+  HANDLER = Proc.new { |x| x }
+  class UserService < Base
+    include Comparable
+    extend Forwardable
+    prepend Loggable
+    attr_accessor :name, :email
+    attr_reader :id
+    def initialize(id); @id = id; end
+    def self.create; new(1); end
+    def method_missing(n); super; end
+  end
+end
+'''
+
+
+def _write(tmp_path: Path, name: str, source: str) -> Path:
+    path = tmp_path / name
+    path.write_text(source, encoding="utf-8")
+    return path
+
+
+def _node(nodes, node_id: str) -> dict:
+    return next(n for n in nodes if n["id"] == node_id)
+
+
+def _relations(edges, relation: str) -> set[tuple[str, str]]:
+    return {(e["source"], e["target"]) for e in edges if e["relation"] == relation}
+
+
+# ---------------------------------------------------------------------------
+# Java
+# ---------------------------------------------------------------------------
+
+
+class TestIndexJava:
+    @pytest.mark.skipif(not _JAVA_TS_AVAILABLE, reason="requires the 'java' extra")
+    def test_class_and_methods(self, tmp_path):
+        nodes, _ = index_java(_write(tmp_path, "UserService.java", JAVA_SOURCE), tmp_path)
+        ids = _ids(nodes)
+        assert "UserService.UserService" in ids
+        assert "UserService.UserService.findAll" in ids
+
+    @pytest.mark.skipif(not _JAVA_TS_AVAILABLE, reason="requires the 'java' extra")
+    def test_package_extracted(self, tmp_path):
+        nodes, _ = index_java(_write(tmp_path, "UserService.java", JAVA_SOURCE), tmp_path)
+        assert any(n["type"] == "package" and n["label"] == "com.example.app" for n in nodes)
+
+    @pytest.mark.skipif(not _JAVA_TS_AVAILABLE, reason="requires the 'java' extra")
+    def test_constructor_typed_as_constructor(self, tmp_path):
+        nodes, _ = index_java(_write(tmp_path, "UserService.java", JAVA_SOURCE), tmp_path)
+        assert _node(nodes, "UserService.UserService.UserService")["type"] == "constructor"
+
+    @pytest.mark.skipif(not _JAVA_TS_AVAILABLE, reason="requires the 'java' extra")
+    def test_field_extracted(self, tmp_path):
+        nodes, _ = index_java(_write(tmp_path, "UserService.java", JAVA_SOURCE), tmp_path)
+        assert _node(nodes, "UserService.UserService.repo")["type"] == "field"
+
+    @pytest.mark.skipif(not _JAVA_TS_AVAILABLE, reason="requires the 'java' extra")
+    def test_class_annotation_recorded(self, tmp_path):
+        nodes, _ = index_java(_write(tmp_path, "UserService.java", JAVA_SOURCE), tmp_path)
+        assert "@Service" in _node(nodes, "UserService.UserService")["annotations"]
+
+    @pytest.mark.skipif(not _JAVA_TS_AVAILABLE, reason="requires the 'java' extra")
+    def test_field_annotation_recorded(self, tmp_path):
+        nodes, _ = index_java(_write(tmp_path, "UserService.java", JAVA_SOURCE), tmp_path)
+        assert "@Autowired" in _node(nodes, "UserService.UserService.repo")["annotations"]
+
+    @pytest.mark.skipif(not _JAVA_TS_AVAILABLE, reason="requires the 'java' extra")
+    def test_method_annotation_recorded(self, tmp_path):
+        nodes, _ = index_java(_write(tmp_path, "UserService.java", JAVA_SOURCE), tmp_path)
+        assert "@Override" in _node(nodes, "UserService.UserService.findAll")["annotations"]
+
+    @pytest.mark.skipif(not _JAVA_TS_AVAILABLE, reason="requires the 'java' extra")
+    def test_visibility_recorded(self, tmp_path):
+        nodes, _ = index_java(_write(tmp_path, "UserService.java", JAVA_SOURCE), tmp_path)
+        assert _node(nodes, "UserService.UserService.repo")["visibility"] == "private"
+        assert _node(nodes, "UserService.UserService.helper")["visibility"] == "protected"
+
+    @pytest.mark.skipif(not _JAVA_TS_AVAILABLE, reason="requires the 'java' extra")
+    def test_generics_in_signature(self, tmp_path):
+        nodes, _ = index_java(_write(tmp_path, "UserService.java", JAVA_SOURCE), tmp_path)
+        assert "<T extends Comparable<T>>" in _node(
+            nodes, "UserService.UserService.findAll")["signature"]
+
+    @pytest.mark.skipif(not _JAVA_TS_AVAILABLE, reason="requires the 'java' extra")
+    def test_extends_edge(self, tmp_path):
+        _, edges = index_java(_write(tmp_path, "UserService.java", JAVA_SOURCE), tmp_path)
+        assert ("UserService.UserService", "BaseService") in _relations(edges, "extends")
+
+    @pytest.mark.skipif(not _JAVA_TS_AVAILABLE, reason="requires the 'java' extra")
+    def test_implements_edges(self, tmp_path):
+        _, edges = index_java(_write(tmp_path, "UserService.java", JAVA_SOURCE), tmp_path)
+        implements = _relations(edges, "implements")
+        assert ("UserService.UserService", "Repo") in implements
+        assert ("UserService.UserService", "Closeable") in implements
+
+    @pytest.mark.skipif(not _JAVA_TS_AVAILABLE, reason="requires the 'java' extra")
+    def test_inner_class_is_nested_in_the_id(self, tmp_path):
+        source = "public class Outer {\n  static class Inner {\n    void ping() {}\n  }\n}\n"
+        nodes, _ = index_java(_write(tmp_path, "Outer.java", source), tmp_path)
+        assert "Outer.Outer.Inner.ping" in _ids(nodes)
+
+    def test_regex_fallback_extracts_class_and_methods(self):
+        nodes, _ = _index_java_regex(JAVA_SOURCE, Path("UserService.java"), "UserService")
+        ids = _ids(nodes)
+        assert "UserService.UserService" in ids
+        assert "UserService.UserService.findAll" in ids
+
+    def test_regex_fallback_records_annotations(self):
+        nodes, _ = _index_java_regex(JAVA_SOURCE, Path("UserService.java"), "UserService")
+        assert "@Service" in _node(nodes, "UserService.UserService")["annotations"]
+
+    def test_regex_fallback_records_visibility(self):
+        nodes, _ = _index_java_regex(JAVA_SOURCE, Path("UserService.java"), "UserService")
+        assert _node(nodes, "UserService.UserService.helper")["visibility"] == "protected"
+
+    def test_regex_fallback_extends_and_implements(self):
+        _, edges = _index_java_regex(JAVA_SOURCE, Path("UserService.java"), "UserService")
+        assert ("UserService.UserService", "BaseService") in _relations(edges, "extends")
+        assert ("UserService.UserService", "Repo") in _relations(edges, "implements")
+
+    def test_regex_fallback_skips_control_flow(self):
+        nodes, _ = _index_java_regex(JAVA_SOURCE, Path("UserService.java"), "UserService")
+        assert "UserService.UserService.if" not in _ids(nodes)
+
+
+# ---------------------------------------------------------------------------
+# Rust
+# ---------------------------------------------------------------------------
+
+
+class TestIndexRust:
+    @pytest.mark.skipif(not _RUST_TS_AVAILABLE, reason="requires the 'rust' extra")
+    def test_struct_trait_enum_extracted(self, tmp_path):
+        nodes, _ = index_rust(_write(tmp_path, "db.rs", RUST_SOURCE), tmp_path)
+        ids = _ids(nodes)
+        assert {"db.Db", "db.Storage", "db.Mode"} <= ids
+
+    @pytest.mark.skipif(not _RUST_TS_AVAILABLE, reason="requires the 'rust' extra")
+    def test_node_types(self, tmp_path):
+        nodes, _ = index_rust(_write(tmp_path, "db.rs", RUST_SOURCE), tmp_path)
+        assert _node(nodes, "db.Db")["type"] == "struct"
+        assert _node(nodes, "db.Storage")["type"] == "trait"
+        assert _node(nodes, "db.Mode")["type"] == "enum"
+        assert _node(nodes, "db.config")["type"] == "module"
+
+    @pytest.mark.skipif(not _RUST_TS_AVAILABLE, reason="requires the 'rust' extra")
+    def test_macro_typed_as_macro(self, tmp_path):
+        nodes, _ = index_rust(_write(tmp_path, "db.rs", RUST_SOURCE), tmp_path)
+        assert _node(nodes, "db.my_macro")["type"] == "macro"
+
+    @pytest.mark.skipif(not _RUST_TS_AVAILABLE, reason="requires the 'rust' extra")
+    def test_visibility_pub_vs_private(self, tmp_path):
+        nodes, _ = index_rust(_write(tmp_path, "db.rs", RUST_SOURCE), tmp_path)
+        assert _node(nodes, "db.helper")["visibility"] == "pub"
+        assert _node(nodes, "db.private_fn")["visibility"] == "private"
+
+    @pytest.mark.skipif(not _RUST_TS_AVAILABLE, reason="requires the 'rust' extra")
+    def test_lifetimes_in_signature(self, tmp_path):
+        nodes, _ = index_rust(_write(tmp_path, "db.rs", RUST_SOURCE), tmp_path)
+        helper = _node(nodes, "db.helper")
+        assert helper["lifetimes"] == ["a"]
+        assert "'a" in helper["signature"]
+
+    @pytest.mark.skipif(not _RUST_TS_AVAILABLE, reason="requires the 'rust' extra")
+    def test_impl_trait_creates_implements_edge(self, tmp_path):
+        _, edges = index_rust(_write(tmp_path, "db.rs", RUST_SOURCE), tmp_path)
+        assert ("db.Db", "Storage") in _relations(edges, "implements")
+
+    @pytest.mark.skipif(not _RUST_TS_AVAILABLE, reason="requires the 'rust' extra")
+    def test_inherent_impl_has_no_implements_edge(self, tmp_path):
+        source = "pub struct A;\nimpl A { pub fn go() {} }\n"
+        _, edges = index_rust(_write(tmp_path, "a.rs", source), tmp_path)
+        assert _relations(edges, "implements") == set()
+
+    @pytest.mark.skipif(not _RUST_TS_AVAILABLE, reason="requires the 'rust' extra")
+    def test_impl_methods_attach_to_the_type(self, tmp_path):
+        nodes, _ = index_rust(_write(tmp_path, "db.rs", RUST_SOURCE), tmp_path)
+        assert "db.Db.new" in _ids(nodes)
+
+    @pytest.mark.skipif(not _RUST_TS_AVAILABLE, reason="requires the 'rust' extra")
+    def test_use_creates_imports_from_edge(self, tmp_path):
+        _, edges = index_rust(_write(tmp_path, "db.rs", RUST_SOURCE), tmp_path)
+        assert any(e["relation"] == "imports_from" for e in edges)
+
+    def test_regex_fallback_extracts_items(self):
+        nodes, _ = _index_rust_regex(RUST_SOURCE, Path("db.rs"), "db")
+        ids = _ids(nodes)
+        assert {"db.Db", "db.Storage", "db.Mode", "db.my_macro"} <= ids
+
+    def test_regex_fallback_visibility(self):
+        nodes, _ = _index_rust_regex(RUST_SOURCE, Path("db.rs"), "db")
+        assert _node(nodes, "db.helper")["visibility"] == "pub"
+        assert _node(nodes, "db.private_fn")["visibility"] == "private"
+
+    def test_regex_fallback_lifetimes(self):
+        nodes, _ = _index_rust_regex(RUST_SOURCE, Path("db.rs"), "db")
+        assert _node(nodes, "db.helper")["lifetimes"] == ["a"]
+
+    def test_regex_fallback_implements_edge(self):
+        _, edges = _index_rust_regex(RUST_SOURCE, Path("db.rs"), "db")
+        assert ("db.Db", "Storage") in _relations(edges, "implements")
+
+
+# ---------------------------------------------------------------------------
+# C#
+# ---------------------------------------------------------------------------
+
+
+class TestIndexCSharp:
+    @pytest.mark.skipif(not _CSHARP_TS_AVAILABLE, reason="requires the 'csharp' extra")
+    def test_namespace_nested_in_id(self, tmp_path):
+        nodes, _ = index_csharp(_write(tmp_path, "Home.cs", CSHARP_SOURCE), tmp_path)
+        assert "Home.MyApp.Controllers.HomeController.Index" in _ids(nodes)
+
+    @pytest.mark.skipif(not _CSHARP_TS_AVAILABLE, reason="requires the 'csharp' extra")
+    def test_class_attribute_recorded(self, tmp_path):
+        nodes, _ = index_csharp(_write(tmp_path, "Home.cs", CSHARP_SOURCE), tmp_path)
+        node = _node(nodes, "Home.MyApp.Controllers.HomeController")
+        assert "[Authorize]" in node["attributes"]
+
+    @pytest.mark.skipif(not _CSHARP_TS_AVAILABLE, reason="requires the 'csharp' extra")
+    def test_method_attribute_recorded(self, tmp_path):
+        nodes, _ = index_csharp(_write(tmp_path, "Home.cs", CSHARP_SOURCE), tmp_path)
+        node = _node(nodes, "Home.MyApp.Controllers.HomeController.Index")
+        assert "[HttpGet]" in node["attributes"]
+
+    @pytest.mark.skipif(not _CSHARP_TS_AVAILABLE, reason="requires the 'csharp' extra")
+    def test_async_method_flagged(self, tmp_path):
+        nodes, _ = index_csharp(_write(tmp_path, "Home.cs", CSHARP_SOURCE), tmp_path)
+        assert _node(nodes, "Home.MyApp.Controllers.HomeController.Index")["is_async"] is True
+
+    @pytest.mark.skipif(not _CSHARP_TS_AVAILABLE, reason="requires the 'csharp' extra")
+    def test_sync_method_not_flagged_async(self, tmp_path):
+        nodes, _ = index_csharp(_write(tmp_path, "Home.cs", CSHARP_SOURCE), tmp_path)
+        assert "is_async" not in _node(nodes, "Home.MyApp.Controllers.HomeController.Save")
+
+    @pytest.mark.skipif(not _CSHARP_TS_AVAILABLE, reason="requires the 'csharp' extra")
+    def test_property_typed_as_property(self, tmp_path):
+        nodes, _ = index_csharp(_write(tmp_path, "Home.cs", CSHARP_SOURCE), tmp_path)
+        node = _node(nodes, "Home.MyApp.Controllers.HomeController.Name")
+        assert node["type"] == "property"
+        assert node["label_qualified"] == "HomeController.Name"
+
+    @pytest.mark.skipif(not _CSHARP_TS_AVAILABLE, reason="requires the 'csharp' extra")
+    def test_interface_prefix_detected(self, tmp_path):
+        nodes, _ = index_csharp(_write(tmp_path, "Home.cs", CSHARP_SOURCE), tmp_path)
+        assert _node(nodes, "Home.MyApp.Controllers.IRepo")["is_interface"] is True
+
+    @pytest.mark.skipif(not _CSHARP_TS_AVAILABLE, reason="requires the 'csharp' extra")
+    def test_class_is_not_flagged_as_interface(self, tmp_path):
+        nodes, _ = index_csharp(_write(tmp_path, "Home.cs", CSHARP_SOURCE), tmp_path)
+        node = _node(nodes, "Home.MyApp.Controllers.HomeController")
+        assert node.get("is_interface", False) is False
+
+    @pytest.mark.skipif(not _CSHARP_TS_AVAILABLE, reason="requires the 'csharp' extra")
+    def test_base_list_splits_extends_and_implements(self, tmp_path):
+        _, edges = index_csharp(_write(tmp_path, "Home.cs", CSHARP_SOURCE), tmp_path)
+        cls = "Home.MyApp.Controllers.HomeController"
+        assert (cls, "ControllerBase") in _relations(edges, "extends")
+        assert (cls, "IRepo") in _relations(edges, "implements")
+
+    @pytest.mark.skipif(not _CSHARP_TS_AVAILABLE, reason="requires the 'csharp' extra")
+    def test_constructor_typed_as_constructor(self, tmp_path):
+        nodes, _ = index_csharp(_write(tmp_path, "Home.cs", CSHARP_SOURCE), tmp_path)
+        node = _node(nodes, "Home.MyApp.Controllers.HomeController.HomeController")
+        assert node["type"] == "constructor"
+
+    def test_regex_fallback_extracts_types_and_members(self):
+        nodes, _ = _index_csharp_regex(CSHARP_SOURCE, Path("Home.cs"), "Home")
+        ids = _ids(nodes)
+        assert "Home.MyApp.Controllers.HomeController" in ids
+        assert "Home.MyApp.Controllers.HomeController.Index" in ids
+
+    def test_regex_fallback_attributes(self):
+        nodes, _ = _index_csharp_regex(CSHARP_SOURCE, Path("Home.cs"), "Home")
+        node = _node(nodes, "Home.MyApp.Controllers.HomeController")
+        assert node["attributes"] == ["[Authorize]"]
+
+    def test_regex_fallback_async_flag(self):
+        nodes, _ = _index_csharp_regex(CSHARP_SOURCE, Path("Home.cs"), "Home")
+        assert _node(nodes, "Home.MyApp.Controllers.HomeController.Index")["is_async"] is True
+
+    def test_regex_fallback_property(self):
+        nodes, _ = _index_csharp_regex(CSHARP_SOURCE, Path("Home.cs"), "Home")
+        assert _node(nodes, "Home.MyApp.Controllers.HomeController.Name")["type"] == "property"
+
+    def test_regex_fallback_edges(self):
+        _, edges = _index_csharp_regex(CSHARP_SOURCE, Path("Home.cs"), "Home")
+        cls = "Home.MyApp.Controllers.HomeController"
+        assert (cls, "ControllerBase") in _relations(edges, "extends")
+        assert (cls, "IRepo") in _relations(edges, "implements")
+
+
+# ---------------------------------------------------------------------------
+# Ruby
+# ---------------------------------------------------------------------------
+
+
+class TestIndexRuby:
+    @pytest.mark.skipif(not _RUBY_TS_AVAILABLE, reason="requires the 'ruby' extra")
+    def test_module_and_class_nested(self, tmp_path):
+        nodes, _ = index_ruby(_write(tmp_path, "user.rb", RUBY_SOURCE), tmp_path)
+        ids = _ids(nodes)
+        assert "user.Auth" in ids
+        assert "user.Auth.UserService" in ids
+
+    @pytest.mark.skipif(not _RUBY_TS_AVAILABLE, reason="requires the 'ruby' extra")
+    def test_instance_method(self, tmp_path):
+        nodes, _ = index_ruby(_write(tmp_path, "user.rb", RUBY_SOURCE), tmp_path)
+        node = _node(nodes, "user.Auth.UserService.initialize")
+        assert node["type"] == "method"
+        assert node["is_class_method"] is False
+
+    @pytest.mark.skipif(not _RUBY_TS_AVAILABLE, reason="requires the 'ruby' extra")
+    def test_class_method_flagged(self, tmp_path):
+        nodes, _ = index_ruby(_write(tmp_path, "user.rb", RUBY_SOURCE), tmp_path)
+        assert _node(nodes, "user.Auth.UserService.create")["is_class_method"] is True
+
+    @pytest.mark.skipif(not _RUBY_TS_AVAILABLE, reason="requires the 'ruby' extra")
+    def test_method_missing_is_dynamic(self, tmp_path):
+        nodes, _ = index_ruby(_write(tmp_path, "user.rb", RUBY_SOURCE), tmp_path)
+        assert _node(nodes, "user.Auth.UserService.method_missing")["type"] == "dynamic"
+
+    @pytest.mark.skipif(not _RUBY_TS_AVAILABLE, reason="requires the 'ruby' extra")
+    def test_attr_accessor_creates_accessor_nodes(self, tmp_path):
+        nodes, _ = index_ruby(_write(tmp_path, "user.rb", RUBY_SOURCE), tmp_path)
+        name = _node(nodes, "user.Auth.UserService.name")
+        assert name["type"] == "accessor"
+        assert name["accessor_kind"] == "attr_accessor"
+
+    @pytest.mark.skipif(not _RUBY_TS_AVAILABLE, reason="requires the 'ruby' extra")
+    def test_attr_reader_kind_recorded(self, tmp_path):
+        nodes, _ = index_ruby(_write(tmp_path, "user.rb", RUBY_SOURCE), tmp_path)
+        assert _node(nodes, "user.Auth.UserService.id")["accessor_kind"] == "attr_reader"
+
+    @pytest.mark.skipif(not _RUBY_TS_AVAILABLE, reason="requires the 'ruby' extra")
+    def test_constant_and_proc(self, tmp_path):
+        nodes, _ = index_ruby(_write(tmp_path, "user.rb", RUBY_SOURCE), tmp_path)
+        assert _node(nodes, "user.Auth.CONFIG")["type"] == "constant"
+        assert _node(nodes, "user.Auth.HANDLER")["type"] == "proc"
+
+    @pytest.mark.skipif(not _RUBY_TS_AVAILABLE, reason="requires the 'ruby' extra")
+    def test_mixin_edges(self, tmp_path):
+        _, edges = index_ruby(_write(tmp_path, "user.rb", RUBY_SOURCE), tmp_path)
+        mixins = _relations(edges, "mixin")
+        cls = "user.Auth.UserService"
+        assert (cls, "Comparable") in mixins
+        assert (cls, "Forwardable") in mixins
+        assert (cls, "Loggable") in mixins
+
+    @pytest.mark.skipif(not _RUBY_TS_AVAILABLE, reason="requires the 'ruby' extra")
+    def test_superclass_edge(self, tmp_path):
+        _, edges = index_ruby(_write(tmp_path, "user.rb", RUBY_SOURCE), tmp_path)
+        assert ("user.Auth.UserService", "Base") in _relations(edges, "extends")
+
+    def test_regex_fallback_nesting(self):
+        nodes, _ = _index_ruby_regex(RUBY_SOURCE, Path("user.rb"), "user")
+        assert "user.Auth.UserService.initialize" in _ids(nodes)
+
+    def test_regex_fallback_class_method_flag(self):
+        nodes, _ = _index_ruby_regex(RUBY_SOURCE, Path("user.rb"), "user")
+        assert _node(nodes, "user.Auth.UserService.create")["is_class_method"] is True
+
+    def test_regex_fallback_method_missing(self):
+        nodes, _ = _index_ruby_regex(RUBY_SOURCE, Path("user.rb"), "user")
+        assert _node(nodes, "user.Auth.UserService.method_missing")["type"] == "dynamic"
+
+    def test_regex_fallback_accessors(self):
+        nodes, _ = _index_ruby_regex(RUBY_SOURCE, Path("user.rb"), "user")
+        assert _node(nodes, "user.Auth.UserService.email")["accessor_kind"] == "attr_accessor"
+
+    def test_regex_fallback_proc_vs_constant(self):
+        nodes, _ = _index_ruby_regex(RUBY_SOURCE, Path("user.rb"), "user")
+        assert _node(nodes, "user.Auth.HANDLER")["type"] == "proc"
+        assert _node(nodes, "user.Auth.CONFIG")["type"] == "constant"
+
+    def test_regex_fallback_mixin_edges(self):
+        _, edges = _index_ruby_regex(RUBY_SOURCE, Path("user.rb"), "user")
+        assert ("user.Auth.UserService", "Comparable") in _relations(edges, "mixin")
+
+
+# ---------------------------------------------------------------------------
+# Wiring: extensions, project indexing, parser summary
+# ---------------------------------------------------------------------------
+
+
+class TestNewLanguageWiring:
+    @pytest.mark.parametrize("ext", [".java", ".rs", ".cs", ".rb"])
+    def test_extension_registered(self, ext):
+        from slurp.indexer import _INDEXED_EXTENSIONS
+        assert ext in _INDEXED_EXTENSIONS
+
+    def test_index_project_picks_up_all_four(self, tmp_path):
+        _write(tmp_path, "A.java", JAVA_SOURCE)
+        _write(tmp_path, "b.rs", RUST_SOURCE)
+        _write(tmp_path, "C.cs", CSHARP_SOURCE)
+        _write(tmp_path, "d.rb", RUBY_SOURCE)
+        graph = index_project(tmp_path)
+        files = {n["source_file"] for n in graph["nodes"] if n.get("source_file")}
+        assert {"A.java", "b.rs", "C.cs", "d.rb"} <= files
+
+    @pytest.mark.parametrize("ext,language", [
+        (".java", "Java"), (".rs", "Rust"), (".cs", "C#"), (".rb", "Ruby"),
+    ])
+    def test_parser_summary_lists_language(self, ext, language):
+        assert any(lang == language for lang, _, _ in parser_summary({ext}))
+
+    @pytest.mark.parametrize("ext,flag", [
+        (".java", "_JAVA_TS_AVAILABLE"), (".rs", "_RUST_TS_AVAILABLE"),
+        (".cs", "_CSHARP_TS_AVAILABLE"), (".rb", "_RUBY_TS_AVAILABLE"),
+    ])
+    def test_parser_summary_reports_fallback(self, ext, flag, monkeypatch):
+        monkeypatch.setattr(indexer_mod, flag, False)
+        _, parser, is_fallback = parser_summary({ext})[0]
+        assert parser == "regex fallback"
+        assert is_fallback is True
+
+    def test_go_is_not_marked_as_fallback(self):
+        assert parser_summary({".go"}) == [("Go", "regex", False)]
+
+    def test_cli_shows_the_new_languages(self, tmp_path):
+        _write(tmp_path, "A.java", JAVA_SOURCE)
+        _write(tmp_path, "b.rs", RUST_SOURCE)
+        result = CliRunner().invoke(
+            cli, ["index", str(tmp_path), "--output", str(tmp_path / "g.json")])
+        assert result.exit_code == 0, result.output
+        assert "Java" in result.output
+        assert "Rust" in result.output
+
+
+class TestNewLanguageFallbackSilence:
+    """An absent grammar must degrade quietly, exactly like TypeScript's."""
+
+    @pytest.mark.parametrize("flag,fn,name,source", [
+        ("_JAVA_TS_AVAILABLE", "index_java", "A.java", JAVA_SOURCE),
+        ("_RUST_TS_AVAILABLE", "index_rust", "b.rs", RUST_SOURCE),
+        ("_CSHARP_TS_AVAILABLE", "index_csharp", "C.cs", CSHARP_SOURCE),
+        ("_RUBY_TS_AVAILABLE", "index_ruby", "d.rb", RUBY_SOURCE),
+    ])
+    def test_missing_grammar_is_silent(self, flag, fn, name, source,
+                                       tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(indexer_mod, flag, False)
+        path = _write(tmp_path, name, source)
+        nodes, _ = getattr(indexer_mod, fn)(path, tmp_path)
+        captured = capsys.readouterr()
+        assert captured.err == ""
+        assert captured.out == ""
+        assert len(nodes) > 1  # regex still produced something

@@ -34,7 +34,41 @@ Slurp es una herramienta CLI open source de **token-budget-aware graph navigatio
 - **pathspec** para ignore patterns en `.slurpignore`
 - **watchdog** para `--watch` mode en `slurp index`
 - **anthropic** SDK (opcional en v1, para embeddings en v4)
+- **tree-sitter** + gramáticas por lenguaje — **extras opcionales**, nunca requeridos
 - Tests con **pytest**, linting con **ruff**, formatting con **black**
+
+### Lenguajes soportados por `slurp index`
+
+| Lenguaje | Parser | Extra |
+|---|---|---|
+| Python | stdlib `ast` | — (siempre disponible) |
+| TypeScript / JavaScript | tree-sitter | `ts` |
+| Java | tree-sitter | `java` |
+| Rust | tree-sitter | `rust` |
+| C# | tree-sitter | `csharp` |
+| Ruby | tree-sitter | `ruby` |
+| Go | regex | — (no hay gramática cableada) |
+
+```bash
+uv sync --extra all-languages   # todas las gramáticas de golpe
+uv sync --extra rust            # solo una
+```
+
+**Invariantes del indexador:**
+- Cada gramática es un extra **independiente**: su ausencia es una configuración
+  soportada y debe degradar en silencio al fallback regex.
+- Un fallo de parseo **con** la gramática instalada sí se avisa por stderr —
+  los dos casos nunca comparten el mismo `except`.
+- `slurp index` imprime siempre qué parser usó por lenguaje; un grafo degradado
+  nunca debe pasar desapercibido.
+- Los visitors de tree-sitter heredan de `_BaseVisitor` (pila de scopes, `_emit`
+  con atributos extra, dispatch `visit_<node_type>`). Añadir un lenguaje = una
+  subclase + un fallback regex + una entrada en `_INDEXED_EXTENSIONS`,
+  `parser_summary()` y `_LANGUAGE_BY_EXT` del CLI.
+- Metadatos específicos por lenguaje: anotaciones/atributos (Java, C#),
+  visibilidad (Java, Rust, C#), lifetimes (Rust), `is_async` (C#),
+  `is_class_method` y accessors (Ruby). Edges tipados: `extends`, `implements`
+  (incluido `impl Trait for Type` de Rust) y `mixin` (Ruby).
 
 ---
 
@@ -57,7 +91,7 @@ por debajo de la carpeta que abre el editor (`~/Desktop/Slurp/`). Todos los coma
 de este documento (`uv run pytest`, `ruff check`, `uv build`, `git`) se ejecutan
 desde `~/Desktop/Slurp/slurp/`, que es donde vive este CLAUDE.md.
 
-**Estado actual:** v0.7.0 · 1158 tests · `ruff check slurp/` limpio.
+**Estado actual:** v0.7.0 · 1284 tests · `ruff check slurp/` limpio.
 
 ```
 ~/Desktop/Slurp/slurp/         ← raíz del repo git — working directory
@@ -459,6 +493,7 @@ Punto de entrada para un proyecto nuevo. No requiere flags. Secuencia:
 ### v0.6.0 — Autonomous Indexing ✅
 - [x] `slurp index .` — genera graph.json propio sin depender de graphify
 - [x] Soporte Python (stdlib ast), TypeScript/JS (tree-sitter o regex), Go (regex)
+- [x] Java, Rust, C# y Ruby (tree-sitter o regex) con metadatos por lenguaje
 - [x] Mismo formato graph.json que graphify — compatible con todo lo existente
 - [x] `slurp index . --watch` — modo watch que re-indexa archivos modificados
 - [x] `.slurpignore` aplicado también al indexador

@@ -105,6 +105,10 @@ _LANGUAGE_BY_EXT: dict[str, str] = {
     ".js": "JavaScript",
     ".jsx": "JavaScript",
     ".go": "Go",
+    ".java": "Java",
+    ".rs": "Rust",
+    ".cs": "C#",
+    ".rb": "Ruby",
 }
 
 

@@ -31,6 +31,30 @@ ts = [
     "tree-sitter>=0.22.0",
     "tree-sitter-typescript>=0.23.0",
 ]
+java = [
+    "tree-sitter>=0.22.0",
+    "tree-sitter-java>=0.23.0",
+]
+rust = [
+    "tree-sitter>=0.22.0",
+    "tree-sitter-rust>=0.23.0",
+]
+csharp = [
+    "tree-sitter>=0.22.0",
+    "tree-sitter-c-sharp>=0.23.0",
+]
+ruby = [
+    "tree-sitter>=0.22.0",
+    "tree-sitter-ruby>=0.23.0",
+]
+all-languages = [
+    "tree-sitter>=0.22.0",
+    "tree-sitter-typescript>=0.23.0",
+    "tree-sitter-java>=0.23.0",
+    "tree-sitter-rust>=0.23.0",
+    "tree-sitter-c-sharp>=0.23.0",
+    "tree-sitter-ruby>=0.23.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/CarlosVallejoRuiz/slurp"

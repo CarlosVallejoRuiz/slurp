@@ -4,7 +4,7 @@
 
 # slurp
 
-![tests](https://img.shields.io/badge/tests-1158%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-1284%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 ![pypi](https://img.shields.io/badge/PyPI-slurp--graph-orange)
@@ -510,7 +510,47 @@ Next: slurp "your query" --graph /path/to/project/graphify-out/graph.json
 | `--watch` | off | Re-index on file changes (requires watchdog, installed by default). |
 | `--ignore-file` | `.slurpignore` | Path to .slurpignore rules. |
 
-**Supported languages:** Python (stdlib `ast`) · TypeScript/JS (tree-sitter if installed, otherwise regex) · Go (regex)
+#### Supported languages
+
+| Language | Parser |
+|---|---|
+| Python | stdlib `ast` |
+| TypeScript / JavaScript | tree-sitter |
+| Go | regex |
+| Java | tree-sitter |
+| Rust | tree-sitter |
+| C# | tree-sitter |
+| Ruby | tree-sitter |
+
+Every tree-sitter language falls back to a regex parser when its grammar is not
+installed. The fallback extracts strictly less — it cannot nest inner classes or
+reach into method bodies — so `slurp index` always prints which parser it used:
+
+```
+✓ 312 nodes · 487 edges · 41 files
+  Parsers: Python (ast) · Java (tree-sitter) · Ruby (regex fallback)
+  Install the 'ts' extra for full TypeScript support: uv sync --extra ts
+```
+
+Python needs no extra (it uses the standard library) and Go has no grammar wired
+up, so its regex parser is not a fallback.
+
+#### Optional extras
+
+| Extra | Languages | Install |
+|---|---|---|
+| `ts` | TypeScript, JavaScript | `uv sync --extra ts` |
+| `java` | Java | `uv sync --extra java` |
+| `rust` | Rust | `uv sync --extra rust` |
+| `csharp` | C# | `uv sync --extra csharp` |
+| `ruby` | Ruby | `uv sync --extra ruby` |
+| `all-languages` | All of the above | `uv sync --extra all-languages` |
+
+Each language records what matters for navigating that ecosystem: Java and C#
+annotations/attributes (`@Service`, `[HttpGet]`) plus access modifiers, Rust
+lifetimes and `pub` visibility, Ruby class methods and accessors. Relationships
+become typed edges — `extends`, `implements` (including Rust's `impl Trait for
+Type`), and Ruby's `mixin` for `include`/`extend`/`prepend`.
 
 After indexing, the full query pipeline works as usual:
 
