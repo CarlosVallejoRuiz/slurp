@@ -17,6 +17,7 @@ from slurp.audit import log_query, read_audit, top_nodes_from_audit
 # Imported at module level because the --price-model choices are built at decoration time.
 from slurp.benchmark import MODEL_PRICES_PER_MTok
 from slurp.budget import select_subgraph
+from slurp.explainer import PROVIDERS as _EXPLAIN_PROVIDERS
 from slurp.formatter import format_subgraph
 from slurp.ignore import apply_ignore, load_ignore
 from slurp.loader import SlurpLoadError, build_graph, load_graph
@@ -726,6 +727,142 @@ def serve(graph: tuple[str, ...], graph_labels: tuple[str, ...], log: bool) -> N
         session_log=log,
         labels=list(graph_labels) or None,
     )
+
+
+@cli.command("explain")
+@click.argument("query")
+@click.option("--graph", "-g", type=click.Path(), default=None,
+              help="Path to graph.json (auto-discovered if omitted).")
+@click.option("--provider", type=click.Choice(list(_EXPLAIN_PROVIDERS)), default=None,
+              help="LLM provider (auto-detected from env vars if omitted).")
+@click.option("--model", "-m", default=None,
+              help="Model name (provider default if omitted).")
+@click.option("--endpoint", default=None,
+              help="Base URL for the openai-compatible provider.")
+@click.option("--no-llm", "no_llm", is_flag=True, default=False,
+              help="Skip the LLM and show the structural analysis only.")
+@click.option("--hops", default=2, show_default=True,
+              help="Neighbourhood radius used to build the explanation context.")
+@click.option("--config-dir", "config_dir", default=".slurp", show_default=True,
+              help="Directory holding config.json.")
+def explain_cmd(
+    query: str,
+    graph: str | None,
+    provider: str | None,
+    model: str | None,
+    endpoint: str | None,
+    no_llm: bool,
+    hops: int,
+    config_dir: str,
+) -> None:
+    """Explain what a node does, who depends on it, and what breaks if it changes."""
+    from slurp.explainer import (
+        LLMConfig,
+        SlurpExplainError,
+        explain_node,
+        find_node,
+        format_explanation,
+        resolve_config,
+    )
+
+    graph_path = Path(graph) if graph else _find_graph()
+    if graph_path is None:
+        raise click.ClickException(
+            "No graph.json found. Pass --graph or run from a directory with graph.json."
+        )
+
+    try:
+        G = load_graph(graph_path)
+    except SlurpLoadError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    scores = score_nodes(G, query)
+
+    try:
+        node_id = find_node(G, query, scores)
+        config = (
+            LLMConfig(provider="structural") if no_llm
+            else resolve_config(provider, model, endpoint, Path(config_dir))
+        )
+        result = explain_node(G, node_id, scores, config, hops=hops)
+    except SlurpExplainError as exc:
+        raise click.ClickException(str(exc)) from None
+
+    subtitle = " · ".join(filter(None, [
+        result.node_type,
+        result.source_file,
+        f"score: {result.score:.3f}" if result.score else "",
+    ]))
+    _echo_rich(Panel(subtitle or result.node_id,
+                     title=f"slurp explain — {result.label}",
+                     border_style="cyan"))
+    click.echo()
+    click.echo(format_explanation(result))
+
+    if result.provider_used == "structural" and not no_llm and not result.warning:
+        click.echo(
+            "\nNo LLM provider configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY, "
+            "run Ollama locally, or use `slurp config set provider ...`."
+        )
+
+
+@cli.group("config")
+def config_group() -> None:
+    """View and change slurp's saved configuration."""
+
+
+@config_group.command("set")
+@click.argument("key")
+@click.argument("value")
+@click.option("--config-dir", "config_dir", default=".slurp", show_default=True,
+              help="Directory holding config.json.")
+def config_set(key: str, value: str, config_dir: str) -> None:
+    """Save KEY = VALUE to .slurp/config.json."""
+    from slurp.explainer import SlurpExplainError, config_path, write_config
+
+    try:
+        write_config(key, value, Path(config_dir))
+    except SlurpExplainError as exc:
+        raise click.ClickException(str(exc)) from None
+    except OSError as exc:
+        raise click.ClickException(f"Could not write config: {exc}") from None
+
+    shown = "********" if key == "api_key" else value
+    click.echo(f"Set {key} = {shown}")
+    click.echo(f"  Saved: {config_path(Path(config_dir))}")
+
+
+@config_group.command("show")
+@click.option("--config-dir", "config_dir", default=".slurp", show_default=True,
+              help="Directory holding config.json.")
+def config_show(config_dir: str) -> None:
+    """Show the saved configuration and what slurp would use right now."""
+    from slurp.explainer import config_path, read_config, resolve_config
+
+    path = config_path(Path(config_dir))
+    saved = read_config(Path(config_dir))
+
+    table = Table(title=f"slurp config — {path}", show_header=True, header_style="bold")
+    table.add_column("Key")
+    table.add_column("Value")
+    if saved:
+        for key in sorted(saved):
+            value = "********" if key == "api_key" else str(saved[key])
+            table.add_row(key, value)
+    else:
+        table.add_row("(empty)", "no config file yet")
+    _echo_rich(table)
+
+    resolved = resolve_config(config_dir=Path(config_dir))
+    click.echo(f"\nEffective provider: {resolved.provider}")
+    click.echo(f"Effective model:    {resolved.model or '(none)'}")
+    if resolved.endpoint:
+        click.echo(f"Effective endpoint: {resolved.endpoint}")
+    if resolved.provider == "structural":
+        click.echo(
+            "\nNo LLM provider detected — `slurp explain` will use structural "
+            "analysis. Set an API key or run `slurp config set provider ...`."
+        )
 
 
 @cli.command("advisor")

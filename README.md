@@ -4,7 +4,7 @@
 
 # slurp
 
-![tests](https://img.shields.io/badge/tests-1643%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-1746%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 ![pypi](https://img.shields.io/badge/PyPI-slurp--graph-orange)
@@ -404,6 +404,126 @@ pay for one outlier every time.
 > Savings percentages are estimated against a baseline of ~50 tokens per node, the same
 > baseline the visualizer uses. The audit log records outcomes, not the full-graph token
 > count, so no historical graph needs to still exist on disk.
+
+---
+
+### `slurp explain`
+
+Explains any node in natural language — what it does, its architecture, and the risk of
+changing it.
+
+```bash
+slurp explain "recalcularPlayerStats" --graph graph.json
+```
+
+```
+╭──────────────── slurp explain — recalcularPlayerStats() ────────────────╮
+│ function · lib/supabase/admin-actions.ts · score: 0.966                 │
+╰─────────────────────────────────────────────────────────────────────────╯
+
+EXPLANATION
+recalcularPlayerStats() is a core admin-side function that recomputes player
+statistics from scratch by aggregating raw match event data, likely to keep
+derived stats (goals, cards, appearances, etc.) consistent whenever underlying
+match data changes. It exists as a shared recalculation routine so that any
+operation touching match events — inserts, deletions, substitutions, imports,
+or scheduled jobs — can trigger a fresh, authoritative recompute rather than
+each caller maintaining its own incremental update logic.
+
+Given its high blast radius, any change to this function's logic, signature, or
+side effects could silently break stats recalculation across eight distinct
+workflows, making regressions here likely to propagate broadly and be hard to
+detect until stats appear wrong.
+
+ARCHITECTURE
+→ Called by: adminBackfill(), deleteMatchEventAdmin(),
+             importMatchCsv(), insertMatchEventAdmin(),
+             insertSubstitutionEventAdmin(), nightlyStatsJob(),
+             recalcTeamTable(), refreshAllStats()
+← Calls: createAdminClient()
+
+RISK IF CHANGED: HIGH
+8 nodes depend on this function directly.
+
+─────────────────────────────────────────────────────────────────────────
+Provider: anthropic (claude-sonnet-5) · Context: 198 tokens
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--graph`, `-g` | auto-discovered | Path to `graph.json`. |
+| `--provider` | auto-detected | `anthropic`, `openai`, `ollama`, or `openai-compatible`. |
+| `--model`, `-m` | per-provider default | Model name. |
+| `--endpoint` | — | Base URL for the `openai-compatible` provider. |
+| `--no-llm` | off | Skip the LLM and show the structural analysis only. |
+| `--hops` | `2` | Neighbourhood radius used to build the explanation context. |
+
+**Providers.** With no `--provider`, slurp auto-detects in this order:
+
+| Provider | Detected via | Default model | Notes |
+|---|---|---|---|
+| `anthropic` | `ANTHROPIC_API_KEY` | `claude-sonnet-5` | Needs `pip install anthropic`. |
+| `openai` | `OPENAI_API_KEY` | `gpt-4o-mini` | Needs `pip install openai`. |
+| `ollama` | server answering on `localhost:11434` | `llama3.2` | Fully local, no API key. |
+| `openai-compatible` | `SLURP_LLM_ENDPOINT` (+ optional `SLURP_LLM_API_KEY`) | `local-model` | LM Studio, Together, Groq, vLLM, anything speaking the OpenAI API. |
+
+If none are present, slurp uses the **structural** explanation — a deterministic description
+built from the graph alone. It is always produced first, so a missing SDK, an absent API key,
+or an unreachable endpoint degrades to it rather than failing:
+
+```
+Provider: structural · Context: 198 tokens
+Note: openai-compatible unavailable (Could not reach http://localhost:1234/v1/chat/completions:
+      [Errno 61] Connection refused); showed structural analysis
+```
+
+Force it with `--no-llm` to get an offline, zero-cost explanation.
+
+> **Architecture and risk are always computed from the graph, never written by the model.**
+> The LLM contributes only the prose under `EXPLANATION`; callers, callees, and blast radius
+> are facts slurp already has, so the model is explicitly told not to restate them.
+
+> Works best with graphs that include call edges (graphify). With `slurp index` graphs,
+> callers are inferred from `contains` edges — a symbol's only "caller" is the module that
+> declares it, so the risk level will read `LOW` for almost everything.
+
+---
+
+### `slurp config`
+
+Saves LLM settings to `.slurp/config.json` so you don't pass flags every time.
+
+```bash
+slurp config set provider openai-compatible
+slurp config set model qwen2.5-coder
+slurp config set endpoint http://localhost:1234/v1
+slurp config set api_key sk-...        # stored, never echoed back
+slurp config show
+```
+
+```
+   slurp config — .slurp/config.json
+┏━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Key      ┃ Value                    ┃
+┡━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ api_key  │ ********                 │
+│ endpoint │ http://localhost:1234/v1 │
+│ model    │ qwen2.5-coder            │
+│ provider │ openai-compatible        │
+└──────────┴──────────────────────────┘
+
+Effective provider: openai-compatible
+Effective model:    qwen2.5-coder
+Effective endpoint: http://localhost:1234/v1
+```
+
+Keys: `provider`, `model`, `endpoint`, `api_key`, `temperature`. Precedence is **flags →
+saved config → environment auto-detection**, so an explicit flag is never overridden by a
+stored preference. `slurp config show` prints both what is saved and what slurp would
+actually use right now.
+
+> `api_key` is masked in all output but stored in plain text in `.slurp/config.json` — keep
+> `.slurp/` out of version control, or leave the key in an environment variable instead.
 
 ---
 

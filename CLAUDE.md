@@ -125,7 +125,7 @@ por debajo de la carpeta que abre el editor (`~/Desktop/Slurp/`). Todos los coma
 de este documento (`uv run pytest`, `ruff check`, `uv build`, `git`) se ejecutan
 desde `~/Desktop/Slurp/slurp/`, que es donde vive este CLAUDE.md.
 
-**Estado actual:** v0.9.0 · 1643 tests · `ruff check slurp/` limpio.
+**Estado actual:** v0.9.0 · 1746 tests · `ruff check slurp/` limpio.
 
 ```
 ~/Desktop/Slurp/slurp/         ← raíz del repo git — working directory
@@ -152,7 +152,8 @@ desde `~/Desktop/Slurp/slurp/`, que es donde vive este CLAUDE.md.
 │   ├── indexer.py         ← indexador estático autónomo (v0.6.0)
 │   ├── smart.py           ← re-indexado incremental vía git (--smart)
 │   ├── advisor.py         ← recomienda budget óptimo desde el historial de queries
-│   └── federation.py      ← mergea varios grafos en uno (--graph repetido)
+│   ├── federation.py      ← mergea varios grafos en uno (--graph repetido)
+│   └── explainer.py       ← explica un nodo en lenguaje natural (LLM + fallback estructural)
 └── tests/
     ├── __init__.py
     ├── conftest.py
@@ -171,7 +172,8 @@ desde `~/Desktop/Slurp/slurp/`, que es donde vive este CLAUDE.md.
     ├── test_indexer.py
     ├── test_smart.py
     ├── test_advisor.py
-    └── test_federation.py
+    ├── test_federation.py
+    └── test_explainer.py
 ```
 
 ---
