@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -12,19 +13,33 @@ from slurp.cli import cli
 import slurp.indexer as indexer_mod
 from slurp.indexer import (
     _CSHARP_TS_AVAILABLE,
+    _KOTLIN_TS_AVAILABLE,
+    _PHP_TS_AVAILABLE,
     _JAVA_TS_AVAILABLE,
     _RUBY_TS_AVAILABLE,
     _RUST_TS_AVAILABLE,
+    _SCALA_TS_AVAILABLE,
+    _SWIFT_TS_AVAILABLE,
     _TREE_SITTER_AVAILABLE,
     _file_id,
     _index_csharp_regex,
     _index_java_regex,
     _index_ruby_regex,
+    _index_kotlin_regex,
+    _index_php_regex,
     _index_rust_regex,
+    _index_scala_regex,
+    _index_swift_regex,
+    _tree_is_broken,
+    format_parser_summary,
     index_csharp,
     index_java,
+    index_kotlin,
+    index_php,
     index_ruby,
     index_rust,
+    index_scala,
+    index_swift,
     _index_typescript_regex,
     _parse_ts_tree,
     parser_summary,
@@ -1627,3 +1642,525 @@ class TestNewLanguageFallbackSilence:
         assert captured.err == ""
         assert captured.out == ""
         assert len(nodes) > 1  # regex still produced something
+
+
+# ---------------------------------------------------------------------------
+# PHP / Kotlin / Scala / Swift — sample sources
+# ---------------------------------------------------------------------------
+
+PHP_SOURCE = '''\
+<?php
+namespace App\\Controllers;
+use App\\Traits\\Loggable;
+#[Route('/home')]
+class HomeController extends Base implements Jsonable {
+    use Loggable;
+    private string $name;
+    public function __construct(string $n) { $this->name = $n; }
+    public function __get($k) { return null; }
+    protected function index(int $id): string { return "x"; }
+}
+function helper(): void {}
+'''
+
+KOTLIN_SOURCE = '''\
+package com.example
+data class User(val id: Int, val name: String)
+sealed class Result {
+}
+object Singleton { fun ping() {} }
+class Repo {
+    companion object { fun create() = Repo() }
+    suspend fun fetch(id: Int): User? = null
+}
+fun String.slugify(): String = this
+'''
+
+SCALA_SOURCE = '''\
+package com.example
+trait Storage { def get(k: String): Option[String] }
+case class User(id: Int, name: String)
+class Repo(db: String) extends Base with Storage {
+  val cache = Map.empty[String, String]
+  var counter = 0
+  def find(id: Int): Option[User] = None
+  implicit def toStr(u: User): String = u.name
+}
+object Repo { def apply() = new Repo("") }
+'''
+
+SWIFT_SOURCE = '''\
+import Foundation
+protocol Drawable { func draw() }
+struct Point: Drawable {
+    var x: Int
+    func draw() {}
+}
+class ViewController: UIViewController, Drawable {
+    @IBOutlet var label: UILabel!
+    var area: Int { return 2 }
+    func draw() {}
+    func load() async throws {}
+}
+extension Point {
+    func scaled() -> Point { return self }
+}
+enum State { case on }
+'''
+
+
+# ---------------------------------------------------------------------------
+# PHP
+# ---------------------------------------------------------------------------
+
+
+class TestIndexPhp:
+    @pytest.mark.skipif(not _PHP_TS_AVAILABLE, reason="requires the 'php' extra")
+    def test_class_and_methods(self, tmp_path):
+        nodes, _ = index_php(_write(tmp_path, "Home.php", PHP_SOURCE), tmp_path)
+        ids = _ids(nodes)
+        assert "Home.HomeController" in ids
+        assert "Home.HomeController.index" in ids
+
+    @pytest.mark.skipif(not _PHP_TS_AVAILABLE, reason="requires the 'php' extra")
+    def test_namespace_extracted(self, tmp_path):
+        nodes, _ = index_php(_write(tmp_path, "Home.php", PHP_SOURCE), tmp_path)
+        assert any(n["type"] == "namespace" for n in nodes)
+
+    @pytest.mark.skipif(not _PHP_TS_AVAILABLE, reason="requires the 'php' extra")
+    def test_constructor_typed(self, tmp_path):
+        nodes, _ = index_php(_write(tmp_path, "Home.php", PHP_SOURCE), tmp_path)
+        assert _node(nodes, "Home.HomeController.__construct")["type"] == "constructor"
+
+    @pytest.mark.skipif(not _PHP_TS_AVAILABLE, reason="requires the 'php' extra")
+    def test_magic_method_typed(self, tmp_path):
+        nodes, _ = index_php(_write(tmp_path, "Home.php", PHP_SOURCE), tmp_path)
+        assert _node(nodes, "Home.HomeController.__get")["type"] == "magic"
+
+    @pytest.mark.skipif(not _PHP_TS_AVAILABLE, reason="requires the 'php' extra")
+    def test_attribute_recorded(self, tmp_path):
+        nodes, _ = index_php(_write(tmp_path, "Home.php", PHP_SOURCE), tmp_path)
+        assert "#[Route]" in _node(nodes, "Home.HomeController")["attributes"]
+
+    @pytest.mark.skipif(not _PHP_TS_AVAILABLE, reason="requires the 'php' extra")
+    def test_visibility_recorded(self, tmp_path):
+        nodes, _ = index_php(_write(tmp_path, "Home.php", PHP_SOURCE), tmp_path)
+        assert _node(nodes, "Home.HomeController.index")["visibility"] == "protected"
+
+    @pytest.mark.skipif(not _PHP_TS_AVAILABLE, reason="requires the 'php' extra")
+    def test_trait_use_is_a_mixin_edge(self, tmp_path):
+        _, edges = index_php(_write(tmp_path, "Home.php", PHP_SOURCE), tmp_path)
+        assert ("Home.HomeController", "Loggable") in _relations(edges, "mixin")
+
+    @pytest.mark.skipif(not _PHP_TS_AVAILABLE, reason="requires the 'php' extra")
+    def test_extends_and_implements(self, tmp_path):
+        _, edges = index_php(_write(tmp_path, "Home.php", PHP_SOURCE), tmp_path)
+        assert ("Home.HomeController", "Base") in _relations(edges, "extends")
+        assert ("Home.HomeController", "Jsonable") in _relations(edges, "implements")
+
+    @pytest.mark.skipif(not _PHP_TS_AVAILABLE, reason="requires the 'php' extra")
+    def test_trait_declaration_typed(self, tmp_path):
+        nodes, _ = index_php(_write(tmp_path, "T.php", "<?php\ntrait T { public function g() {} }\n"), tmp_path)
+        assert _node(nodes, "T.T")["type"] == "trait"
+
+    def test_regex_fallback_class_and_members(self):
+        nodes, _ = _index_php_regex(PHP_SOURCE, Path("Home.php"), "Home")
+        ids = _ids(nodes)
+        assert "Home.App\\Controllers.HomeController" in ids or "Home.HomeController" in ids
+        assert any(i.endswith(".index") for i in ids)
+
+    def test_regex_fallback_magic_method(self):
+        nodes, _ = _index_php_regex(PHP_SOURCE, Path("Home.php"), "Home")
+        magic = [n for n in nodes if n["type"] == "magic"]
+        assert any(n["label"] == "__get" for n in magic)
+
+    def test_regex_fallback_constructor(self):
+        nodes, _ = _index_php_regex(PHP_SOURCE, Path("Home.php"), "Home")
+        assert any(n["type"] == "constructor" and n["label"] == "__construct" for n in nodes)
+
+    def test_regex_fallback_mixin_edge(self):
+        _, edges = _index_php_regex(PHP_SOURCE, Path("Home.php"), "Home")
+        assert any(e["relation"] == "mixin" and e["target"] == "Loggable" for e in edges)
+
+    def test_regex_fallback_visibility(self):
+        nodes, _ = _index_php_regex(PHP_SOURCE, Path("Home.php"), "Home")
+        index = next(n for n in nodes if n["label"] == "index")
+        assert index["visibility"] == "protected"
+
+
+# ---------------------------------------------------------------------------
+# Kotlin
+# ---------------------------------------------------------------------------
+
+
+class TestIndexKotlin:
+    def test_data_class_flagged(self, tmp_path):
+        nodes, _ = index_kotlin(_write(tmp_path, "Repo.kt", KOTLIN_SOURCE), tmp_path)
+        assert _node(nodes, "Repo.User")["is_data_class"] is True
+
+    def test_sealed_class_flagged(self, tmp_path):
+        nodes, _ = index_kotlin(_write(tmp_path, "Repo.kt", KOTLIN_SOURCE), tmp_path)
+        assert _node(nodes, "Repo.Result")["is_sealed"] is True
+
+    def test_object_typed_as_object(self, tmp_path):
+        nodes, _ = index_kotlin(_write(tmp_path, "Repo.kt", KOTLIN_SOURCE), tmp_path)
+        assert _node(nodes, "Repo.Singleton")["type"] == "object"
+
+    def test_companion_nested_under_class(self, tmp_path):
+        nodes, _ = index_kotlin(_write(tmp_path, "Repo.kt", KOTLIN_SOURCE), tmp_path)
+        companion = _node(nodes, "Repo.Repo.Companion")
+        assert companion["type"] == "object"
+        assert companion["is_companion"] is True
+
+    def test_suspend_function_flagged(self, tmp_path):
+        nodes, _ = index_kotlin(_write(tmp_path, "Repo.kt", KOTLIN_SOURCE), tmp_path)
+        assert _node(nodes, "Repo.Repo.fetch")["is_suspend"] is True
+
+    def test_extension_function_records_receiver(self, tmp_path):
+        nodes, _ = index_kotlin(_write(tmp_path, "Repo.kt", KOTLIN_SOURCE), tmp_path)
+        assert _node(nodes, "Repo.slugify")["extends_type"] == "String"
+
+    def test_package_extracted(self, tmp_path):
+        nodes, _ = index_kotlin(_write(tmp_path, "Repo.kt", KOTLIN_SOURCE), tmp_path)
+        assert any(n["type"] == "package" for n in nodes)
+
+    def test_constructor_params_are_not_supertypes(self, tmp_path):
+        """`data class User(val id: Int)` must not yield `User extends Int`."""
+        _, edges = index_kotlin(_write(tmp_path, "Repo.kt", KOTLIN_SOURCE), tmp_path)
+        assert ("Repo.User", "Int") not in _relations(edges, "extends")
+
+    def test_regex_fallback_covers_everything(self):
+        nodes, _ = _index_kotlin_regex(KOTLIN_SOURCE, Path("Repo.kt"), "Repo")
+        ids = _ids(nodes)
+        assert {"Repo.User", "Repo.Singleton", "Repo.Repo",
+                "Repo.Repo.Companion", "Repo.slugify"} <= ids
+
+    def test_regex_fallback_suspend(self):
+        nodes, _ = _index_kotlin_regex(KOTLIN_SOURCE, Path("Repo.kt"), "Repo")
+        assert _node(nodes, "Repo.Repo.fetch")["is_suspend"] is True
+
+
+# ---------------------------------------------------------------------------
+# Scala
+# ---------------------------------------------------------------------------
+
+
+class TestIndexScala:
+    @pytest.mark.skipif(not _SCALA_TS_AVAILABLE, reason="requires the 'scala' extra")
+    def test_case_class_flagged(self, tmp_path):
+        nodes, _ = index_scala(_write(tmp_path, "Repo.scala", SCALA_SOURCE), tmp_path)
+        assert _node(nodes, "Repo.User")["is_case"] is True
+
+    @pytest.mark.skipif(not _SCALA_TS_AVAILABLE, reason="requires the 'scala' extra")
+    def test_trait_typed(self, tmp_path):
+        nodes, _ = index_scala(_write(tmp_path, "Repo.scala", SCALA_SOURCE), tmp_path)
+        assert _node(nodes, "Repo.Storage")["type"] == "trait"
+
+    @pytest.mark.skipif(not _SCALA_TS_AVAILABLE, reason="requires the 'scala' extra")
+    def test_def_val_var_preserved_as_types(self, tmp_path):
+        nodes, _ = index_scala(_write(tmp_path, "Repo.scala", SCALA_SOURCE), tmp_path)
+        assert _node(nodes, "Repo.Repo.find")["type"] == "def"
+        assert _node(nodes, "Repo.Repo.cache")["type"] == "val"
+        assert _node(nodes, "Repo.Repo.counter")["type"] == "var"
+
+    @pytest.mark.skipif(not _SCALA_TS_AVAILABLE, reason="requires the 'scala' extra")
+    def test_implicit_flagged(self, tmp_path):
+        nodes, _ = index_scala(_write(tmp_path, "Repo.scala", SCALA_SOURCE), tmp_path)
+        assert _node(nodes, "Repo.Repo.toStr")["is_implicit"] is True
+
+    @pytest.mark.skipif(not _SCALA_TS_AVAILABLE, reason="requires the 'scala' extra")
+    def test_non_implicit_not_flagged(self, tmp_path):
+        nodes, _ = index_scala(_write(tmp_path, "Repo.scala", SCALA_SOURCE), tmp_path)
+        assert "is_implicit" not in _node(nodes, "Repo.Repo.find")
+
+    @pytest.mark.skipif(not _SCALA_TS_AVAILABLE, reason="requires the 'scala' extra")
+    def test_extends_and_with_edges(self, tmp_path):
+        _, edges = index_scala(_write(tmp_path, "Repo.scala", SCALA_SOURCE), tmp_path)
+        assert ("Repo.Repo", "Base") in _relations(edges, "extends")
+        assert ("Repo.Repo", "Storage") in _relations(edges, "with")
+
+    @pytest.mark.skipif(not _SCALA_TS_AVAILABLE, reason="requires the 'scala' extra")
+    def test_companion_object_does_not_collide_with_class(self, tmp_path):
+        nodes, _ = index_scala(_write(tmp_path, "Repo.scala", SCALA_SOURCE), tmp_path)
+        ids = [n["id"] for n in nodes]
+        assert len(ids) == len(set(ids))
+        assert _node(nodes, "Repo.Companion")["is_companion"] is True
+
+    @pytest.mark.skipif(not _SCALA_TS_AVAILABLE, reason="requires the 'scala' extra")
+    def test_pattern_matching_is_not_a_node(self, tmp_path):
+        source = "object A { def f(x: Int) = x match { case 1 => 1; case _ => 0 } }\n"
+        nodes, _ = index_scala(_write(tmp_path, "A.scala", source), tmp_path)
+        assert not any(n["label"] == "match" for n in nodes)
+
+    def test_regex_fallback_case_class(self):
+        nodes, _ = _index_scala_regex(SCALA_SOURCE, Path("Repo.scala"), "Repo")
+        assert _node(nodes, "Repo.User")["is_case"] is True
+
+    def test_regex_fallback_def_val_var(self):
+        nodes, _ = _index_scala_regex(SCALA_SOURCE, Path("Repo.scala"), "Repo")
+        assert _node(nodes, "Repo.Repo.cache")["type"] == "val"
+        assert _node(nodes, "Repo.Repo.counter")["type"] == "var"
+
+    def test_regex_fallback_implicit(self):
+        nodes, _ = _index_scala_regex(SCALA_SOURCE, Path("Repo.scala"), "Repo")
+        assert _node(nodes, "Repo.Repo.toStr")["is_implicit"] is True
+
+    def test_regex_fallback_with_edge(self):
+        _, edges = _index_scala_regex(SCALA_SOURCE, Path("Repo.scala"), "Repo")
+        assert ("Repo.Repo", "Storage") in _relations(edges, "with")
+
+
+# ---------------------------------------------------------------------------
+# Swift
+# ---------------------------------------------------------------------------
+
+
+class TestIndexSwift:
+    @pytest.mark.skipif(not _SWIFT_TS_AVAILABLE, reason="requires the 'swift' extra")
+    def test_protocol_typed(self, tmp_path):
+        nodes, _ = index_swift(_write(tmp_path, "View.swift", SWIFT_SOURCE), tmp_path)
+        assert _node(nodes, "View.Drawable")["type"] == "protocol"
+
+    @pytest.mark.skipif(not _SWIFT_TS_AVAILABLE, reason="requires the 'swift' extra")
+    def test_struct_and_class_distinguished(self, tmp_path):
+        nodes, _ = index_swift(_write(tmp_path, "View.swift", SWIFT_SOURCE), tmp_path)
+        assert _node(nodes, "View.Point")["type"] == "struct"
+        assert _node(nodes, "View.ViewController")["type"] == "class"
+
+    @pytest.mark.skipif(not _SWIFT_TS_AVAILABLE, reason="requires the 'swift' extra")
+    def test_enum_distinguished(self, tmp_path):
+        nodes, _ = index_swift(_write(tmp_path, "View.swift", SWIFT_SOURCE), tmp_path)
+        assert _node(nodes, "View.State")["type"] == "enum"
+
+    @pytest.mark.skipif(not _SWIFT_TS_AVAILABLE, reason="requires the 'swift' extra")
+    def test_conforms_to_edges(self, tmp_path):
+        _, edges = index_swift(_write(tmp_path, "View.swift", SWIFT_SOURCE), tmp_path)
+        conforms = _relations(edges, "conforms_to")
+        assert ("View.Point", "Drawable") in conforms
+        assert ("View.ViewController", "Drawable") in conforms
+
+    @pytest.mark.skipif(not _SWIFT_TS_AVAILABLE, reason="requires the 'swift' extra")
+    def test_extension_typed_and_linked(self, tmp_path):
+        nodes, edges = index_swift(_write(tmp_path, "View.swift", SWIFT_SOURCE), tmp_path)
+        assert any(n["type"] == "extension" for n in nodes)
+        assert any(e["relation"] == "extends" and e["target"] == "Point" for e in edges)
+
+    @pytest.mark.skipif(not _SWIFT_TS_AVAILABLE, reason="requires the 'swift' extra")
+    def test_attribute_recorded(self, tmp_path):
+        nodes, _ = index_swift(_write(tmp_path, "View.swift", SWIFT_SOURCE), tmp_path)
+        assert "@IBOutlet" in _node(nodes, "View.ViewController.label")["attributes"]
+
+    @pytest.mark.skipif(not _SWIFT_TS_AVAILABLE, reason="requires the 'swift' extra")
+    def test_computed_property_flagged(self, tmp_path):
+        nodes, _ = index_swift(_write(tmp_path, "View.swift", SWIFT_SOURCE), tmp_path)
+        assert _node(nodes, "View.ViewController.area")["is_computed"] is True
+
+    @pytest.mark.skipif(not _SWIFT_TS_AVAILABLE, reason="requires the 'swift' extra")
+    def test_stored_property_not_computed(self, tmp_path):
+        nodes, _ = index_swift(_write(tmp_path, "View.swift", SWIFT_SOURCE), tmp_path)
+        assert "is_computed" not in _node(nodes, "View.Point.x")
+
+    @pytest.mark.skipif(not _SWIFT_TS_AVAILABLE, reason="requires the 'swift' extra")
+    def test_async_function_flagged(self, tmp_path):
+        nodes, _ = index_swift(_write(tmp_path, "View.swift", SWIFT_SOURCE), tmp_path)
+        assert _node(nodes, "View.ViewController.load")["is_async"] is True
+
+    @pytest.mark.skipif(not _SWIFT_TS_AVAILABLE, reason="requires the 'swift' extra")
+    def test_guard_and_defer_are_not_nodes(self, tmp_path):
+        source = "class A {\n  func go() {\n    guard let x = y else { return }\n    defer { cleanup() }\n  }\n}\n"
+        nodes, _ = index_swift(_write(tmp_path, "A.swift", source), tmp_path)
+        labels = {n["label"] for n in nodes}
+        assert "guard" not in labels
+        assert "defer" not in labels
+
+    def test_regex_fallback_types(self):
+        nodes, _ = _index_swift_regex(SWIFT_SOURCE, Path("View.swift"), "View")
+        assert _node(nodes, "View.Drawable")["type"] == "protocol"
+        assert _node(nodes, "View.Point")["type"] == "struct"
+
+    def test_regex_fallback_computed_property(self):
+        nodes, _ = _index_swift_regex(SWIFT_SOURCE, Path("View.swift"), "View")
+        assert _node(nodes, "View.ViewController.area")["is_computed"] is True
+
+    def test_regex_fallback_async(self):
+        nodes, _ = _index_swift_regex(SWIFT_SOURCE, Path("View.swift"), "View")
+        assert _node(nodes, "View.ViewController.load")["is_async"] is True
+
+    def test_regex_fallback_conforms_to(self):
+        _, edges = _index_swift_regex(SWIFT_SOURCE, Path("View.swift"), "View")
+        assert ("View.Point", "Drawable") in _relations(edges, "conforms_to")
+
+
+# ---------------------------------------------------------------------------
+# Broken-grammar guard + wiring for the second language batch
+# ---------------------------------------------------------------------------
+
+
+class TestBrokenTreeGuard:
+    def test_clean_tree_is_not_broken(self):
+        class _Root:
+            has_error = False
+        class _Tree:
+            root_node = _Root()
+        assert _tree_is_broken(_Tree()) is False
+
+    def test_error_tree_is_broken(self):
+        class _Root:
+            has_error = True
+        class _Tree:
+            root_node = _Root()
+        assert _tree_is_broken(_Tree()) is True
+
+    def test_missing_root_is_not_broken(self):
+        class _Tree:
+            root_node = None
+        assert _tree_is_broken(_Tree()) is False
+
+    @pytest.mark.skipif(not _KOTLIN_TS_AVAILABLE, reason="requires the 'kotlin' extra")
+    def test_kotlin_falls_back_and_warns(self, tmp_path, capsys):
+        """tree-sitter-kotlin 1.1.0 mis-parses class-then-object; the guard
+        must catch it rather than silently losing most of the file."""
+        nodes, _ = index_kotlin(_write(tmp_path, "Repo.kt", KOTLIN_SOURCE), tmp_path)
+        assert "ERROR nodes" in capsys.readouterr().err
+        assert "Repo.Singleton" in _ids(nodes)
+
+
+class TestSecondBatchWiring:
+    @pytest.mark.parametrize("ext", [".php", ".kt", ".kts", ".scala", ".swift"])
+    def test_extension_registered(self, ext):
+        from slurp.indexer import _INDEXED_EXTENSIONS
+        assert ext in _INDEXED_EXTENSIONS
+
+    @pytest.mark.parametrize("ext,language", [
+        (".php", "PHP"), (".kt", "Kotlin"), (".scala", "Scala"), (".swift", "Swift"),
+    ])
+    def test_parser_summary_lists_language(self, ext, language):
+        assert any(lang == language for lang, _, _ in parser_summary({ext}))
+
+    @pytest.mark.parametrize("ext,flag", [
+        (".php", "_PHP_TS_AVAILABLE"), (".kt", "_KOTLIN_TS_AVAILABLE"),
+        (".scala", "_SCALA_TS_AVAILABLE"), (".swift", "_SWIFT_TS_AVAILABLE"),
+    ])
+    def test_parser_summary_reports_fallback(self, ext, flag, monkeypatch):
+        monkeypatch.setattr(indexer_mod, flag, False)
+        _, parser, is_fallback = parser_summary({ext})[0]
+        assert parser == "regex fallback"
+        assert is_fallback is True
+
+    def test_index_project_picks_up_all_four(self, tmp_path):
+        _write(tmp_path, "a.php", PHP_SOURCE)
+        _write(tmp_path, "b.kt", KOTLIN_SOURCE)
+        _write(tmp_path, "c.scala", SCALA_SOURCE)
+        _write(tmp_path, "d.swift", SWIFT_SOURCE)
+        graph = index_project(tmp_path)
+        files = {n["source_file"] for n in graph["nodes"] if n.get("source_file")}
+        assert {"a.php", "b.kt", "c.scala", "d.swift"} <= files
+
+    @pytest.mark.parametrize("flag,fn,name,source", [
+        ("_PHP_TS_AVAILABLE", "index_php", "a.php", PHP_SOURCE),
+        ("_KOTLIN_TS_AVAILABLE", "index_kotlin", "b.kt", KOTLIN_SOURCE),
+        ("_SCALA_TS_AVAILABLE", "index_scala", "c.scala", SCALA_SOURCE),
+        ("_SWIFT_TS_AVAILABLE", "index_swift", "d.swift", SWIFT_SOURCE),
+    ])
+    def test_missing_grammar_is_silent(self, flag, fn, name, source,
+                                       tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(indexer_mod, flag, False)
+        nodes, _ = getattr(indexer_mod, fn)(_write(tmp_path, name, source), tmp_path)
+        captured = capsys.readouterr()
+        assert captured.err == ""
+        assert captured.out == ""
+        assert len(nodes) > 1
+
+
+# ---------------------------------------------------------------------------
+# format_parser_summary — line wrapping
+# ---------------------------------------------------------------------------
+
+
+class TestFormatParserSummary:
+    @staticmethod
+    def _summary(n: int) -> list[tuple[str, str, bool]]:
+        names = ["Python", "TypeScript", "Java", "Rust", "C#",
+                 "Ruby", "PHP", "Kotlin", "Scala", "Swift"]
+        return [(names[i], "tree-sitter", False) for i in range(n)]
+
+    def test_empty_summary_yields_no_lines(self):
+        assert format_parser_summary([]) == []
+
+    @pytest.mark.parametrize("n", [1, 2, 3, 4])
+    def test_four_or_fewer_stay_on_one_line(self, n):
+        assert len(format_parser_summary(self._summary(n))) == 1
+
+    @pytest.mark.parametrize("n,expected", [(5, 2), (6, 2), (7, 3), (9, 3), (10, 4)])
+    def test_more_than_four_wrap_at_three_per_line(self, n, expected):
+        assert len(format_parser_summary(self._summary(n))) == expected
+
+    def test_first_line_starts_with_the_prefix(self):
+        lines = format_parser_summary(self._summary(10))
+        assert lines[0].startswith("  Parsers: ")
+
+    def test_continuation_lines_indent_eleven_spaces(self):
+        lines = format_parser_summary(self._summary(10))
+        for line in lines[1:]:
+            assert line.startswith(" " * 11)
+            assert not line.startswith(" " * 12)
+
+    def test_continuation_aligns_under_the_first_language(self):
+        lines = format_parser_summary(self._summary(10))
+        first_language_col = lines[0].index("Python")
+        for line in lines[1:]:
+            assert len(line) - len(line.lstrip()) == first_language_col
+
+    def test_no_line_holds_more_than_three_languages(self):
+        for line in format_parser_summary(self._summary(10)):
+            assert line.count("·") <= 2
+
+    def test_every_language_appears_exactly_once(self):
+        joined = " ".join(format_parser_summary(self._summary(10)))
+        for lang in ("Python", "TypeScript", "Java", "Rust", "C#",
+                     "Ruby", "PHP", "Kotlin", "Scala", "Swift"):
+            assert joined.count(f"{lang} (") == 1
+
+    def test_single_line_output_matches_expected_shape(self):
+        summary = [("Python", "ast", False), ("Go", "regex", False)]
+        assert format_parser_summary(summary) == ["  Parsers: Python (ast) · Go (regex)"]
+
+    def test_fallback_is_wrapped_in_orange_markup(self):
+        summary = [("Kotlin", "regex fallback", True)]
+        assert "[orange1]Kotlin (regex fallback)[/]" in format_parser_summary(summary)[0]
+
+    def test_non_fallback_has_no_markup(self):
+        summary = [("Python", "ast", False)]
+        assert "orange1" not in format_parser_summary(summary)[0]
+
+    def test_fallback_markup_survives_wrapping(self):
+        summary = self._summary(9) + [("Kotlin", "regex fallback", True)]
+        joined = " ".join(format_parser_summary(summary))
+        assert "[orange1]Kotlin (regex fallback)[/]" in joined
+
+    def test_wrapped_output_has_no_overlong_line(self):
+        """The whole point: no display line should blow past a terminal width."""
+        for line in format_parser_summary(self._summary(10)):
+            assert len(re.sub(r"\[/?[\w]*\]", "", line)) <= 100
+
+
+class TestParserSummaryWrappingCLI:
+    def test_cli_wraps_with_many_languages(self, tmp_path):
+        _write(tmp_path, "a.py", "def f(): pass\n")
+        _write(tmp_path, "b.ts", "export function g() {}\n")
+        _write(tmp_path, "c.java", JAVA_SOURCE)
+        _write(tmp_path, "d.rs", RUST_SOURCE)
+        _write(tmp_path, "e.cs", CSHARP_SOURCE)
+        _write(tmp_path, "f.rb", RUBY_SOURCE)
+        result = CliRunner().invoke(
+            cli, ["index", str(tmp_path), "--output", str(tmp_path / "g.json")])
+        assert result.exit_code == 0, result.output
+        parser_lines = [ln for ln in result.output.splitlines()
+                        if "Parsers:" in ln or ln.startswith(" " * 11)]
+        assert len(parser_lines) >= 2
+
+    def test_cli_single_line_for_few_languages(self, tmp_path):
+        _write(tmp_path, "a.py", "def f(): pass\n")
+        result = CliRunner().invoke(
+            cli, ["index", str(tmp_path), "--output", str(tmp_path / "g.json")])
+        assert "  Parsers: Python (ast)" in result.output

@@ -47,6 +47,22 @@ ruby = [
     "tree-sitter>=0.22.0",
     "tree-sitter-ruby>=0.23.0",
 ]
+php = [
+    "tree-sitter>=0.22.0",
+    "tree-sitter-php>=0.23.0",
+]
+kotlin = [
+    "tree-sitter>=0.22.0",
+    "tree-sitter-kotlin>=1.1.0",
+]
+scala = [
+    "tree-sitter>=0.22.0",
+    "tree-sitter-scala>=0.23.0",
+]
+swift = [
+    "tree-sitter>=0.22.0",
+    "tree-sitter-swift>=0.7.0",
+]
 all-languages = [
     "tree-sitter>=0.22.0",
     "tree-sitter-typescript>=0.23.0",
@@ -54,6 +70,10 @@ all-languages = [
     "tree-sitter-rust>=0.23.0",
     "tree-sitter-c-sharp>=0.23.0",
     "tree-sitter-ruby>=0.23.0",
+    "tree-sitter-php>=0.23.0",
+    "tree-sitter-kotlin>=1.1.0",
+    "tree-sitter-scala>=0.23.0",
+    "tree-sitter-swift>=0.7.0",
 ]
 
 [project.urls]

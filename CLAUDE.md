@@ -47,10 +47,19 @@ Slurp es una herramienta CLI open source de **token-budget-aware graph navigatio
 | Rust | tree-sitter | `rust` |
 | C# | tree-sitter | `csharp` |
 | Ruby | tree-sitter | `ruby` |
+| PHP | tree-sitter | `php` |
+| Kotlin | tree-sitter ⚠️ | `kotlin` |
+| Scala | tree-sitter | `scala` |
+| Swift | tree-sitter | `swift` |
 | Go | regex | — (no hay gramática cableada) |
 
+⚠️ **Kotlin:** `tree-sitter-kotlin 1.1.0` falla al parsear una clase con cuerpo
+seguida de un `object` — Kotlin corriente. La guarda `_tree_is_broken()` lo
+detecta y en la práctica Kotlin se indexa por regex. El extra se mantiene
+declarado para que una versión corregida de la gramática entre sin tocar código.
+
 ```bash
-uv sync --extra all-languages   # todas las gramáticas de golpe
+uv sync --extra all-languages   # las 8 gramáticas de golpe
 uv sync --extra rust            # solo una
 ```
 
@@ -60,15 +69,28 @@ uv sync --extra rust            # solo una
 - Un fallo de parseo **con** la gramática instalada sí se avisa por stderr —
   los dos casos nunca comparten el mismo `except`.
 - `slurp index` imprime siempre qué parser usó por lenguaje; un grafo degradado
-  nunca debe pasar desapercibido.
+  nunca debe pasar desapercibido. Con más de 4 lenguajes la línea se envuelve a
+  3 por línea con 11 espacios de indentación (`format_parser_summary()`).
+- **`_tree_is_broken(tree)`** — una gramática que devuelve un árbol con nodos
+  `ERROR` no lanza excepción: el visitor la recorre y pierde declaraciones
+  enteras en silencio. Tras **cada** parseo se comprueba `root_node.has_error`;
+  si hay error se trata como fallo del parser → aviso a stderr + fallback regex.
+  Aplica a los 8 lenguajes con tree-sitter, no solo a Kotlin. Nunca quitar esta
+  guarda: es lo que convierte un fallo silencioso en uno visible y recuperable.
 - Los visitors de tree-sitter heredan de `_BaseVisitor` (pila de scopes, `_emit`
   con atributos extra, dispatch `visit_<node_type>`). Añadir un lenguaje = una
   subclase + un fallback regex + una entrada en `_INDEXED_EXTENSIONS`,
   `parser_summary()` y `_LANGUAGE_BY_EXT` del CLI.
 - Metadatos específicos por lenguaje: anotaciones/atributos (Java, C#),
-  visibilidad (Java, Rust, C#), lifetimes (Rust), `is_async` (C#),
-  `is_class_method` y accessors (Ruby). Edges tipados: `extends`, `implements`
-  (incluido `impl Trait for Type` de Rust) y `mixin` (Ruby).
+  visibilidad (Java, Rust, C#, PHP), lifetimes (Rust), `is_async` (C#, Swift),
+  `is_class_method` y accessors (Ruby), magic methods (PHP),
+  `is_data_class`/`is_sealed`/`is_suspend`/`extends_type` (Kotlin),
+  `is_case`/`is_implicit` y `def`/`val`/`var` como tipos (Scala),
+  `is_computed` y protocolos (Swift). Edges tipados: `extends`, `implements`
+  (incluido `impl Trait for Type` de Rust), `with` (Scala), `conforms_to`
+  (Swift) y `mixin` (Ruby `include`/`extend`/`prepend`, PHP `use` de traits).
+- Los companion objects (Kotlin, Scala) se anidan bajo su clase — si no,
+  colisionan con ella en el mismo node id.
 
 ---
 
@@ -91,7 +113,7 @@ por debajo de la carpeta que abre el editor (`~/Desktop/Slurp/`). Todos los coma
 de este documento (`uv run pytest`, `ruff check`, `uv build`, `git`) se ejecutan
 desde `~/Desktop/Slurp/slurp/`, que es donde vive este CLAUDE.md.
 
-**Estado actual:** v0.7.0 · 1284 tests · `ruff check slurp/` limpio.
+**Estado actual:** v0.7.0 · 1378 tests · `ruff check slurp/` limpio.
 
 ```
 ~/Desktop/Slurp/slurp/         ← raíz del repo git — working directory

@@ -49,12 +49,20 @@ _tsjava = _load_grammar("tree_sitter_java")
 _tsrust = _load_grammar("tree_sitter_rust")
 _tscsharp = _load_grammar("tree_sitter_c_sharp")
 _tsruby = _load_grammar("tree_sitter_ruby")
+_tsphp = _load_grammar("tree_sitter_php")
+_tskotlin = _load_grammar("tree_sitter_kotlin")
+_tsscala = _load_grammar("tree_sitter_scala")
+_tsswift = _load_grammar("tree_sitter_swift")
 
 _TREE_SITTER_AVAILABLE = _tsts is not None
 _JAVA_TS_AVAILABLE = _tsjava is not None
 _RUST_TS_AVAILABLE = _tsrust is not None
 _CSHARP_TS_AVAILABLE = _tscsharp is not None
 _RUBY_TS_AVAILABLE = _tsruby is not None
+_PHP_TS_AVAILABLE = _tsphp is not None
+_KOTLIN_TS_AVAILABLE = _tskotlin is not None
+_SCALA_TS_AVAILABLE = _tsscala is not None
+_SWIFT_TS_AVAILABLE = _tsswift is not None
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -268,14 +276,25 @@ _TS_IMPORT_RE = re.compile(
 )
 
 
-def _class_body_span(source: str, class_start: int) -> tuple[int, int] | None:
+def _class_body_span(
+    source: str, class_start: int, limit: int | None = None
+) -> tuple[int, int] | None:
     """Locate the brace-delimited body of the class beginning at *class_start*.
 
+    Args:
+        source: Full file text.
+        class_start: Offset where the declaration begins.
+        limit: Offset of the next declaration. A body brace found at or after
+            this point belongs to that declaration, not this one — bodyless
+            declarations (`case class User(id: Int)`) would otherwise swallow
+            the following type's members.
+
     Returns:
-        (first_index_inside, index_of_closing_brace), or None if unbalanced.
+        (first_index_inside, index_of_closing_brace), or None if there is no
+        body or the braces are unbalanced.
     """
     open_idx = source.find("{", class_start)
-    if open_idx == -1:
+    if open_idx == -1 or (limit is not None and open_idx >= limit):
         return None
     depth = 0
     for i in range(open_idx, len(source)):
@@ -578,6 +597,8 @@ def index_typescript(path: Path, root: Path | None = None) -> tuple[list[dict], 
     if _TREE_SITTER_AVAILABLE:
         try:
             tree = _parse_ts_tree(source_text.encode("utf-8"), is_tsx=is_tsx)
+            if _tree_is_broken(tree):
+                raise ValueError("grammar produced a tree containing ERROR nodes")
             visitor = _TSVisitor(rel, fid)
             visitor.visit(tree.root_node)
             return [module_node] + visitor.nodes, visitor.edges
@@ -985,6 +1006,8 @@ def index_java(path: Path, root: Path | None = None) -> tuple[list[dict], list[d
         try:
             tree = _TSParser(_TSLanguage(_tsjava.language())).parse(
                 source_text.encode("utf-8"))
+            if _tree_is_broken(tree):
+                raise ValueError("grammar produced a tree containing ERROR nodes")
             visitor = _JavaVisitor(rel, fid)
             visitor.visit(tree.root_node)
             return [module_node] + visitor.nodes, visitor.edges
@@ -1583,11 +1606,30 @@ def _index_ruby_regex(source: str, rel_path: Path, file_id: str) -> tuple[list[d
 # ---------------------------------------------------------------------------
 
 
+
+def _tree_is_broken(tree) -> bool:
+    """True if tree-sitter could not parse the file cleanly.
+
+    DECISION: a grammar that returns a partly-ERROR tree silently drops whole
+    declarations — tree-sitter-kotlin 1.1.0 loses everything after a class with
+    a body followed by an `object`. Regex extracts less per declaration but does
+    not lose 80% of the file, so a broken tree is treated as a parser failure.
+    """
+    root = getattr(tree, "root_node", None)
+    return bool(root is not None and getattr(root, "has_error", False))
+
+
 def _index_with_grammar(
     path: Path, root: Path | None, grammar, available: bool,
     visitor_cls, regex_fn, language_label: str,
+    language_attr: str = "language",
 ) -> tuple[list[dict], list[dict]]:
-    """Shared body for the tree-sitter-or-regex language entry points."""
+    """Shared body for the tree-sitter-or-regex language entry points.
+
+    Args:
+        language_attr: Name of the grammar module's language accessor. Most
+            expose `language()`; tree-sitter-php exposes `language_php()`.
+    """
     rel = _rel(path, root) if root else path
     fid = _file_id(rel)
     module_node = {
@@ -1602,8 +1644,10 @@ def _index_with_grammar(
 
     if available:
         try:
-            tree = _TSParser(_TSLanguage(grammar.language())).parse(
+            tree = _TSParser(_TSLanguage(getattr(grammar, language_attr)())).parse(
                 source_text.encode("utf-8"))
+            if _tree_is_broken(tree):
+                raise ValueError("grammar produced a tree containing ERROR nodes")
             visitor = visitor_cls(rel, fid)
             visitor.visit(tree.root_node)
             return [module_node] + visitor.nodes, visitor.edges
@@ -1634,6 +1678,777 @@ def index_ruby(path: Path, root: Path | None = None) -> tuple[list[dict], list[d
     return _index_with_grammar(path, root, _tsruby, _RUBY_TS_AVAILABLE,
                                _RubyVisitor, _index_ruby_regex, "Ruby")
 
+
+# ---------------------------------------------------------------------------
+# PHP
+# ---------------------------------------------------------------------------
+
+_PHP_MAGIC = frozenset({
+    "__construct", "__destruct", "__get", "__set", "__isset", "__unset",
+    "__call", "__callStatic", "__invoke", "__toString", "__clone",
+    "__sleep", "__wakeup", "__serialize", "__unserialize", "__set_state",
+    "__debugInfo",
+})
+_PHP_VISIBILITY = ("public", "private", "protected")
+
+
+class _PhpVisitor(_BaseVisitor):
+    """tree-sitter PHP visitor.
+
+    Records modern `#[Attribute]` syntax, visibility, trait `use` as mixin
+    edges, and separates magic methods from ordinary ones — `__get`/`__call`
+    change how a class behaves, so they are worth finding on their own.
+    """
+
+    _NAME_FIELDS = ("name", "identifier")
+
+    @staticmethod
+    def _attributes(node) -> list[str]:
+        found: list[str] = []
+        for child in node.children:
+            if child.type == "attribute_list":
+                found.extend(
+                    f"#[{a}]" for a in re.findall(
+                        r"#\[\s*([\w\\]+)", child.text.decode("utf-8", "replace"))
+                )
+        return found
+
+    @staticmethod
+    def _visibility(node) -> str:
+        text = node.text.decode("utf-8", "replace")
+        for kw in _PHP_VISIBILITY:
+            if re.search(rf"\b{kw}\b", text.split("{")[0]):
+                return kw
+        return ""
+
+    def visit_namespace_definition(self, node) -> None:
+        name = ""
+        for child in node.children:
+            if child.type == "namespace_name":
+                name = self._text(child)
+        if name:
+            self._emit(name, "namespace", node.start_point[0] + 1)
+
+    def visit_namespace_use_declaration(self, node) -> None:
+        module = self._text(node).removeprefix("use").strip().rstrip(";").strip()
+        if not module:
+            return
+        safe = module.replace("\\", "_").split(",")[0].strip()
+        nid = f"{self._parent}.import_{safe}"
+        self.nodes.append({
+            "id": nid, "label": module, "type": "import", "description": "",
+            "source_file": str(self.rel_path),
+            "source_location": f"L{node.start_point[0] + 1}",
+            "file_type": "code",
+        })
+        self._edge(self._parent, nid, "imports_from")
+
+    def _visit_type(self, node, ntype: str) -> None:
+        name = self._ts_name(node)
+        if not name:
+            self._recurse(node)
+            return
+        nid = self._emit(
+            name, ntype, node.start_point[0] + 1,
+            attributes=self._attributes(node), visibility=self._visibility(node),
+        )
+        for child in node.children:
+            if child.type == "base_clause":
+                for sub in child.children:
+                    if sub.type in ("name", "qualified_name"):
+                        self._edge(nid, self._text(sub), "extends")
+            elif child.type == "class_interface_clause":
+                for sub in child.children:
+                    if sub.type in ("name", "qualified_name"):
+                        self._edge(nid, self._text(sub), "implements")
+        self._descend(node, nid)
+
+    def visit_class_declaration(self, node) -> None:
+        self._visit_type(node, "class")
+
+    def visit_interface_declaration(self, node) -> None:
+        self._visit_type(node, "interface")
+
+    def visit_trait_declaration(self, node) -> None:
+        self._visit_type(node, "trait")
+
+    def visit_enum_declaration(self, node) -> None:
+        self._visit_type(node, "enum")
+
+    def visit_use_declaration(self, node) -> None:
+        """`use TraitName;` inside a class body — PHP's mixin mechanism."""
+        for child in node.children:
+            if child.type in ("name", "qualified_name"):
+                self._edge(self._parent, self._text(child), "mixin")
+
+    def visit_method_declaration(self, node) -> None:
+        name = self._ts_name(node)
+        if not name:
+            return
+        if name == "__construct":
+            ntype = "constructor"
+        elif name in _PHP_MAGIC:
+            ntype = "magic"
+        else:
+            ntype = "method"
+        self._emit(
+            name, ntype, node.start_point[0] + 1,
+            attributes=self._attributes(node), visibility=self._visibility(node),
+        )
+
+    def visit_function_definition(self, node) -> None:
+        name = self._ts_name(node)
+        if name:
+            self._emit(name, "function", node.start_point[0] + 1,
+                       attributes=self._attributes(node))
+
+    def visit_property_declaration(self, node) -> None:
+        for var in re.findall(r"\$(\w+)", self._text(node)):
+            self._emit(var, "property", node.start_point[0] + 1,
+                       attributes=self._attributes(node),
+                       visibility=self._visibility(node))
+            break  # one node per declaration, matching the first variable
+
+
+_PHP_NS_RE = re.compile(r"(?m)^\s*namespace\s+([\w\\]+)\s*;")
+_PHP_USE_RE = re.compile(r"(?m)^\s*use\s+([\w\\]+)\s*;")
+_PHP_TYPE_RE = re.compile(
+    r"(?m)^[ \t]*(?:(?:final|abstract|readonly)\s+)*(class|interface|trait|enum)\s+(\w+)")
+_PHP_MEMBER_RE = re.compile(
+    r"^(?:(?:public|private|protected|static|final|abstract|readonly)\s+)*"
+    r"function\s+&?\s*(\w+)\s*\(")
+_PHP_PROP_RE = re.compile(
+    r"^(?:(?:public|private|protected|static|readonly)\s+)+[\w|?\\]*\s*\$(\w+)")
+_PHP_TRAIT_USE_RE = re.compile(r"^\s*use\s+([\w\\, ]+);")
+_PHP_ATTR_RE = re.compile(r"#\[\s*([\w\\]+)")
+
+
+def _index_php_regex(source: str, rel_path: Path, file_id: str) -> tuple[list[dict], list[dict]]:
+    """Regex fallback for PHP."""
+    nodes: list[dict] = []
+    edges: list[dict] = []
+    lines = source.splitlines()
+
+    def _add(name: str, ntype: str, lineno: int, parent: str, **extra) -> str:
+        nid = f"{parent}.{name}"
+        node = {
+            "id": nid, "label": name, "type": ntype, "description": "",
+            "source_file": str(rel_path), "source_location": f"L{lineno}",
+            "file_type": "code",
+        }
+        node.update({k: v for k, v in extra.items() if v not in (None, "", [])})
+        nodes.append(node)
+        edges.append({"source": parent, "target": nid, "relation": "contains"})
+        return nid
+
+    def _attrs_above(idx: int) -> list[str]:
+        found: list[str] = []
+        i = idx - 1
+        while i >= 0 and (stripped := lines[i].strip()).startswith("#["):
+            found = [f"#[{a}]" for a in _PHP_ATTR_RE.findall(stripped)] + found
+            i -= 1
+        return found
+
+    def _vis(line: str) -> str:
+        return next((k for k in _PHP_VISIBILITY if re.search(rf"\b{k}\b", line)), "")
+
+    parent_scope = file_id
+    if (ns := _PHP_NS_RE.search(source)) is not None:
+        parent_scope = _add(ns.group(1), "namespace", _lineno(source, ns.start()), file_id)
+
+    for m in _PHP_USE_RE.finditer(source):
+        module = m.group(1)
+        # Class-body trait `use` is handled below; top-level use is an import.
+        if _class_body_contains(source, m.start()):
+            continue
+        nid = f"{file_id}.import_{module.replace(chr(92), '_')}"
+        nodes.append({
+            "id": nid, "label": module, "type": "import", "description": "",
+            "source_file": str(rel_path),
+            "source_location": f"L{_lineno(source, m.start())}",
+            "file_type": "code",
+        })
+        edges.append({"source": file_id, "target": nid, "relation": "imports_from"})
+
+    for m in _PHP_TYPE_RE.finditer(source):
+        kind, name = m.group(1), m.group(2)
+        idx = _lineno(source, m.start()) - 1
+        type_nid = _add(name, kind, idx + 1, parent_scope,
+                        attributes=_attrs_above(idx))
+
+        header = source[m.start():source.find("{", m.start()) + 1]
+        if (ext := re.search(r"\bextends\s+([\w\\]+)", header)):
+            edges.append({"source": type_nid, "target": ext.group(1), "relation": "extends"})
+        if (impl := re.search(r"\bimplements\s+([\w\\,\s]+?)\{", header)):
+            for iface in (i.strip() for i in impl.group(1).split(",")):
+                if iface:
+                    edges.append({"source": type_nid, "target": iface, "relation": "implements"})
+
+        span = _class_body_span(source, m.start())
+        if span is None:
+            continue
+        body_start, body_end = span
+        body_line = _lineno(source, body_start)
+        depth = 0
+        for offset, raw in enumerate(source[body_start:body_end].splitlines()):
+            line = raw.strip()
+            if depth == 0 and line and not line.startswith(("//", "/*", "*", "#[")):
+                abs_idx = body_line + offset - 1
+                if (tm := _PHP_TRAIT_USE_RE.match(line)) is not None:
+                    for trait in (t.strip() for t in tm.group(1).split(",")):
+                        if trait:
+                            edges.append({"source": type_nid, "target": trait,
+                                          "relation": "mixin"})
+                elif (mm := _PHP_MEMBER_RE.match(line)) is not None:
+                    member = mm.group(1)
+                    if member == "__construct":
+                        ntype = "constructor"
+                    elif member in _PHP_MAGIC:
+                        ntype = "magic"
+                    else:
+                        ntype = "method"
+                    _add(member, ntype, abs_idx + 1, type_nid,
+                         attributes=_attrs_above(abs_idx), visibility=_vis(line))
+                elif (pm := _PHP_PROP_RE.match(line)) is not None:
+                    _add(pm.group(1), "property", abs_idx + 1, type_nid,
+                         visibility=_vis(line))
+            depth += raw.count("{") - raw.count("}")
+            if depth < 0:
+                break
+
+    for m in re.finditer(r"(?m)^[ \t]*function\s+&?\s*(\w+)\s*\(", source):
+        if not _class_body_contains(source, m.start()):
+            _add(m.group(1), "function", _lineno(source, m.start()), file_id)
+
+    return nodes, edges
+
+
+def _class_body_contains(source: str, pos: int) -> bool:
+    """True if *pos* falls inside any brace-delimited body in the source."""
+    depth = 0
+    for i, ch in enumerate(source):
+        if i >= pos:
+            return depth > 0
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Kotlin
+# ---------------------------------------------------------------------------
+
+
+class _KotlinVisitor(_BaseVisitor):
+    """tree-sitter Kotlin visitor.
+
+    Kotlin's meaning lives in its modifiers: `data`, `sealed`, `suspend` and
+    `object` each change what a declaration is, so each becomes a field or a
+    distinct node type rather than being flattened into "class"/"function".
+    """
+
+    @staticmethod
+    def _modifier_set(node) -> set[str]:
+        for child in node.children:
+            if child.type == "modifiers":
+                return set(re.findall(r"\w+", child.text.decode("utf-8", "replace")))
+        return set()
+
+    def visit_package_header(self, node) -> None:
+        name = self._text(node).removeprefix("package").strip()
+        if name:
+            self._emit(name, "package", node.start_point[0] + 1)
+
+    def visit_class_declaration(self, node) -> None:
+        name = self._ts_name(node)
+        if not name:
+            self._recurse(node)
+            return
+        mods = self._modifier_set(node)
+        ntype = "interface" if "interface" in mods else "class"
+        nid = self._emit(
+            name, ntype, node.start_point[0] + 1,
+            is_data_class=("data" in mods) or None,
+            is_sealed=("sealed" in mods) or None,
+        )
+        for child in node.children:
+            if child.type in ("delegation_specifier", "supertype_list"):
+                for tname in re.findall(r"\b([A-Z]\w*)", self._text(child)):
+                    self._edge(nid, tname, "extends")
+        self._descend(node, nid)
+
+    def visit_object_declaration(self, node) -> None:
+        name = self._ts_name(node)
+        if not name:
+            self._recurse(node)
+            return
+        nid = self._emit(name, "object", node.start_point[0] + 1)
+        self._descend(node, nid)
+
+    def visit_companion_object(self, node) -> None:
+        """Companion objects nest under the owning class, which is where a
+        reader looks for them — `Repo.Companion.create`, not a free symbol."""
+        name = self._ts_name(node) or "Companion"
+        nid = self._emit(name, "object", node.start_point[0] + 1, is_companion=True)
+        self._descend(node, nid)
+
+    def visit_function_declaration(self, node) -> None:
+        name = self._ts_name(node)
+        if not name:
+            return
+        mods = self._modifier_set(node)
+        extends_type = ""
+        # `fun String.slugify()` — a user_type before the name marks an extension.
+        for child in node.children:
+            if child.type == "user_type":
+                extends_type = self._text(child)
+                break
+            if child.type == "identifier":
+                break
+        self._emit(
+            name, "function", node.start_point[0] + 1,
+            is_suspend=("suspend" in mods) or None,
+            extends_type=extends_type,
+        )
+
+
+_KT_PACKAGE_RE = re.compile(r"(?m)^\s*package\s+([\w.]+)")
+_KT_TYPE_RE = re.compile(
+    r"(?m)^[ \t]*((?:(?:public|private|internal|protected|open|abstract|sealed|data|inner|enum|annotation|value)\s+)*)"
+    r"(class|interface|object)\s+(\w+)")
+_KT_COMPANION_RE = re.compile(r"(?m)^[ \t]*companion\s+object(?:\s+(\w+))?")
+_KT_FUN_RE = re.compile(
+    r"(?m)^[ \t]*((?:(?:public|private|internal|protected|open|override|suspend|inline|operator|tailrec)\s+)*)"
+    r"fun\s+(?:<[^>]*>\s*)?(?:([\w.]+)\.)?(\w+)\s*\(")
+
+
+def _index_kotlin_regex(source: str, rel_path: Path, file_id: str) -> tuple[list[dict], list[dict]]:
+    """Regex fallback for Kotlin."""
+    nodes: list[dict] = []
+    edges: list[dict] = []
+
+    def _add(name: str, ntype: str, lineno: int, parent: str = file_id, **extra) -> str:
+        nid = f"{parent}.{name}"
+        node = {
+            "id": nid, "label": name, "type": ntype, "description": "",
+            "source_file": str(rel_path), "source_location": f"L{lineno}",
+            "file_type": "code",
+        }
+        node.update({k: v for k, v in extra.items() if v not in (None, "", [])})
+        nodes.append(node)
+        edges.append({"source": parent, "target": nid, "relation": "contains"})
+        return nid
+
+    if (pkg := _KT_PACKAGE_RE.search(source)) is not None:
+        _add(pkg.group(1), "package", _lineno(source, pkg.start()))
+
+    type_spans: list[tuple[int, int, str]] = []
+    matches = list(_KT_TYPE_RE.finditer(source))
+    for i, m in enumerate(matches):
+        limit = matches[i + 1].start() if i + 1 < len(matches) else None
+        mods, kind, name = m.group(1) or "", m.group(2), m.group(3)
+        ntype = {"class": "class", "interface": "interface", "object": "object"}[kind]
+        nid = _add(name, ntype, _lineno(source, m.start()),
+                   is_data_class=("data" in mods) or None,
+                   is_sealed=("sealed" in mods) or None)
+        # Supertypes come after the primary constructor, so skip its parens —
+        # otherwise `data class User(val id: Int)` reads `Int` as a supertype.
+        brace = source.find("{", m.start())
+        header = source[m.start():brace if brace != -1 else len(source)]
+        line_end = header.find("\n")
+        header = header[:line_end] if line_end != -1 else header
+        if (paren := header.rfind(")")) != -1:
+            header = header[paren + 1:]
+        else:
+            header = header[len(m.group(0)):]
+        if ":" in header:
+            for tname in re.findall(r"\b([A-Z]\w*)", header.split(":", 1)[1]):
+                edges.append({"source": nid, "target": tname, "relation": "extends"})
+        span = _class_body_span(source, m.start(), limit)
+        if span:
+            type_spans.append((span[0], span[1], nid))
+
+    def _owner(pos: int) -> str:
+        for start, end, nid in type_spans:
+            if start <= pos < end:
+                return nid
+        return file_id
+
+    for m in _KT_COMPANION_RE.finditer(source):
+        _add(m.group(1) or "Companion", "object", _lineno(source, m.start()),
+             parent=_owner(m.start()), is_companion=True)
+
+    for m in _KT_FUN_RE.finditer(source):
+        mods, receiver, name = m.group(1) or "", m.group(2), m.group(3)
+        _add(name, "function", _lineno(source, m.start()), parent=_owner(m.start()),
+             is_suspend=("suspend" in mods) or None, extends_type=receiver or "")
+
+    return nodes, edges
+
+
+# ---------------------------------------------------------------------------
+# Scala
+# ---------------------------------------------------------------------------
+
+
+class _ScalaVisitor(_BaseVisitor):
+    _types_seen: set[str]
+
+    """tree-sitter Scala visitor.
+
+    `case` and `implicit` are unnamed tokens in this grammar, so they are read
+    off the declaration's own children. `def`/`val`/`var` are preserved as
+    distinct node types because the distinction is semantic in Scala.
+    """
+
+    def __init__(self, rel_path: Path, file_id: str) -> None:
+        super().__init__(rel_path, file_id)
+        self._types_seen = set()
+
+    @staticmethod
+    def _has_token(node, token: str) -> bool:
+        """True if *token* is a leading keyword of this declaration.
+
+        Checks direct unnamed children first, then the declaration's own text
+        prefix — `implicit` surfaces one way on some node shapes and the other
+        way on the rest.
+        """
+        if any(not c.is_named and c.type == token for c in node.children):
+            return True
+        head = node.text.decode("utf-8", "replace").split("(")[0]
+        return bool(re.match(rf"^\s*(?:\w+\s+)*?{token}\b", head))
+
+    def visit_package_clause(self, node) -> None:
+        name = self._text(node).removeprefix("package").strip()
+        if name:
+            self._emit(name, "package", node.start_point[0] + 1)
+
+    def _visit_template(self, node, ntype: str) -> None:
+        name = self._ts_name(node)
+        if not name:
+            self._recurse(node)
+            return
+        nid = self._emit(
+            name, ntype, node.start_point[0] + 1,
+            is_case=self._has_token(node, "case") or None,
+        )
+        for child in node.children:
+            if child.type == "extends_clause":
+                names = [c for c in child.children if c.type == "type_identifier"]
+                for i, tname in enumerate(names):
+                    # First is `extends`, the rest come from `with`.
+                    self._edge(nid, self._text(tname), "extends" if i == 0 else "with")
+        self._descend(node, nid)
+
+    def visit_class_definition(self, node) -> None:
+        name = self._ts_name(node)
+        if name:
+            self._types_seen.add(f"{self._parent}.{name}")
+        self._visit_template(node, "class")
+
+    def visit_object_definition(self, node) -> None:
+        """A companion object shares its class's name; nest it under the class
+        so the two do not collide on the same node id."""
+        name = self._ts_name(node)
+        if name and f"{self._parent}.{name}" in self._types_seen:
+            nid = self._emit("Companion", "object", node.start_point[0] + 1,
+                             is_companion=True)
+            self._descend(node, nid)
+            return
+        self._visit_template(node, "object")
+
+    def visit_trait_definition(self, node) -> None:
+        self._visit_template(node, "trait")
+
+    def _visit_def(self, node) -> None:
+        name = self._ts_name(node)
+        if name:
+            self._emit(name, "def", node.start_point[0] + 1,
+                       is_implicit=self._has_token(node, "implicit") or None)
+
+    visit_function_definition = _visit_def
+    visit_function_declaration = _visit_def
+
+    def visit_val_definition(self, node) -> None:
+        name = self._ts_name(node)
+        if name:
+            self._emit(name, "val", node.start_point[0] + 1,
+                       is_implicit=self._has_token(node, "implicit") or None)
+
+    def visit_var_definition(self, node) -> None:
+        name = self._ts_name(node)
+        if name:
+            self._emit(name, "var", node.start_point[0] + 1)
+
+
+_SCALA_PACKAGE_RE = re.compile(r"(?m)^\s*package\s+([\w.]+)")
+_SCALA_TYPE_RE = re.compile(
+    r"(?m)^[ \t]*((?:(?:final|sealed|abstract|implicit|private|protected|case)\s+)*)"
+    r"(class|object|trait)\s+(\w+)")
+_SCALA_DEF_RE = re.compile(
+    r"(?m)^[ \t]*((?:(?:private|protected|override|final|implicit|lazy)\s+)*)"
+    r"(def|val|var)\s+(\w+)")
+
+
+def _index_scala_regex(source: str, rel_path: Path, file_id: str) -> tuple[list[dict], list[dict]]:
+    """Regex fallback for Scala."""
+    nodes: list[dict] = []
+    edges: list[dict] = []
+
+    def _add(name: str, ntype: str, lineno: int, parent: str = file_id, **extra) -> str:
+        nid = f"{parent}.{name}"
+        node = {
+            "id": nid, "label": name, "type": ntype, "description": "",
+            "source_file": str(rel_path), "source_location": f"L{lineno}",
+            "file_type": "code",
+        }
+        node.update({k: v for k, v in extra.items() if v not in (None, "", [])})
+        nodes.append(node)
+        edges.append({"source": parent, "target": nid, "relation": "contains"})
+        return nid
+
+    if (pkg := _SCALA_PACKAGE_RE.search(source)) is not None:
+        _add(pkg.group(1), "package", _lineno(source, pkg.start()))
+
+    type_spans: list[tuple[int, int, str]] = []
+    matches = list(_SCALA_TYPE_RE.finditer(source))
+    for i, m in enumerate(matches):
+        limit = matches[i + 1].start() if i + 1 < len(matches) else None
+        mods, kind, name = m.group(1) or "", m.group(2), m.group(3)
+        nid = _add(name, kind, _lineno(source, m.start()),
+                   is_case=("case" in mods) or None)
+        header = source[m.start():source.find("{", m.start()) + 1 or len(source)]
+        if (ext := re.search(r"\bextends\s+([\w.]+)", header)):
+            edges.append({"source": nid, "target": ext.group(1), "relation": "extends"})
+        for mixin in re.findall(r"\bwith\s+([\w.]+)", header):
+            edges.append({"source": nid, "target": mixin, "relation": "with"})
+        span = _class_body_span(source, m.start(), limit)
+        if span:
+            type_spans.append((span[0], span[1], nid))
+
+    def _owner(pos: int) -> str:
+        for start, end, nid in type_spans:
+            if start <= pos < end:
+                return nid
+        return file_id
+
+    for m in _SCALA_DEF_RE.finditer(source):
+        mods, kind, name = m.group(1) or "", m.group(2), m.group(3)
+        _add(name, kind, _lineno(source, m.start()), parent=_owner(m.start()),
+             is_implicit=("implicit" in mods) or None)
+
+    return nodes, edges
+
+
+# ---------------------------------------------------------------------------
+# Swift
+# ---------------------------------------------------------------------------
+
+_SWIFT_KINDS = ("struct", "class", "extension", "enum", "actor")
+
+
+class _SwiftVisitor(_BaseVisitor):
+    """tree-sitter Swift visitor.
+
+    This grammar collapses struct/class/extension/enum into `class_declaration`,
+    so the real kind is read from the leading keyword token. Protocol conformance
+    becomes `conforms_to`, and an `extension` gets an `extends` edge to the type
+    it augments.
+    """
+
+    @staticmethod
+    def _kind(node) -> str:
+        for child in node.children:
+            if not child.is_named and child.type in _SWIFT_KINDS:
+                return child.type
+        return "class"
+
+    @staticmethod
+    def _attributes(text: str) -> list[str]:
+        head = text.split("{")[0]
+        return [f"@{a}" for a in re.findall(r"@(\w+)", head)]
+
+    def visit_class_declaration(self, node) -> None:
+        kind = self._kind(node)
+        name = self._ts_name(node)
+        if not name:
+            # `extension Point` exposes the type via user_type, not type_identifier.
+            for child in node.children:
+                if child.type == "user_type":
+                    name = self._text(child)
+                    break
+        if not name:
+            self._recurse(node)
+            return
+
+        ntype = "extension" if kind == "extension" else (
+            "enum" if kind == "enum" else ("struct" if kind == "struct" else "class"))
+        nid = self._emit(name, ntype, node.start_point[0] + 1,
+                         attributes=self._attributes(self._text(node)))
+        if kind == "extension":
+            self._edge(nid, name, "extends")
+        for child in node.children:
+            if child.type == "inheritance_specifier":
+                self._edge(nid, self._text(child), "conforms_to")
+        self._descend(node, nid)
+
+    def visit_protocol_declaration(self, node) -> None:
+        name = self._ts_name(node)
+        if not name:
+            self._recurse(node)
+            return
+        nid = self._emit(name, "protocol", node.start_point[0] + 1)
+        self._descend(node, nid)
+
+    def _visit_fn(self, node) -> None:
+        name = self._ts_name(node)
+        if not name:
+            return
+        text = self._text(node)
+        head = text.split("{")[0]
+        self._emit(
+            name, "function", node.start_point[0] + 1,
+            attributes=self._attributes(text),
+            is_async=bool(re.search(r"\basync\b", head)) or None,
+        )
+
+    visit_function_declaration = _visit_fn
+    visit_protocol_function_declaration = _visit_fn
+
+    def visit_property_declaration(self, node) -> None:
+        text = self._text(node)
+        match = re.search(r"\b(?:var|let)\s+(\w+)", text)
+        if not match:
+            return
+        # `var area: Int { return count * 2 }` — a body makes it computed.
+        is_computed = bool(re.search(r":[^=]*\{", text))
+        self._emit(
+            match.group(1), "property", node.start_point[0] + 1,
+            attributes=self._attributes(text),
+            is_computed=is_computed or None,
+        )
+
+    def visit_import_declaration(self, node) -> None:
+        module = self._text(node).removeprefix("import").strip()
+        if not module:
+            return
+        nid = f"{self._parent}.import_{module.replace('.', '_')}"
+        self.nodes.append({
+            "id": nid, "label": module, "type": "import", "description": "",
+            "source_file": str(self.rel_path),
+            "source_location": f"L{node.start_point[0] + 1}",
+            "file_type": "code",
+        })
+        self._edge(self._parent, nid, "imports_from")
+
+
+_SWIFT_IMPORT_RE = re.compile(r"(?m)^\s*import\s+([\w.]+)")
+_SWIFT_TYPE_RE = re.compile(
+    r"(?m)^[ \t]*((?:(?:public|private|internal|fileprivate|open|final|@\w+)\s+)*)"
+    r"(struct|class|extension|enum|protocol|actor)\s+(\w+)")
+_SWIFT_FUNC_RE = re.compile(
+    r"(?m)^[ \t]*((?:(?:public|private|internal|fileprivate|open|final|static|class|override|mutating|@\w+)\s+)*)"
+    r"func\s+(\w+)\s*\(([^\n]*?)\)([^\n{]*)")
+_SWIFT_PROP_RE = re.compile(
+    r"(?m)^[ \t]*((?:(?:public|private|internal|fileprivate|open|static|lazy|@\w+)\s+)*)"
+    r"(?:var|let)\s+(\w+)\s*:([^\n]*)")
+
+
+def _index_swift_regex(source: str, rel_path: Path, file_id: str) -> tuple[list[dict], list[dict]]:
+    """Regex fallback for Swift."""
+    nodes: list[dict] = []
+    edges: list[dict] = []
+
+    def _add(name: str, ntype: str, lineno: int, parent: str = file_id, **extra) -> str:
+        nid = f"{parent}.{name}"
+        node = {
+            "id": nid, "label": name, "type": ntype, "description": "",
+            "source_file": str(rel_path), "source_location": f"L{lineno}",
+            "file_type": "code",
+        }
+        node.update({k: v for k, v in extra.items() if v not in (None, "", [])})
+        nodes.append(node)
+        edges.append({"source": parent, "target": nid, "relation": "contains"})
+        return nid
+
+    for m in _SWIFT_IMPORT_RE.finditer(source):
+        module = m.group(1)
+        nid = f"{file_id}.import_{module.replace('.', '_')}"
+        nodes.append({
+            "id": nid, "label": module, "type": "import", "description": "",
+            "source_file": str(rel_path),
+            "source_location": f"L{_lineno(source, m.start())}",
+            "file_type": "code",
+        })
+        edges.append({"source": file_id, "target": nid, "relation": "imports_from"})
+
+    type_spans: list[tuple[int, int, str]] = []
+    matches = list(_SWIFT_TYPE_RE.finditer(source))
+    for i, m in enumerate(matches):
+        limit = matches[i + 1].start() if i + 1 < len(matches) else None
+        mods, kind, name = m.group(1) or "", m.group(2), m.group(3)
+        ntype = {"struct": "struct", "class": "class", "extension": "extension",
+                 "enum": "enum", "protocol": "protocol", "actor": "class"}[kind]
+        nid = _add(name, ntype, _lineno(source, m.start()),
+                   attributes=[f"@{a}" for a in re.findall(r"@(\w+)", mods)])
+        if kind == "extension":
+            edges.append({"source": nid, "target": name, "relation": "extends"})
+        header = source[m.start():source.find("{", m.start()) + 1 or len(source)]
+        if ":" in header:
+            for proto in re.findall(r"\b([A-Z]\w*)", header.split(":", 1)[1].split("{")[0]):
+                edges.append({"source": nid, "target": proto, "relation": "conforms_to"})
+        span = _class_body_span(source, m.start(), limit)
+        if span:
+            type_spans.append((span[0], span[1], nid))
+
+    def _owner(pos: int) -> str:
+        best = file_id
+        for start, end, nid in type_spans:
+            if start <= pos < end:
+                best = nid
+        return best
+
+    for m in _SWIFT_FUNC_RE.finditer(source):
+        mods, name, _params, tail = m.group(1) or "", m.group(2), m.group(3), m.group(4) or ""
+        _add(name, "function", _lineno(source, m.start()), parent=_owner(m.start()),
+             attributes=[f"@{a}" for a in re.findall(r"@(\w+)", mods)],
+             is_async=bool(re.search(r"\basync\b", tail)) or None)
+
+    for m in _SWIFT_PROP_RE.finditer(source):
+        mods, name, tail = m.group(1) or "", m.group(2), m.group(3) or ""
+        _add(name, "property", _lineno(source, m.start()), parent=_owner(m.start()),
+             attributes=[f"@{a}" for a in re.findall(r"@(\w+)", mods)],
+             is_computed=("{" in tail) or None)
+
+    return nodes, edges
+
+
+def index_php(path: Path, root: Path | None = None) -> tuple[list[dict], list[dict]]:
+    """Index a PHP file (tree-sitter with the 'php' extra, else regex)."""
+    return _index_with_grammar(path, root, _tsphp, _PHP_TS_AVAILABLE,
+                               _PhpVisitor, _index_php_regex, "PHP",
+                               language_attr="language_php")
+
+
+def index_kotlin(path: Path, root: Path | None = None) -> tuple[list[dict], list[dict]]:
+    """Index a Kotlin file (tree-sitter with the 'kotlin' extra, else regex)."""
+    return _index_with_grammar(path, root, _tskotlin, _KOTLIN_TS_AVAILABLE,
+                               _KotlinVisitor, _index_kotlin_regex, "Kotlin")
+
+
+def index_scala(path: Path, root: Path | None = None) -> tuple[list[dict], list[dict]]:
+    """Index a Scala file (tree-sitter with the 'scala' extra, else regex)."""
+    return _index_with_grammar(path, root, _tsscala, _SCALA_TS_AVAILABLE,
+                               _ScalaVisitor, _index_scala_regex, "Scala")
+
+
+def index_swift(path: Path, root: Path | None = None) -> tuple[list[dict], list[dict]]:
+    """Index a Swift file (tree-sitter with the 'swift' extra, else regex)."""
+    return _index_with_grammar(path, root, _tsswift, _SWIFT_TS_AVAILABLE,
+                               _SwiftVisitor, _index_swift_regex, "Swift")
+
 _INDEXED_EXTENSIONS: dict[str, object] = {
     ".py": index_python,
     ".ts": index_typescript,
@@ -1645,6 +2460,11 @@ _INDEXED_EXTENSIONS: dict[str, object] = {
     ".rs": index_rust,
     ".cs": index_csharp,
     ".rb": index_ruby,
+    ".php": index_php,
+    ".kt": index_kotlin,
+    ".kts": index_kotlin,
+    ".scala": index_scala,
+    ".swift": index_swift,
 }
 
 
@@ -1669,6 +2489,10 @@ def parser_summary(extensions: set[str]) -> list[tuple[str, str, bool]]:
         ("Rust", {".rs"}, _RUST_TS_AVAILABLE),
         ("C#", {".cs"}, _CSHARP_TS_AVAILABLE),
         ("Ruby", {".rb"}, _RUBY_TS_AVAILABLE),
+        ("PHP", {".php"}, _PHP_TS_AVAILABLE),
+        ("Kotlin", {".kt", ".kts"}, _KOTLIN_TS_AVAILABLE),
+        ("Scala", {".scala"}, _SCALA_TS_AVAILABLE),
+        ("Swift", {".swift"}, _SWIFT_TS_AVAILABLE),
     ):
         if extensions & suffixes:
             summary.append(
@@ -1678,6 +2502,42 @@ def parser_summary(extensions: set[str]) -> list[tuple[str, str, bool]]:
     if extensions & {".go"}:
         summary.append(("Go", "regex", False))
     return summary
+
+
+_PARSER_PREFIX = "  Parsers: "
+_PARSER_CONT_INDENT = " " * len(_PARSER_PREFIX)   # 11 — aligns under the first language
+_PARSERS_INLINE_MAX = 4                           # up to this many stay on one line
+_PARSERS_PER_LINE = 3                             # once wrapped, this many per line
+
+
+def format_parser_summary(summary: list[tuple[str, str, bool]]) -> list[str]:
+    """Render a parser summary as display lines carrying rich markup.
+
+    DECISION: ten languages do not fit on one terminal line, and a wrapped line
+    with no indent reads as unrelated output. Beyond four parsers the list wraps
+    at three per line, with continuation lines aligned under the first language.
+
+    Args:
+        summary: Output of parser_summary().
+
+    Returns:
+        One string per display line, empty when there is nothing to report.
+    """
+    if not summary:
+        return []
+
+    parts = [
+        f"[orange1]{lang} ({parser})[/]" if fallback else f"{lang} ({parser})"
+        for lang, parser, fallback in summary
+    ]
+    if len(parts) <= _PARSERS_INLINE_MAX:
+        return [_PARSER_PREFIX + " · ".join(parts)]
+
+    lines: list[str] = []
+    for start in range(0, len(parts), _PARSERS_PER_LINE):
+        chunk = " · ".join(parts[start:start + _PARSERS_PER_LINE])
+        lines.append((_PARSER_PREFIX if start == 0 else _PARSER_CONT_INDENT) + chunk)
+    return lines
 
 
 def iter_source_files(root: Path) -> Iterator[Path]:

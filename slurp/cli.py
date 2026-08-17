@@ -109,6 +109,11 @@ _LANGUAGE_BY_EXT: dict[str, str] = {
     ".rs": "Rust",
     ".cs": "C#",
     ".rb": "Ruby",
+    ".php": "PHP",
+    ".kt": "Kotlin",
+    ".kts": "Kotlin",
+    ".scala": "Scala",
+    ".swift": "Swift",
 }
 
 
@@ -760,6 +765,7 @@ def index_cmd(path: str, output_path: str | None, watch: bool, ignore_file: str)
 
     from slurp.indexer import (
         _INDEXED_EXTENSIONS,
+        format_parser_summary,
         index_project,
         iter_source_files,
         parser_summary,
@@ -784,11 +790,8 @@ def index_cmd(path: str, output_path: str | None, watch: bool, ignore_file: str)
             # DECISION: a degraded parser is shown in orange rather than hidden —
             # regex extracts strictly less than tree-sitter, and silently getting
             # a thinner graph is the failure mode this line exists to prevent.
-            parts = [
-                f"[orange1]{lang} ({parser})[/]" if fallback else f"{lang} ({parser})"
-                for lang, parser, fallback in summary
-            ]
-            _echo_rich(Text.from_markup("  Parsers: " + " · ".join(parts)))
+            for line in format_parser_summary(summary):
+                _echo_rich(Text.from_markup(line))
             if any(fallback for _, _, fallback in summary):
                 click.echo("  Install the 'ts' extra for full TypeScript support: "
                            "uv sync --extra ts")

@@ -4,7 +4,7 @@
 
 # slurp
 
-![tests](https://img.shields.io/badge/tests-1284%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-1378%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 ![pypi](https://img.shields.io/badge/PyPI-slurp--graph-orange)
@@ -521,6 +521,16 @@ Next: slurp "your query" --graph /path/to/project/graphify-out/graph.json
 | Rust | tree-sitter |
 | C# | tree-sitter |
 | Ruby | tree-sitter |
+| PHP | tree-sitter |
+| Kotlin | tree-sitter ⚠️ |
+| Scala | tree-sitter |
+| Swift | tree-sitter |
+
+> ⚠️ **Kotlin:** the `tree-sitter-kotlin` grammar has known parsing issues — it
+> fails on a class with a body followed by an `object` declaration, which is
+> ordinary Kotlin. Slurp detects the broken parse tree and the regex fallback is
+> active in practice. The extra is still declared so a fixed grammar release
+> takes effect without a code change.
 
 Every tree-sitter language falls back to a regex parser when its grammar is not
 installed. The fallback extracts strictly less — it cannot nest inner classes or
@@ -544,13 +554,26 @@ up, so its regex parser is not a fallback.
 | `rust` | Rust | `uv sync --extra rust` |
 | `csharp` | C# | `uv sync --extra csharp` |
 | `ruby` | Ruby | `uv sync --extra ruby` |
+| `php` | PHP | `uv sync --extra php` |
+| `kotlin` | Kotlin | `uv sync --extra kotlin` |
+| `scala` | Scala | `uv sync --extra scala` |
+| `swift` | Swift | `uv sync --extra swift` |
 | `all-languages` | All of the above | `uv sync --extra all-languages` |
 
 Each language records what matters for navigating that ecosystem: Java and C#
 annotations/attributes (`@Service`, `[HttpGet]`) plus access modifiers, Rust
-lifetimes and `pub` visibility, Ruby class methods and accessors. Relationships
-become typed edges — `extends`, `implements` (including Rust's `impl Trait for
-Type`), and Ruby's `mixin` for `include`/`extend`/`prepend`.
+lifetimes and `pub` visibility, Ruby class methods and accessors, PHP magic
+methods (`__get`, `__call`), Kotlin `data`/`sealed`/`suspend` and extension
+receivers, Scala `case` classes and `implicit`, Swift computed properties and
+`async`. Relationships become typed edges — `extends`, `implements` (including
+Rust's `impl Trait for Type`), `with` (Scala), `conforms_to` (Swift), and
+`mixin` for Ruby's `include`/`extend`/`prepend` and PHP's trait `use`.
+
+**Broken-grammar guard.** A tree-sitter grammar that returns a parse tree
+containing `ERROR` nodes silently drops whole declarations. Slurp checks for that
+after every parse and treats it as a parser failure: it warns on stderr and falls
+back to regex, which extracts less per declaration but does not lose most of the
+file.
 
 After indexing, the full query pipeline works as usual:
 
