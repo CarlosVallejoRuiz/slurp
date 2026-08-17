@@ -665,6 +665,55 @@ def serve(graph: str | None, log: bool) -> None:
     _mcp.serve(graph_path, session_log=log)
 
 
+@cli.command("advisor")
+@click.argument("query")
+@click.option("--graph", "-g", type=click.Path(), default=None,
+              help="Path to graph.json (auto-discovered if omitted).")
+@click.option("--audit-dir", "audit_dir", default=".slurp", show_default=True,
+              help="Directory containing audit.jsonl.")
+@click.option("--price-model", "price_model", default="claude-sonnet-5",
+              show_default=True,
+              help="Pricing model for the cost estimate (same models as benchmark).")
+@click.option("--min-similar", "min_similar", default=3, show_default=True,
+              help="Similar queries needed before a recommendation is confident.")
+def advisor_cmd(
+    query: str,
+    graph: str | None,
+    audit_dir: str,
+    price_model: str,
+    min_similar: int,
+) -> None:
+    """Recommend a token budget for QUERY from your past query history."""
+    from slurp.advisor import format_advice, recommend_budget
+
+    try:
+        advice = recommend_budget(
+            query,
+            audit_dir=Path(audit_dir),
+            price_model=price_model,
+            min_similar=min_similar,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from None
+
+    graph_path = Path(graph) if graph else _find_graph()
+
+    if advice.similar:
+        headline = (
+            f"Based on {advice.similar_count} similar past "
+            f"{'query' if advice.similar_count == 1 else 'queries'}"
+        )
+        border = "cyan"
+    else:
+        headline = advice.note
+        border = "yellow"
+
+    _echo_rich(Panel(headline, title=f'Budget Advisor — "{query}"',
+                     border_style=border))
+    click.echo()
+    click.echo(format_advice(advice, graph_path))
+
+
 @cli.command("session")
 @click.option("--last", "last", default=20, show_default=True,
               help="Number of most recent entries to show.")

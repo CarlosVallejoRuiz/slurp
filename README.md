@@ -4,7 +4,7 @@
 
 # slurp
 
-![tests](https://img.shields.io/badge/tests-1521%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-1585%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 ![pypi](https://img.shields.io/badge/PyPI-slurp--graph-orange)
@@ -277,6 +277,68 @@ slurp audit --audit-dir /custom/.slurp
 ```
 
 Every query is appended as a JSON line (unless `--no-audit` is passed). Useful for tracking which parts of your codebase an AI agent visits most.
+
+---
+
+### `slurp advisor`
+
+Recommends the optimal token budget based on your query history.
+
+Guessing at `--budget` costs you either way: too low truncates the answer, too high pays
+for nodes the LLM never reads. Once `.slurp/audit.jsonl` holds a few dozen entries, the
+right number is already in your data — the advisor finds the past queries that resemble
+the new one and reads the budget off what they actually used.
+
+```bash
+slurp advisor "auth flow" --graph graph.json
+```
+
+```
+╭──────────────── Budget Advisor — "auth flow" ────────────────╮
+│ Based on 12 similar past queries                             │
+╰──────────────────────────────────────────────────────────────╯
+
+Recommended budget:  2,840 tokens
+Expected coverage:   99.3% of similar queries' selections
+Estimated cost:      $0.0085  (claude-sonnet-5)
+Confidence:          HIGH  (12 similar queries)
+
+Similar past queries:
+  "auth flow cookie" → 2,770 tokens · 97.4% savings
+  "auth flow guard"  → 2,680 tokens · 97.5% savings
+  "auth flow jwt"    → 2,750 tokens · 97.4% savings
+  "auth flow login"  → 2,650 tokens · 97.5% savings
+  "auth flow logout" → 2,620 tokens · 97.5% savings
+  … and 7 more
+
+Run with recommended budget:
+  slurp "auth flow" --graph graph.json --budget 2840
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--graph`, `-g` | auto-discovered | Path to graph.json, used in the suggested command line. |
+| `--audit-dir` | `.slurp` | Directory containing audit.jsonl. |
+| `--price-model` | `claude-sonnet-5` | Pricing model for the cost estimate (same models as `slurp benchmark`). |
+| `--min-similar` | `3` | Similar queries needed before a recommendation is considered confident. |
+
+**How it works.** Past queries are tokenized with the same tokenizer used to score nodes —
+so `authFlow`, `auth_flow` and `auth flow` are one ask — and compared by TF-IDF cosine
+similarity. Anything at or above `0.3` counts as similar. The recommended budget is the
+**75th percentile** of what those queries actually consumed: it fits three out of four
+comparable queries, where the mean would under-serve the heavier half and the max would
+pay for one outlier every time.
+
+| Confidence | Meaning |
+|---|---|
+| `HIGH` | 10+ similar queries |
+| `MEDIUM` | at least `--min-similar` (default 3) |
+| `LOW` | fewer than `--min-similar` — still recommends, with a warning |
+| `NONE` | no similar history — falls back to the 4,000-token default |
+
+> Savings percentages are estimated against a baseline of ~50 tokens per node, the same
+> baseline the visualizer uses. The audit log records outcomes, not the full-graph token
+> count, so no historical graph needs to still exist on disk.
 
 ---
 
