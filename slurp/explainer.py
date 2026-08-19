@@ -565,10 +565,25 @@ def _call_anthropic(prompt: str, config: LLMConfig) -> str:
     # 4.8/4.7, Fable 5) removed the sampling parameters and reject the request
     # with a 400 if one is sent. `temperature` still applies to the other
     # providers, which is why it stays on LLMConfig.
+    # DECISION: Enable Anthropic Prompt Caching (`cache_control` + beta header)
+    # to cache large graph context prompts, reducing repeat input token costs by
+    # up to 90% and improving response latency.
     message = client.messages.create(
         model=config.model,
         max_tokens=_MAX_TOKENS_OUT,
-        messages=[{"role": "user", "content": prompt}],
+        extra_headers={"anthropic-beta": "prompt-caching-2024-07-15"},
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": prompt,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+            }
+        ],
     )
     return "".join(
         block.text for block in message.content if getattr(block, "type", "") == "text"

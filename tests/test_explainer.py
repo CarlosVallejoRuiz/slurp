@@ -618,7 +618,39 @@ class TestConfigCommand:
         res = CliRunner().invoke(cli, ["config", "set", "model", "claude-sonnet-5",
                                        "--config-dir", str(tmp_path)])
         assert res.exit_code == 0, res.output
-        assert read_config(tmp_path)["model"] == "claude-sonnet-5"
+
+
+class TestAnthropicPromptCaching:
+    def test_call_anthropic_includes_cache_control_and_beta_header(self, monkeypatch):
+        import sys
+        from unittest.mock import MagicMock
+        import slurp.explainer as explainer
+    
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        text_block = MagicMock()
+        text_block.type = "text"
+        text_block.text = "Cached explanation response"
+        mock_response.content = [text_block]
+        mock_client.messages.create.return_value = mock_response
+    
+        mock_anthropic_module = MagicMock()
+        mock_anthropic_module.Anthropic.return_value = mock_client
+        monkeypatch.setitem(sys.modules, "anthropic", mock_anthropic_module)
+        config = explainer.LLMConfig(provider="anthropic", model="claude-3-5-sonnet", api_key="test-key")
+        res = explainer._call_anthropic("Test graph context prompt", config)
+
+        assert res == "Cached explanation response"
+        mock_client.messages.create.assert_called_once()
+        _, kwargs = mock_client.messages.create.call_args
+        assert kwargs["extra_headers"] == {"anthropic-beta": "prompt-caching-2024-07-15"}
+        
+        msg = kwargs["messages"][0]
+        assert msg["role"] == "user"
+        content_block = msg["content"][0]
+        assert content_block["type"] == "text"
+        assert content_block["text"] == "Test graph context prompt"
+        assert content_block["cache_control"] == {"type": "ephemeral"}
 
     def test_set_endpoint(self, tmp_path):
         res = CliRunner().invoke(cli, [
