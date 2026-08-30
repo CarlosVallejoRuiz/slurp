@@ -125,7 +125,21 @@ por debajo de la carpeta que abre el editor (`~/Desktop/Slurp/`). Todos los coma
 de este documento (`uv run pytest`, `ruff check`, `uv build`, `git`) se ejecutan
 desde `~/Desktop/Slurp/slurp/`, que es donde vive este CLAUDE.md.
 
-**Estado actual:** v0.9.1 · 1772 tests · `ruff check slurp/` limpio.
+**Estado actual:** v0.9.2 · 1772 tests · `ruff check slurp/` limpio.
+
+**⚠️ IMPORTANTE — `uv sync --extra X` desinstala los extras no mencionados.**
+Sincroniza al conjunto exacto de extras que le pases, así que añadir uno con
+`uv sync --extra llm-openai` a secas borra las 12 gramáticas de tree-sitter (los
+tests pasan de 1772 a `1682 passed, 90 skipped`) y puede dejar huérfano el
+entry-point `slurp` del `.venv`. Para añadir un extra sin romper los existentes,
+usar **siempre** la forma completa:
+
+```bash
+uv sync --extra all-languages --extra llm-openai --reinstall-package slurp-graph
+```
+
+Señal de que ha pasado: la suite reporta tests *skipped* donde antes había 0, o
+`uv run slurp` ejecuta una versión distinta de la del repo.
 
 ```
 ~/Desktop/Slurp/slurp/         ← raíz del repo git — working directory
