@@ -1,7 +1,6 @@
 """Tests for slurp/ignore.py."""
 
 import networkx as nx
-import pytest
 
 from slurp.ignore import SlurpIgnore, apply_ignore, load_ignore
 

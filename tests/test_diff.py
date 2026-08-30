@@ -385,7 +385,6 @@ class TestFormatDiff:
         assert "centrality:" in out
 
     def test_impact_label_high_for_large_score(self):
-        G_old = nx.DiGraph()
         G_new = nx.DiGraph()
         G_new.add_node("x", label="X", type="function")
         diff = GraphDiff(added_nodes=["x"], impact_score=0.8)
@@ -393,7 +392,6 @@ class TestFormatDiff:
         assert "high" in out
 
     def test_impact_label_low_for_small_score(self):
-        G_old = nx.DiGraph()
         G_new = nx.DiGraph()
         G_new.add_node("x", label="X", type="function")
         diff = GraphDiff(added_nodes=["x"], impact_score=0.05)

@@ -216,6 +216,253 @@ class _PythonVisitor(ast.NodeVisitor):
             self.edges.append({"source": self._parent, "target": nid, "relation": "imports_from"})
 
 
+# ---------------------------------------------------------------------------
+# Python call-graph extraction
+#
+# DECISION: this runs as two extra passes over the same AST rather than being
+# folded into _PythonVisitor. Resolving a call needs the *complete* symbol table
+# — `checkout` calls `PaymentGateway.charge` before that class is reached in a
+# single top-down walk — so collection must finish before resolution starts.
+# Keeping it separate also means the existing node/contains/imports_from output
+# is byte-identical to before.
+# ---------------------------------------------------------------------------
+
+class _PythonDefCollector(ast.NodeVisitor):
+    """Pass 1 — index every definition in the module by fully-qualified id.
+
+    Attributes:
+        kind: node id -> "function" or "class", for every definition found.
+        bases: class node id -> the bare names of its base classes, used to
+            resolve an inherited ``self.method()`` to the class that defines it.
+    """
+
+    def __init__(self, module_id: str) -> None:
+        self.module_id = module_id
+        self.kind: dict[str, str] = {}
+        self.bases: dict[str, list[str]] = {}
+        self._scope: list[str] = [module_id]
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        nid = f"{self._scope[-1]}.{node.name}"
+        self.kind[nid] = "class"
+        self.bases[nid] = [b.id for b in node.bases if isinstance(b, ast.Name)]
+        self._scope.append(nid)
+        self.generic_visit(node)
+        self._scope.pop()
+
+    def _collect_func(self, node) -> None:
+        nid = f"{self._scope[-1]}.{node.name}"
+        self.kind[nid] = "function"
+        self._scope.append(nid)
+        self.generic_visit(node)
+        self._scope.pop()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._collect_func(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._collect_func(node)
+
+
+# Receivers whose attribute access resolves against the enclosing class.
+_PY_SELF_NAMES = frozenset({"self", "cls"})
+
+
+class _PythonCallVisitor(ast.NodeVisitor):
+    """Pass 2 — resolve ast.Call nodes to definitions and emit `calls` edges.
+
+    Only calls that resolve to a definition in this module produce an edge.
+    Anything else — stdlib, third-party, a method on an object of unknown type,
+    a chained or computed callee — is skipped. A missing edge is a gap; a wrong
+    edge is a lie about the codebase, so ambiguity always resolves to silence.
+    """
+
+    def __init__(self, defs: _PythonDefCollector) -> None:
+        self.defs = defs
+        self.edges: list[dict] = []
+        self._seen: set[tuple[str, str]] = set()
+        # (node id, kind) so bare-name lookup can skip class scopes, which are
+        # not visible to functions nested inside them.
+        self._scope: list[tuple[str, str]] = [(defs.module_id, "module")]
+        self._class_stack: list[str] = []
+        # One frame per function: local variable name -> class node id, for
+        # resolving `gateway.charge()` after `gateway = PaymentGateway()`.
+        self._locals: list[dict[str, str]] = [{}]
+
+    # -- scope helpers ----------------------------------------------------
+
+    @property
+    def _caller(self) -> str:
+        return self._scope[-1][0]
+
+    def _lookup_name(self, name: str) -> str | None:
+        """Resolve a bare name against the module and enclosing function scopes.
+
+        Class scopes are skipped: in Python a name inside a method does not see
+        its class's attributes, so treating them as candidates would resolve a
+        module-level call to a same-named method.
+        """
+        for nid, kind in reversed(self._scope):
+            if kind == "class":
+                continue
+            candidate = f"{nid}.{name}"
+            if candidate in self.defs.kind:
+                return candidate
+        return None
+
+    def _lookup_member(self, class_id: str, attr: str) -> str | None:
+        """Resolve *attr* on *class_id*, following locally-defined base classes."""
+        seen: set[str] = set()
+        queue = [class_id]
+        while queue:
+            current = queue.pop(0)
+            if current in seen:
+                continue
+            seen.add(current)
+            candidate = f"{current}.{attr}"
+            if self.defs.kind.get(candidate) == "function":
+                return candidate
+            for base_name in self.defs.bases.get(current, []):
+                base_id = f"{self.defs.module_id}.{base_name}"
+                if self.defs.kind.get(base_id) == "class":
+                    queue.append(base_id)
+        return None
+
+    # -- resolution -------------------------------------------------------
+
+    def _resolve(self, func: ast.expr) -> str | None:
+        """Resolve a call's callee expression to a node id, or None."""
+        if isinstance(func, ast.Name):
+            # Covers both `helper()` and the constructor form `ClassName()`.
+            return self._lookup_name(func.id)
+
+        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+            receiver = func.value.id
+            if receiver in _PY_SELF_NAMES and self._class_stack:
+                return self._lookup_member(self._class_stack[-1], func.attr)
+            class_id = self._locals[-1].get(receiver)
+            if class_id is not None:
+                return self._lookup_member(class_id, func.attr)
+
+        # Module attributes (os.path.join), chained calls, subscripts, lambdas:
+        # not resolvable to a node in this graph.
+        return None
+
+    def _class_of_value(self, value: ast.expr | None) -> str | None:
+        """Class node id a value is an instance of, when that is certain."""
+        if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
+            target = self._lookup_name(value.func.id)
+            # `token = hash_token(card)` has the same shape as
+            # `gateway = PaymentGateway()`; only the class case binds a type.
+            if target is not None and self.defs.kind.get(target) == "class":
+                return target
+        return None
+
+    def _add(self, target: str) -> None:
+        key = (self._caller, target)
+        if key in self._seen:
+            return
+        self._seen.add(key)
+        self.edges.append(
+            {"source": self._caller, "target": target, "relation": "calls"}
+        )
+
+    # -- traversal --------------------------------------------------------
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        nid = f"{self._scope[-1][0]}.{node.name}"
+        self._scope.append((nid, "class"))
+        self._class_stack.append(nid)
+        for stmt in node.body:
+            self.visit(stmt)
+        self._class_stack.pop()
+        self._scope.pop()
+
+    def _visit_func(self, node) -> None:
+        # DECISION: decorators and default arguments are evaluated where the
+        # function is *defined*, not inside it, so they are attributed to the
+        # enclosing scope before the function scope is pushed.
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for default in node.args.defaults:
+            self.visit(default)
+        for default in node.args.kw_defaults:
+            if default is not None:
+                self.visit(default)
+
+        nid = f"{self._scope[-1][0]}.{node.name}"
+        self._scope.append((nid, "function"))
+        self._locals.append({})
+        for stmt in node.body:
+            self.visit(stmt)
+        self._locals.pop()
+        self._scope.pop()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_func(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_func(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        target = self._resolve(node.func)
+        if target is not None:
+            self._add(target)
+        # Nested calls in the arguments still count.
+        self.generic_visit(node)
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        self.generic_visit(node)
+        class_id = self._class_of_value(node.value)
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                if class_id is not None:
+                    self._locals[-1][target.id] = class_id
+                else:
+                    # Rebinding to something else must clear a stale type, or a
+                    # later `x.method()` resolves against the wrong class.
+                    self._locals[-1].pop(target.id, None)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        self.generic_visit(node)
+        if not isinstance(node.target, ast.Name):
+            return
+        class_id = None
+        if isinstance(node.annotation, ast.Name):
+            annotated = self._lookup_name(node.annotation.id)
+            if annotated is not None and self.defs.kind.get(annotated) == "class":
+                class_id = annotated
+        if class_id is None:
+            class_id = self._class_of_value(node.value)
+        if class_id is not None:
+            self._locals[-1][node.target.id] = class_id
+        else:
+            self._locals[-1].pop(node.target.id, None)
+
+
+def _python_call_edges(tree: ast.Module, module_id: str, known: set[str]) -> list[dict]:
+    """Extract `calls` edges for one parsed Python module.
+
+    Args:
+        tree: Parsed module AST.
+        module_id: Node id of the module, used as the root scope.
+        known: Ids of nodes that exist in the graph. Edges touching anything
+            outside this set are dropped.
+
+    Returns:
+        Deduplicated `calls` edges, both endpoints guaranteed to be real nodes.
+    """
+    defs = _PythonDefCollector(module_id)
+    defs.visit(tree)
+    calls = _PythonCallVisitor(defs)
+    calls.visit(tree)
+    return [
+        e for e in calls.edges
+        if e["source"] in known and e["target"] in known
+    ]
+
 def index_python(path: Path, root: Path | None = None) -> tuple[list[dict], list[dict]]:
     """Index a Python source file using stdlib ast.
 
@@ -236,7 +483,10 @@ def index_python(path: Path, root: Path | None = None) -> tuple[list[dict], list
 
     visitor = _PythonVisitor(rel)
     visitor.visit(tree)
-    return visitor.nodes, visitor.edges
+
+    known = {n["id"] for n in visitor.nodes}
+    call_edges = _python_call_edges(tree, _file_id(rel), known)
+    return visitor.nodes, visitor.edges + call_edges
 
 
 # ---------------------------------------------------------------------------

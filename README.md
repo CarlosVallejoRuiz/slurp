@@ -4,7 +4,7 @@
 
 # slurp
 
-![tests](https://img.shields.io/badge/tests-1746%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-1772%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 ![pypi](https://img.shields.io/badge/PyPI-slurp--graph-orange)
@@ -76,6 +76,7 @@ client to know. Responses that triggered a reload carry `"graph_reloaded": true`
 | Simple global install | `pip install slurp-graph` |
 | Python project (adds to `pyproject.toml`) | `uv add slurp-graph` |
 | Better TypeScript/TSX indexing | `pip install "slurp-graph[ts]"` |
+| `slurp explain` with OpenAI models | `pip install "slurp-graph[llm-openai]"` |
 
 **Requires Python 3.12+.** Don't have Python? [Install uv](https://docs.astral.sh/uv/) — it bundles a Python runtime and is the fastest path.
 
@@ -463,7 +464,7 @@ Provider: anthropic (claude-sonnet-5) · Context: 198 tokens
 | Provider | Detected via | Default model | Notes |
 |---|---|---|---|
 | `anthropic` | `ANTHROPIC_API_KEY` | `claude-sonnet-5` | Needs `pip install anthropic`. |
-| `openai` | `OPENAI_API_KEY` | `gpt-4o-mini` | Needs `pip install openai`. |
+| `openai` | `OPENAI_API_KEY` | `gpt-4o-mini` | Needs the `llm-openai` extra: `pip install "slurp-graph[llm-openai]"`. |
 | `ollama` | server answering on `localhost:11434` | `llama3.2` | Fully local, no API key. |
 | `openai-compatible` | `SLURP_LLM_ENDPOINT` (+ optional `SLURP_LLM_API_KEY`) | `local-model` | LM Studio, Together, Groq, vLLM, anything speaking the OpenAI API. |
 
@@ -752,6 +753,15 @@ Indexing /path/to/project ...
 
 Next: slurp "your query" --graph /path/to/project/graphify-out/graph.json
 ```
+
+> **Python call graph:** `slurp index` now extracts `calls` edges between functions in the
+> same file, enabling accurate risk analysis in [`slurp explain`](#slurp-explain) and impact
+> propagation in [`slurp diff`](#slurp-diff). Resolution covers direct calls, `self.method()`
+> and `cls.method()` (including methods inherited from a base class in the same file),
+> constructors, and calls on a local variable whose type is known from `x = ClassName()`.
+> Anything that cannot be resolved with certainty — stdlib, third-party, a method on an
+> object of unknown type — emits no edge. Currently **Python only**; the other 15 languages
+> still emit `contains` and `imports_from` only.
 
 | Flag | Default | Description |
 |---|---|---|

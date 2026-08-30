@@ -2518,3 +2518,291 @@ class TestThirdBatchWiring:
         captured = capsys.readouterr()
         assert captured.err == ""
         assert len(nodes) > 1
+
+
+class TestPythonCallEdges:
+    """`calls` edges extracted from Python source by _PythonCallVisitor."""
+
+    def _calls(self, tmp_path: Path, source: str) -> set[tuple[str, str]]:
+        """Index *source* as mod.py and return its `calls` edges as pairs."""
+        f = tmp_path / "mod.py"
+        f.write_text(source, encoding="utf-8")
+        _, edges = index_python(f, tmp_path)
+        return {
+            (e["source"], e["target"])
+            for e in edges
+            if e["relation"] == "calls"
+        }
+
+    def _edges(self, tmp_path: Path, source: str) -> list[dict]:
+        f = tmp_path / "mod.py"
+        f.write_text(source, encoding="utf-8")
+        _, edges = index_python(f, tmp_path)
+        return edges
+
+    def test_top_level_function_calls_another(self, tmp_path):
+        calls = self._calls(tmp_path, "def helper():\n    pass\n\n\ndef main():\n    return helper()\n")
+        assert ("mod.main", "mod.helper") in calls
+
+    def test_self_method_call(self, tmp_path):
+        source = (
+            "class Service:\n"
+            "    def run(self):\n"
+            "        return self.step()\n\n"
+            "    def step(self):\n"
+            "        pass\n"
+        )
+        calls = self._calls(tmp_path, source)
+        assert ("mod.Service.run", "mod.Service.step") in calls
+
+    def test_cls_method_call(self, tmp_path):
+        source = (
+            "class Service:\n"
+            "    @classmethod\n"
+            "    def build(cls):\n"
+            "        return cls.make()\n\n"
+            "    @classmethod\n"
+            "    def make(cls):\n"
+            "        pass\n"
+        )
+        assert ("mod.Service.build", "mod.Service.make") in self._calls(tmp_path, source)
+
+    def test_constructor_call(self, tmp_path):
+        source = "class Gateway:\n    pass\n\n\ndef build():\n    return Gateway()\n"
+        assert ("mod.build", "mod.Gateway") in self._calls(tmp_path, source)
+
+    def test_method_calls_module_level_function(self, tmp_path):
+        source = (
+            "def validate(x):\n"
+            "    return True\n\n\n"
+            "class Gateway:\n"
+            "    def charge(self, card):\n"
+            "        return validate(card)\n"
+        )
+        assert ("mod.Gateway.charge", "mod.validate") in self._calls(tmp_path, source)
+
+    def test_stdlib_call_produces_no_edge(self, tmp_path):
+        source = "import os\n\n\ndef where():\n    return os.getcwd()\n"
+        assert self._calls(tmp_path, source) == set()
+
+    def test_builtin_call_produces_no_edge(self, tmp_path):
+        source = "def size(items):\n    return len(items)\n"
+        assert self._calls(tmp_path, source) == set()
+
+    def test_external_object_method_produces_no_edge(self, tmp_path):
+        """A method on an object of unknown type must never resolve."""
+        source = (
+            "def process(client):\n"
+            "    return client.fetch()\n"
+        )
+        assert self._calls(tmp_path, source) == set()
+
+    def test_recursive_function_gets_self_edge(self, tmp_path):
+        source = "def walk(n):\n    if n:\n        return walk(n - 1)\n    return 0\n"
+        assert ("mod.walk", "mod.walk") in self._calls(tmp_path, source)
+
+    def test_call_inside_comprehension_is_detected(self, tmp_path):
+        source = (
+            "def transform(x):\n"
+            "    return x\n\n\n"
+            "def run(items):\n"
+            "    return [transform(i) for i in items]\n"
+        )
+        assert ("mod.run", "mod.transform") in self._calls(tmp_path, source)
+
+    def test_module_without_calls_emits_no_call_edges(self, tmp_path):
+        source = "def a():\n    pass\n\n\ndef b():\n    pass\n"
+        assert self._calls(tmp_path, source) == set()
+
+    def test_contains_edges_are_unaffected(self, tmp_path):
+        source = (
+            "def helper():\n"
+            "    pass\n\n\n"
+            "class Service:\n"
+            "    def run(self):\n"
+            "        return helper()\n"
+        )
+        edges = self._edges(tmp_path, source)
+        contains = {(e["source"], e["target"]) for e in edges if e["relation"] == "contains"}
+        assert contains == {
+            ("mod", "mod.helper"),
+            ("mod", "mod.Service"),
+            ("mod.Service", "mod.Service.run"),
+        }
+
+    def test_imports_from_edges_are_unaffected(self, tmp_path):
+        source = "import os\nfrom pathlib import Path\n\n\ndef f():\n    pass\n"
+        edges = self._edges(tmp_path, source)
+        imports = [e for e in edges if e["relation"] == "imports_from"]
+        assert len(imports) == 2
+
+    def test_call_edges_only_reference_existing_nodes(self, tmp_path):
+        source = (
+            "import json\n\n\n"
+            "def helper():\n"
+            "    pass\n\n\n"
+            "class Service:\n"
+            "    def run(self):\n"
+            "        helper()\n"
+            "        return json.dumps(self.data())\n\n"
+            "    def data(self):\n"
+            "        return {}\n"
+        )
+        f = tmp_path / "mod.py"
+        f.write_text(source, encoding="utf-8")
+        nodes, edges = index_python(f, tmp_path)
+        ids = {n["id"] for n in nodes}
+        for e in edges:
+            if e["relation"] == "calls":
+                assert e["source"] in ids
+                assert e["target"] in ids
+
+    def test_local_variable_type_resolves_method_call(self, tmp_path):
+        source = (
+            "class Gateway:\n"
+            "    def charge(self):\n"
+            "        pass\n\n\n"
+            "def checkout():\n"
+            "    gw = Gateway()\n"
+            "    return gw.charge()\n"
+        )
+        calls = self._calls(tmp_path, source)
+        assert ("mod.checkout", "mod.Gateway") in calls
+        assert ("mod.checkout", "mod.Gateway.charge") in calls
+
+    def test_variable_bound_to_function_result_is_not_a_type(self, tmp_path):
+        """`x = helper()` must not make `x.charge()` resolve to a class method."""
+        source = (
+            "class Gateway:\n"
+            "    def charge(self):\n"
+            "        pass\n\n\n"
+            "def helper():\n"
+            "    pass\n\n\n"
+            "def run():\n"
+            "    x = helper()\n"
+            "    return x.charge()\n"
+        )
+        calls = self._calls(tmp_path, source)
+        assert ("mod.run", "mod.helper") in calls
+        assert ("mod.run", "mod.Gateway.charge") not in calls
+
+    def test_rebinding_clears_a_stale_local_type(self, tmp_path):
+        source = (
+            "class Gateway:\n"
+            "    def charge(self):\n"
+            "        pass\n\n\n"
+            "def run(other):\n"
+            "    gw = Gateway()\n"
+            "    gw = other\n"
+            "    return gw.charge()\n"
+        )
+        calls = self._calls(tmp_path, source)
+        assert ("mod.run", "mod.Gateway") in calls
+        assert ("mod.run", "mod.Gateway.charge") not in calls
+
+    def test_inherited_method_resolves_to_defining_class(self, tmp_path):
+        source = (
+            "class Base:\n"
+            "    def emit(self):\n"
+            "        pass\n\n\n"
+            "class Child(Base):\n"
+            "    def run(self):\n"
+            "        return self.emit()\n"
+        )
+        assert ("mod.Child.run", "mod.Base.emit") in self._calls(tmp_path, source)
+
+    def test_override_wins_over_base(self, tmp_path):
+        source = (
+            "class Base:\n"
+            "    def emit(self):\n"
+            "        pass\n\n\n"
+            "class Child(Base):\n"
+            "    def emit(self):\n"
+            "        pass\n\n"
+            "    def run(self):\n"
+            "        return self.emit()\n"
+        )
+        calls = self._calls(tmp_path, source)
+        assert ("mod.Child.run", "mod.Child.emit") in calls
+        assert ("mod.Child.run", "mod.Base.emit") not in calls
+
+    def test_bare_name_does_not_resolve_to_a_class_attribute(self, tmp_path):
+        """A method never shadows a module function for a bare-name call."""
+        source = (
+            "def process(x):\n"
+            "    return x\n\n\n"
+            "class Service:\n"
+            "    def process(self, x):\n"
+            "        pass\n\n"
+            "    def run(self):\n"
+            "        return process(1)\n"
+        )
+        calls = self._calls(tmp_path, source)
+        assert ("mod.Service.run", "mod.process") in calls
+        assert ("mod.Service.run", "mod.Service.process") not in calls
+
+    def test_nested_function_call_resolves(self, tmp_path):
+        source = (
+            "def outer():\n"
+            "    def inner():\n"
+            "        pass\n"
+            "    return inner()\n"
+        )
+        assert ("mod.outer", "mod.outer.inner") in self._calls(tmp_path, source)
+
+    def test_async_function_calls_are_detected(self, tmp_path):
+        source = (
+            "def helper():\n"
+            "    pass\n\n\n"
+            "async def run():\n"
+            "    return helper()\n"
+        )
+        assert ("mod.run", "mod.helper") in self._calls(tmp_path, source)
+
+    def test_decorator_call_attributed_to_enclosing_scope(self, tmp_path):
+        """A decorator runs where the function is defined, not inside it."""
+        source = (
+            "def wrap(*a):\n"
+            "    return lambda f: f\n\n\n"
+            "@wrap()\n"
+            "def target():\n"
+            "    pass\n"
+        )
+        calls = self._calls(tmp_path, source)
+        assert ("mod", "mod.wrap") in calls
+        assert ("mod.target", "mod.wrap") not in calls
+
+    def test_duplicate_calls_emit_one_edge(self, tmp_path):
+        source = (
+            "def helper():\n"
+            "    pass\n\n\n"
+            "def run():\n"
+            "    helper()\n"
+            "    helper()\n"
+            "    return helper()\n"
+        )
+        f = tmp_path / "mod.py"
+        f.write_text(source, encoding="utf-8")
+        _, edges = index_python(f, tmp_path)
+        pairs = [
+            (e["source"], e["target"]) for e in edges if e["relation"] == "calls"
+        ]
+        assert pairs.count(("mod.run", "mod.helper")) == 1
+
+    def test_call_in_nested_argument_is_detected(self, tmp_path):
+        source = (
+            "def inner():\n"
+            "    pass\n\n\n"
+            "def outer(x):\n"
+            "    pass\n\n\n"
+            "def run():\n"
+            "    return outer(inner())\n"
+        )
+        calls = self._calls(tmp_path, source)
+        assert ("mod.run", "mod.outer") in calls
+        assert ("mod.run", "mod.inner") in calls
+
+    def test_syntax_error_still_returns_empty(self, tmp_path):
+        f = tmp_path / "broken.py"
+        f.write_text("def (:\n", encoding="utf-8")
+        assert index_python(f, tmp_path) == ([], [])
