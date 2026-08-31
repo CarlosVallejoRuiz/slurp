@@ -4,7 +4,7 @@
 
 # slurp
 
-![tests](https://img.shields.io/badge/tests-1870%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-1926%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 ![pypi](https://img.shields.io/badge/PyPI-slurp--graph-orange)
@@ -731,6 +731,63 @@ slurp benchmark \
 ```
 
 Outputs a per-run table and aggregate stats: mean savings, p50/p90/p95, best/worst case, and precision (fraction of relevant nodes captured).
+
+---
+
+### `slurp eval`
+
+Measures response quality with and without slurp context, using an LLM judge.
+
+`slurp benchmark` measures how many tokens the selector saves. It says nothing about
+whether the answer is still correct. `slurp eval` closes that loop: each question is
+answered twice — once from a budgeted subgraph, once from the entire graph — and an LLM
+judge scores both against a known ground truth.
+
+```bash
+slurp eval --graph graph.json --budget 4000 --provider anthropic
+slurp eval --graph graph.json --questions my-questions.json --output results.json
+slurp eval --dry-run          # list the questions, call no LLM
+```
+
+Real run against a 1,796-node Next.js codebase, 15 questions, budget 4,000:
+
+```
+slurp win rate:         46.7% (7/15)
+Mean score with slurp:  0.770
+Mean score baseline:    0.784
+Token savings:          79.9%
+Quality/token slurp:    0.000061
+Quality/token baseline: 0.000012
+```
+
+> **The honest conclusion: slurp does not improve quality when the model has unlimited
+> context.** With the whole 62,810-token graph in the prompt, a large-context model finds
+> the answer on its own — the baseline scored marginally higher (0.784 vs 0.770).
+>
+> What slurp improves is **efficiency, radically: 5× more quality per token**, at 12,865
+> tokens per question instead of 62,810. And it improves *quality* when the budget is
+> restrictive or the graph is too large to fit at all — which is the case slurp exists for.
+>
+> Per-question, slurp won the multi-hop flow questions ("what is the full call chain
+> from…") and lost the whole-graph aggregation ones ("which files concentrate the most
+> functions") — exactly what pruning to a subgraph would predict.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--graph`, `-g` | auto-discovered | Path to `graph.json`. |
+| `--budget`, `-b` | `4000` | Token budget for the slurp context. |
+| `--questions` | built-in set | JSON file of questions (list, or `{"questions": [...]}`). |
+| `--provider` | auto-detected | LLM provider — same four as [`slurp explain`](#slurp-explain). |
+| `--output`, `-o` | — | Write full results, including both answers, as JSON. |
+| `--dry-run` | off | List the questions and exit without calling any LLM. |
+
+Each question costs **three LLM calls** (answer with slurp, answer from the full graph,
+judge). The built-in set of 15 questions is therefore 45 calls; budget accordingly. The
+baseline context is built once and reused across questions.
+
+> `--budget` caps the *node selection*, not the rendered prompt. Budget 4,000 produced a
+> 12,865-token context on the graph above, because the serializer adds the relationships
+> section and headers on top of the selected nodes.
 
 ---
 

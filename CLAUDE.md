@@ -172,7 +172,7 @@ por debajo de la carpeta que abre el editor (`~/Desktop/Slurp/`). Todos los coma
 de este documento (`uv run pytest`, `ruff check`, `uv build`, `git`) se ejecutan
 desde `~/Desktop/Slurp/slurp/`, que es donde vive este CLAUDE.md.
 
-**Estado actual:** v0.9.4 · 1870 tests · `ruff check slurp/` limpio.
+**Estado actual:** v0.9.5 · 1926 tests · `ruff check slurp/` limpio.
 
 **⚠️ IMPORTANTE — `uv sync --extra X` desinstala los extras no mencionados.**
 Sincroniza al conjunto exacto de extras que le pases, así que añadir uno con
@@ -214,7 +214,8 @@ Señal de que ha pasado: la suite reporta tests *skipped* donde antes había 0, 
 │   ├── smart.py           ← re-indexado incremental vía git (--smart)
 │   ├── advisor.py         ← recomienda budget óptimo desde el historial de queries
 │   ├── federation.py      ← mergea varios grafos en uno (--graph repetido)
-│   └── explainer.py       ← explica un nodo en lenguaje natural (LLM + fallback estructural)
+│   ├── explainer.py       ← explica un nodo en lenguaje natural (LLM + fallback estructural)
+│   └── evaluator.py       ← benchmark de calidad con LLM judge (slurp eval)
 └── tests/
     ├── __init__.py
     ├── conftest.py
@@ -234,7 +235,8 @@ Señal de que ha pasado: la suite reporta tests *skipped* donde antes había 0, 
     ├── test_smart.py
     ├── test_advisor.py
     ├── test_federation.py
-    └── test_explainer.py
+    ├── test_explainer.py
+    └── test_evaluator.py
 ```
 
 ---

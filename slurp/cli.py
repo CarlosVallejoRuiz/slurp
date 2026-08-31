@@ -1,5 +1,6 @@
 """CLI entry point for Slurp."""
 
+import json
 import tempfile
 import webbrowser
 from io import StringIO
@@ -727,6 +728,139 @@ def serve(graph: tuple[str, ...], graph_labels: tuple[str, ...], log: bool) -> N
         session_log=log,
         labels=list(graph_labels) or None,
     )
+
+
+@cli.command("eval")
+@click.option("--graph", "-g", type=click.Path(), default=None,
+              help="Path to graph.json (auto-discovered if omitted).")
+@click.option("--budget", "-b", default=4000, show_default=True,
+              help="Token budget for the slurp context.")
+@click.option("--questions", "questions_path", type=click.Path(), default=None,
+              help="JSON file of questions (uses the built-in set if omitted).")
+@click.option("--provider", type=click.Choice(list(_EXPLAIN_PROVIDERS)), default=None,
+              help="LLM provider (auto-detected from env vars if omitted).")
+@click.option("--model", "-m", default=None,
+              help="Model name (provider default if omitted).")
+@click.option("--endpoint", default=None,
+              help="Base URL for the openai-compatible provider.")
+@click.option("--output", "-o", "output_path", type=click.Path(), default=None,
+              help="Write full results as JSON to PATH.")
+@click.option("--dry-run", "dry_run", is_flag=True, default=False,
+              help="List the questions and exit without calling any LLM.")
+@click.option("--config-dir", "config_dir", default=".slurp", show_default=True,
+              help="Directory holding config.json.")
+def eval_cmd(
+    graph: str | None,
+    budget: int,
+    questions_path: str | None,
+    provider: str | None,
+    model: str | None,
+    endpoint: str | None,
+    output_path: str | None,
+    dry_run: bool,
+    config_dir: str,
+) -> None:
+    """Measure whether answers are better with slurp than with the full graph."""
+    from slurp.evaluator import (
+        default_questions,
+        load_eval_questions,
+        run_eval,
+    )
+    from slurp.explainer import SlurpExplainError, resolve_config
+
+    try:
+        questions = (
+            load_eval_questions(Path(questions_path)) if questions_path
+            else default_questions()
+        )
+    except SlurpExplainError as exc:
+        raise click.ClickException(str(exc)) from None
+
+    if dry_run:
+        _echo_rich(_build_eval_questions_table(questions))
+        click.echo(f"\n{len(questions)} questions · no LLM calls made (--dry-run).")
+        return
+
+    graph_path = Path(graph) if graph else _find_graph()
+    if graph_path is None:
+        raise click.ClickException(
+            "No graph.json found. Pass --graph or run from a directory with graph.json."
+        )
+    try:
+        G = load_graph(graph_path)
+    except SlurpLoadError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    try:
+        config = resolve_config(provider, model, endpoint, Path(config_dir))
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from None
+    if config.provider in ("structural", ""):
+        raise click.ClickException(
+            "slurp eval needs an LLM. Set ANTHROPIC_API_KEY or OPENAI_API_KEY, "
+            "run Ollama locally, or use `slurp config set provider ...`."
+        )
+
+    click.echo(
+        f"Running eval — {len(questions)} questions · budget {budget:,} · "
+        f"provider: {config.provider}"
+    )
+
+    from rich.progress import BarColumn, Progress, TextColumn
+
+    buf = StringIO()
+    console = Console(file=buf, no_color=True, width=100)
+    with Progress(BarColumn(bar_width=40), TextColumn("{task.completed}/{task.total}"),
+                  console=console, transient=False) as progress:
+        task = progress.add_task("eval", total=len(questions))
+        suite = run_eval(
+            G, questions, config, budget=budget, graph_path=graph_path,
+            on_question=lambda _r: progress.advance(task),
+        )
+    click.echo(buf.getvalue(), nl=False)
+
+    _echo_rich(_build_eval_panel(suite))
+
+    failed = len(suite.results) - len(suite.scored)
+    if failed:
+        click.echo(f"\n{failed} question(s) could not be scored:")
+        for result in suite.results:
+            if result.error:
+                click.echo(f"  {result.question_id}: {result.error}")
+
+    if output_path:
+        out = Path(output_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(suite.to_dict(), indent=2), encoding="utf-8")
+        click.echo(f"\nResults saved to {out}")
+
+
+def _build_eval_questions_table(questions) -> Table:
+    """Table of the eval set, for --dry-run."""
+    table = Table(title=f"Eval questions ({len(questions)})",
+                  show_header=True, header_style="bold")
+    table.add_column("ID", style="dim")
+    table.add_column("Area")
+    table.add_column("Diff", style="dim")
+    table.add_column("Question")
+    for q in questions:
+        table.add_row(q.id, q.area, q.difficulty, q.question)
+    return table
+
+
+def _build_eval_panel(suite) -> Panel:
+    """Summary panel of an eval run."""
+    scored = len(suite.scored)
+    wins = sum(1 for r in suite.scored if r.winner == "slurp")
+    lines = [
+        f"slurp win rate:         {suite.slurp_win_rate}% ({wins}/{scored})",
+        f"Mean score with slurp:  {suite.mean_score_slurp:.3f}",
+        f"Mean score baseline:    {suite.mean_score_baseline:.3f}",
+        f"Token savings:          {suite.mean_token_savings:.1f}%",
+        f"Quality/token slurp:    {suite.quality_per_token_slurp:.6f}",
+        f"Quality/token baseline: {suite.quality_per_token_baseline:.6f}",
+    ]
+    return Panel("\n".join(lines), title="Eval Results", border_style="cyan")
 
 
 @cli.command("explain")
