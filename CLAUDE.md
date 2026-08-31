@@ -134,6 +134,22 @@ uv sync --extra rust            # solo una
     - Un import solo resuelve si su **módulo** pertenece al proyecto. Sin esa
       guarda, `from pathlib import Path` se enlazaría con cualquier clase local
       llamada `Path`.
+  - **Cross-file de TypeScript/JavaScript**: el nodo import lleva
+    `_imported_symbols`, `_source_module` (ya resuelto a ruta punteada) e
+    `_import_type` (`named`/`namespace`/`default`/`side_effect`). Las dos ramas
+    —tree-sitter y regex— registran la misma metadata y producen los mismos
+    edges.
+    - **Cada resolutor toca solo sus imports.** El de Python corre primero; si
+      consumiera los edges pendientes de TS los descartaría (un símbolo TS no
+      lleva prefijo de módulo que resolver) y el resultado serían 0 edges
+      cross-file con todo lo demás aparentemente correcto.
+    - `_ts_resolve_module_path`: `./x` y `../x` contra el directorio del
+      importador, `@/x` contra la raíz, **bare specifier → None**. Un paquete de
+      node_modules nunca resuelve aunque exista un fichero local homónimo.
+    - Se prueba también `{ruta}.index` (barrel exports) y se sanitizan los
+      guiones igual que `_file_id` (`admin-actions` → `admin_actions`).
+    - `import type {...}` y los `type X` en línea se ignoran: no existen en
+      runtime, no pueden llamarse.
 
 ---
 
@@ -156,7 +172,7 @@ por debajo de la carpeta que abre el editor (`~/Desktop/Slurp/`). Todos los coma
 de este documento (`uv run pytest`, `ruff check`, `uv build`, `git`) se ejecutan
 desde `~/Desktop/Slurp/slurp/`, que es donde vive este CLAUDE.md.
 
-**Estado actual:** v0.9.3 · 1828 tests · `ruff check slurp/` limpio.
+**Estado actual:** v0.9.4 · 1870 tests · `ruff check slurp/` limpio.
 
 **⚠️ IMPORTANTE — `uv sync --extra X` desinstala los extras no mencionados.**
 Sincroniza al conjunto exacto de extras que le pases, así que añadir uno con

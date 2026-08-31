@@ -576,6 +576,44 @@ _TS_NOT_MEMBERS = frozenset({
 _TS_IMPORT_RE = re.compile(
     r'import\s+(?:type\s+)?(?:\{[^}]+\}|[\w*][^"\']*)\s+from\s+[\'"]([^\'"]+)[\'"]'
 )
+# Same statement, but capturing the clause so the regex branch can recover the
+# individual symbols the tree-sitter branch reads off the AST.
+_TS_IMPORT_CLAUSE_RE = re.compile(
+    r'import\s+(type\s+)?([^;\n]*?)\s+from\s+[\'"]([^\'"]+)[\'"]'
+)
+
+
+def _ts_parse_clause_text(clause: str) -> tuple[str, dict[str, str]]:
+    """Parse an import clause's source text into (kind, bindings).
+
+    Mirrors _ts_parse_import_clause, which reads the same information off the
+    tree-sitter AST, so both branches record identical metadata.
+    """
+    clause = clause.strip()
+    bindings: dict[str, str] = {}
+
+    namespace = re.search(r'\*\s+as\s+([A-Za-z_$][\w$]*)', clause)
+    if namespace:
+        return "namespace", {namespace.group(1): "*"}
+
+    braces = re.search(r'\{([^}]*)\}', clause)
+    if braces:
+        for piece in braces.group(1).split(","):
+            entry = piece.strip()
+            if not entry or entry.startswith("type "):
+                continue
+            if " as " in entry:
+                original, _, local = entry.partition(" as ")
+                bindings[local.strip()] = original.strip()
+            else:
+                bindings[entry] = entry
+        if bindings:
+            return "named", bindings
+
+    default = re.match(r'^([A-Za-z_$][\w$]*)\s*(?:,|$)', clause)
+    if default:
+        return "default", {default.group(1): "default"}
+    return "side_effect", {}
 
 
 def _class_body_span(
@@ -691,11 +729,11 @@ def _index_typescript_regex(
             continue
         _add(m.group(1), "function", _lineno(source, m.start()))
 
-    for m in _TS_IMPORT_RE.finditer(source):
-        module_path = m.group(1)
+    for m in _TS_IMPORT_CLAUSE_RE.finditer(source):
+        type_only, clause, module_path = m.group(1), m.group(2), m.group(3)
         safe = module_path.rsplit("/", 1)[-1].replace("-", "_").replace(".", "_")
         nid = f"{file_id}.import_{safe}"
-        nodes.append({
+        record = {
             "id": nid,
             "label": module_path,
             "type": "import",
@@ -703,7 +741,15 @@ def _index_typescript_regex(
             "source_file": str(rel_path),
             "source_location": f"L{_lineno(source, m.start())}",
             "file_type": "code",
-        })
+        }
+        kind, bindings = ("side_effect", {}) if type_only else _ts_parse_clause_text(clause)
+        if bindings:
+            record[_TS_IMPORTED_SYMBOLS] = sorted(bindings)
+            record[_TS_IMPORT_KIND] = kind
+            resolved_module = _ts_resolve_module_path(module_path, rel_path)
+            if resolved_module:
+                record[_TS_SOURCE_MODULE] = resolved_module
+        nodes.append(record)
         edges.append({"source": file_id, "target": nid, "relation": "imports_from"})
 
     return nodes, edges
@@ -788,8 +834,98 @@ class _BaseVisitor:
         self._scope.pop()
 
 
+def _ts_module_dots(parts: list[str]) -> str:
+    """Join path components into a node-id prefix, matching _file_id()."""
+    return ".".join(part.replace("-", "_").replace(" ", "_") for part in parts if part)
+
+
+def _ts_resolve_module_path(specifier: str, rel_path: Path) -> str | None:
+    """Turn an import specifier into the dotted module id it refers to.
+
+    Args:
+        specifier: The raw string in the import statement.
+        rel_path: Path of the importing file, relative to the project root.
+
+    Returns:
+        Dotted module path (`lib.supabase.admin`), or None for a bare package
+        specifier — `react`, `next/navigation` — which lives in node_modules and
+        can never be a node in this graph.
+    """
+    spec = specifier.strip().strip("'\"`")
+    if not spec:
+        return None
+
+    if spec.startswith("@/"):
+        parts = spec[2:].split("/")
+    elif spec.startswith("./") or spec.startswith("../"):
+        base = list(rel_path.parent.parts)
+        for piece in spec.split("/"):
+            if piece in ("", "."):
+                continue
+            if piece == "..":
+                if base:
+                    base.pop()
+                continue
+            base.append(piece)
+        parts = base
+    else:
+        return None
+
+    if not parts:
+        return None
+    parts[-1] = re.sub(r"\.(ts|tsx|js|jsx|mjs|cjs)$", "", parts[-1])
+    return _ts_module_dots(parts) or None
+
+
+def _ts_parse_import_clause(node, text) -> tuple[str, dict[str, str]]:
+    """Extract the kind of import and its local-name -> exported-name map.
+
+    Returns:
+        (kind, bindings) where kind is "named", "namespace", "default" or
+        "side_effect", and bindings maps each local binding to the name it
+        refers to in the source module. Type-only specifiers are dropped: they
+        vanish at runtime and can never be called.
+    """
+    bindings: dict[str, str] = {}
+    kind = "side_effect"
+    for child in node.children:
+        if child.type == "named_imports":
+            kind = "named"
+            for spec in child.children:
+                if spec.type != "import_specifier":
+                    continue
+                raw = text(spec).strip()
+                if raw.startswith("type "):
+                    continue
+                if " as " in raw:
+                    original, _, local = raw.partition(" as ")
+                    bindings[local.strip()] = original.strip()
+                else:
+                    bindings[raw] = raw
+        elif child.type == "namespace_import":
+            kind = "namespace"
+            for sub in child.children:
+                if sub.type == "identifier":
+                    bindings[text(sub)] = "*"
+        elif child.type == "identifier":
+            kind = "default"
+            bindings[text(child)] = "default"
+    return kind, bindings
+
+# Public metadata recorded on TypeScript import nodes, consumed by the
+# cross-file resolution pass in index_project().
+_TS_IMPORTED_SYMBOLS = "_imported_symbols"
+_TS_SOURCE_MODULE = "_source_module"
+_TS_IMPORT_KIND = "_import_type"
+
+
 class _TSVisitor(_BaseVisitor):
     """tree-sitter–based TypeScript/JavaScript visitor."""
+
+    def __init__(self, rel_path: Path, file_id: str) -> None:
+        super().__init__(rel_path, file_id)
+        # Local binding -> (import node id, name exported by the source module).
+        self.imports: dict[str, tuple[str, str]] = {}
 
     _DECL_TYPES: dict[str, str] = {
         "function_declaration": "function",
@@ -839,7 +975,18 @@ class _TSVisitor(_BaseVisitor):
         lineno = node.start_point[0] + 1
         safe = module.rsplit("/", 1)[-1].replace("-", "_").replace(".", "_")
         nid = f"{self._parent}.import_{safe}"
-        self.nodes.append({
+
+        # `import type { User } from ...` erases at compile time — nothing it
+        # names can appear in a call, so it carries no symbols at all.
+        type_only = any(child.type == "type" for child in node.children)
+        kind, bindings = "side_effect", {}
+        if not type_only:
+            for child in node.children:
+                if child.type == "import_clause":
+                    kind, bindings = _ts_parse_import_clause(child, self._text)
+                    break
+
+        record = {
             "id": nid,
             "label": module,
             "type": "import",
@@ -847,8 +994,18 @@ class _TSVisitor(_BaseVisitor):
             "source_file": str(self.rel_path),
             "source_location": f"L{lineno}",
             "file_type": "code",
-        })
+        }
+        if bindings:
+            record[_TS_IMPORTED_SYMBOLS] = sorted(bindings)
+            record[_TS_IMPORT_KIND] = kind
+            resolved = _ts_resolve_module_path(module, self.rel_path)
+            if resolved:
+                record[_TS_SOURCE_MODULE] = resolved
+        self.nodes.append(record)
         self.edges.append({"source": self._parent, "target": nid, "relation": "imports_from"})
+        self.imports.update(
+            {local: (nid, original) for local, original in bindings.items()}
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -898,15 +1055,23 @@ class _TSCallVisitor(_BaseVisitor):
     or a method on an object of unknown type resolve to nothing and are skipped.
     """
 
-    def __init__(self, rel_path: Path, file_id: str, symbols: dict[str, str]) -> None:
+    def __init__(
+        self,
+        rel_path: Path,
+        file_id: str,
+        symbols: dict[str, str],
+        imports: dict[str, tuple[str, str]] | None = None,
+    ) -> None:
         super().__init__(rel_path, file_id)
         self.symbols = symbols
+        # Local binding -> (import node id, exported name), from _TSVisitor.
+        self.imports = imports or {}
         self.bases: dict[str, list[str]] = {}
         self.module_id = file_id
         self._kinds: list[str] = ["module"]
         self._class_stack: list[str] = []
         self._locals: list[dict[str, str]] = [{}]
-        self._seen: set[tuple[str, str]] = set()
+        self._seen: set[tuple[str, str, str | None]] = set()
 
     # -- scope ------------------------------------------------------------
 
@@ -971,14 +1136,15 @@ class _TSCallVisitor(_BaseVisitor):
         target = self._lookup_name(ctor.text.decode("utf-8", "replace"))
         return target if self.symbols.get(target) == "class" else None
 
-    def _add(self, target: str) -> None:
-        key = (self._parent, target)
+    def _add(self, target: str, symbol: str | None = None) -> None:
+        key = (self._parent, target, symbol)
         if key in self._seen:
             return
         self._seen.add(key)
-        self.edges.append(
-            {"source": self._parent, "target": target, "relation": "calls"}
-        )
+        edge = {"source": self._parent, "target": target, "relation": "calls"}
+        if symbol is not None:
+            edge[_PENDING_SYMBOL] = symbol
+        self.edges.append(edge)
 
     # -- traversal --------------------------------------------------------
 
@@ -1055,23 +1221,43 @@ class _TSCallVisitor(_BaseVisitor):
         self._visit_declarator(node)
 
     def visit_call_expression(self, node) -> None:
-        callee = node.child_by_field_name("function")
-        target = self._resolve_callee(callee)
-        if target is not None:
-            self._add(target)
+        resolved = self._resolve_callee(node.child_by_field_name("function"))
+        if resolved is not None:
+            self._add(resolved[0], resolved[1])
         self._recurse(node)
 
     def visit_new_expression(self, node) -> None:
         target = self._class_from_new(node)
         if target is not None:
             self._add(target)
+        else:
+            ctor = node.child_by_field_name("constructor")
+            if ctor is not None and ctor.type == "identifier":
+                imported = self.imports.get(self._text(ctor))
+                if imported is not None:
+                    self._add(imported[0], imported[1])
         self._recurse(node)
 
-    def _resolve_callee(self, callee) -> str | None:
+    def _resolve_callee(self, callee) -> tuple[str, str | None] | None:
+        """Resolve a callee to (node id, pending symbol) or None.
+
+        A pending symbol is set only when the target is an import node: it names
+        the symbol in the *source* module, which index_project resolves once
+        every file has been indexed.
+        """
         if callee is None:
             return None
+
         if callee.type == "identifier":
-            return self._lookup_name(self._text(callee))
+            name = self._text(callee)
+            local = self._lookup_name(name)
+            if local is not None:
+                return (local, None)
+            imported = self.imports.get(name)
+            if imported is not None:
+                return (imported[0], imported[1])
+            return None
+
         if callee.type == "member_expression":
             obj = callee.child_by_field_name("object")
             prop = callee.child_by_field_name("property")
@@ -1079,11 +1265,18 @@ class _TSCallVisitor(_BaseVisitor):
                 return None
             prop_name = self._text(prop)
             if obj.type in _TS_THIS_TYPES and self._class_stack:
-                return self._lookup_member(self._class_stack[-1], prop_name)
+                member = self._lookup_member(self._class_stack[-1], prop_name)
+                return (member, None) if member else None
             if obj.type == "identifier":
-                class_id = self._locals[-1].get(self._text(obj))
+                obj_name = self._text(obj)
+                class_id = self._locals[-1].get(obj_name)
                 if class_id is not None:
-                    return self._lookup_member(class_id, prop_name)
+                    member = self._lookup_member(class_id, prop_name)
+                    return (member, None) if member else None
+                imported = self.imports.get(obj_name)
+                if imported is not None and imported[1] == "*":
+                    # `import * as db` + `db.f()`: the property is the symbol.
+                    return (imported[0], prop_name)
         return None
 
 
@@ -1181,6 +1374,21 @@ def _ts_regex_call_edges(
     if not symbols:
         return []
 
+    # Local binding -> (import node id, exported name). Re-derived here rather
+    # than threaded through _index_typescript_regex, whose two-value signature
+    # several callers already depend on.
+    bindings: dict[str, tuple[str, str]] = {}
+    for match in _TS_IMPORT_CLAUSE_RE.finditer(source):
+        if match.group(1):          # `import type ...` erases at compile time
+            continue
+        module_path = match.group(3)
+        safe = module_path.rsplit("/", 1)[-1].replace("-", "_").replace(".", "_")
+        _, clause_bindings = _ts_parse_clause_text(match.group(2))
+        bindings.update({
+            local: (f"{file_id}.import_{safe}", exported)
+            for local, exported in clause_bindings.items()
+        })
+
     clean = _ts_blank_noise(source)
 
     # Function/method bodies, innermost-last, so a call can be attributed to the
@@ -1212,20 +1420,29 @@ def _ts_regex_call_edges(
         return (best[1], best[2]) if best else None
 
     edges: list[dict] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str | None]] = set()
 
-    def _add(caller: str, target: str) -> None:
-        key = (caller, target)
+    def _add(caller: str, target: str, symbol: str | None = None) -> None:
+        key = (caller, target, symbol)
         if key in seen:
             return
         seen.add(key)
-        edges.append({"source": caller, "target": target, "relation": "calls"})
+        edge = {"source": caller, "target": target, "relation": "calls"}
+        if symbol is not None:
+            edge[_PENDING_SYMBOL] = symbol
+        edges.append(edge)
 
     for match in _TS_NEW_CALL_RE.finditer(clean):
         enclosing = _enclosing(match.start())
+        if not enclosing:
+            continue
         target = f"{file_id}.{match.group(1)}"
-        if enclosing and symbols.get(target) == "class":
+        if symbols.get(target) == "class":
             _add(enclosing[0], target)
+            continue
+        imported = bindings.get(match.group(1))
+        if imported is not None and imported[1] != "*":
+            _add(enclosing[0], imported[0], imported[1])
 
     for match in _TS_THIS_CALL_RE.finditer(clean):
         enclosing = _enclosing(match.start())
@@ -1243,9 +1460,15 @@ def _ts_regex_call_edges(
         if re.search(r"\b(function|class|interface|new)\s+$", preceding):
             continue
         enclosing = _enclosing(match.start())
+        if not enclosing:
+            continue
         target = f"{file_id}.{name}"
-        if enclosing and symbols.get(target) == "function":
+        if symbols.get(target) == "function":
             _add(enclosing[0], target)
+            continue
+        imported = bindings.get(name)
+        if imported is not None and imported[1] != "*":
+            _add(enclosing[0], imported[0], imported[1])
 
     # Local variables whose class is pinned by `new` (or an annotation naming a
     # local class), scoped to the function they are declared in.
@@ -1266,12 +1489,17 @@ def _ts_regex_call_edges(
         enclosing = _enclosing(match.start())
         if not enclosing:
             continue
-        class_id = local_types.get((enclosing[0], match.group(1)))
-        if class_id is None:
+        receiver, prop = match.group(1), match.group(2)
+        class_id = local_types.get((enclosing[0], receiver))
+        if class_id is not None:
+            target = f"{class_id}.{prop}"
+            if symbols.get(target) == "function":
+                _add(enclosing[0], target)
             continue
-        target = f"{class_id}.{match.group(2)}"
-        if symbols.get(target) == "function":
-            _add(enclosing[0], target)
+        imported = bindings.get(receiver)
+        if imported is not None and imported[1] == "*":
+            # `import * as db` + `db.f()`: the property names the symbol.
+            _add(enclosing[0], imported[0], prop)
 
     return edges
 
@@ -1333,7 +1561,7 @@ def index_typescript(path: Path, root: Path | None = None) -> tuple[list[dict], 
                 for n in visitor.nodes
                 if n.get("type") in ("function", "class")
             }
-            calls = _TSCallVisitor(rel, fid, symbols)
+            calls = _TSCallVisitor(rel, fid, symbols, visitor.imports)
             calls.visit(tree.root_node)
             known = {fid} | {n["id"] for n in visitor.nodes}
             call_edges = [
@@ -3961,6 +4189,7 @@ def _resolve_cross_file_calls(
     """
     kinds = {n["id"]: n.get("type", "") for n in nodes}
     labels = {n["id"]: n.get("label", "") for n in nodes}
+    sources = {n["id"]: n.get("source_file", "") for n in nodes}
     import_ids = {nid for nid, kind in kinds.items() if kind == "import"}
 
     resolved: list[dict] = []
@@ -3971,10 +4200,20 @@ def _resolve_cross_file_calls(
         if edge.get("relation") == "calls" and edge.get("target") not in import_ids:
             seen_calls.add((edge["source"], edge["target"]))
 
+    python_imports = {
+        nid for nid in import_ids
+        if str(sources.get(nid, "")).endswith(".py")
+    }
+
     for edge in edges:
-        clean = {k: v for k, v in edge.items() if k != _PENDING_SYMBOL}
         if edge.get("relation") != "calls" or edge.get("target") not in import_ids:
-            resolved.append(clean)
+            resolved.append({k: v for k, v in edge.items() if k != _PENDING_SYMBOL})
+            continue
+        if edge["target"] not in python_imports:
+            # A TypeScript pending edge. Leave it, pending key and all, for the
+            # TS resolver that runs next — consuming it here would discard it,
+            # since a TS symbol name carries no module prefix to resolve.
+            resolved.append(edge)
             continue
 
         symbol = edge.get(_PENDING_SYMBOL) or labels.get(edge["target"], "")
@@ -3982,6 +4221,114 @@ def _resolve_cross_file_calls(
         if target is None or target == edge["source"]:
             # External library, ambiguous name, or a self-reference: dropping the
             # edge loses nothing, while keeping it would point at a placeholder.
+            continue
+        key = (edge["source"], target)
+        if key in seen_calls:
+            continue
+        seen_calls.add(key)
+        resolved.append(
+            {"source": edge["source"], "target": target, "relation": "calls"}
+        )
+
+    return resolved
+
+def _build_ts_symbol_index(nodes: list[dict]) -> dict[str, str]:
+    """Index TypeScript/JavaScript definitions by dotted suffix, when unique.
+
+    Same shape as _build_global_symbol_index, restricted to nodes that came from
+    a TS/JS file so a Python symbol of the same name can never be the answer.
+
+    Args:
+        nodes: Every node in the project graph.
+
+    Returns:
+        Mapping of unambiguous suffix to node id.
+    """
+    ts_nodes = [
+        n for n in nodes
+        if str(n.get("source_file", "")).endswith((".ts", ".tsx", ".js", ".jsx",
+                                                   ".mjs", ".cjs"))
+    ]
+    return _build_global_symbol_index(ts_nodes)
+
+
+def _resolve_ts_symbol(
+    module_path: str, symbol: str, index: dict[str, str], kinds: dict[str, str]
+) -> str | None:
+    """Find *symbol* inside *module_path*, or None when it is not resolvable.
+
+    The module must exist in the project before the symbol is looked up, which
+    is what stops a bare package name from binding to a same-named local file.
+    A `foo/index.ts` barrel is tried as well, since `from './foo'` resolves to
+    it in TypeScript.
+    """
+    parts = module_path.split(".")
+    for start in range(len(parts)):
+        prefix = ".".join(parts[start:])
+        for module_id in (index.get(prefix), index.get(f"{prefix}.index")):
+            if module_id is None or kinds.get(module_id) != "module":
+                continue
+            target = f"{module_id}.{symbol}"
+            if kinds.get(target) in ("function", "class", "interface"):
+                return target
+    return None
+
+
+def _resolve_ts_cross_file_calls(
+    nodes: list[dict], edges: list[dict], ts_symbol_index: dict[str, str]
+) -> list[dict]:
+    """Rewrite TypeScript calls routed through an import node to their target.
+
+    Args:
+        nodes: Every node in the project graph.
+        edges: Every edge, including pending import-node calls.
+        ts_symbol_index: Output of _build_ts_symbol_index.
+
+    Returns:
+        The edge list with TypeScript pending calls resolved, unresolvable ones
+        dropped, and the private pending key removed.
+    """
+    kinds = {n["id"]: n.get("type", "") for n in nodes}
+    imports = {
+        n["id"]: n for n in nodes
+        if n.get("type") == "import" and _TS_SOURCE_MODULE in n
+    }
+    import_ids = {nid for nid, kind in kinds.items() if kind == "import"}
+
+    resolved: list[dict] = []
+    seen_calls: set[tuple[str, str]] = set()
+    for edge in edges:
+        if edge.get("relation") == "calls" and edge.get("target") not in import_ids:
+            seen_calls.add((edge["source"], edge["target"]))
+
+    for edge in edges:
+        clean = {k: v for k, v in edge.items() if k != _PENDING_SYMBOL}
+        if edge.get("relation") != "calls" or edge.get("target") not in import_ids:
+            resolved.append(clean)
+            continue
+
+        node = imports.get(edge["target"])
+        symbol = edge.get(_PENDING_SYMBOL)
+        if node is None or not symbol:
+            # No source module recorded (external package, side-effect import,
+            # or a type-only import): nothing to point at. Running last, this
+            # pass is also what guarantees no calls edge survives pointing at an
+            # import placeholder.
+            continue
+
+        if symbol == "default":
+            # TypeScript does not record which export is the default, so the
+            # only certain match is the conventional one: a symbol in that
+            # module sharing the local binding's name.
+            candidates = node.get(_TS_IMPORTED_SYMBOLS) or []
+            symbol = candidates[0] if len(candidates) == 1 else ""
+        if not symbol or symbol == "*":
+            continue
+
+        target = _resolve_ts_symbol(
+            node[_TS_SOURCE_MODULE], symbol, ts_symbol_index, kinds
+        )
+        if target is None or target == edge["source"]:
             continue
         key = (edge["source"], target)
         if key in seen_calls:
@@ -4086,6 +4433,9 @@ def index_project(
 
     filtered_edges = _resolve_cross_file_calls(
         unique_nodes, filtered_edges, _build_module_index(unique_nodes)
+    )
+    filtered_edges = _resolve_ts_cross_file_calls(
+        unique_nodes, filtered_edges, _build_ts_symbol_index(unique_nodes)
     )
 
     return {

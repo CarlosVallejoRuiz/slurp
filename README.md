@@ -4,7 +4,7 @@
 
 # slurp
 
-![tests](https://img.shields.io/badge/tests-1828%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-1870%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 ![pypi](https://img.shields.io/badge/PyPI-slurp--graph-orange)
@@ -773,12 +773,17 @@ Next: slurp "your query" --graph /path/to/project/graphify-out/graph.json
 > resolves to silence. Both endpoints of every `calls` edge are guaranteed to be nodes that
 > exist in the graph.
 >
-> **Python: cross-file calls resolved** — `from X import f` followed by `f()` now generates
-> a direct `calls` edge to the real definition, not a dead end at the import placeholder.
-> Resolution runs after every file is indexed, so it sees the whole project. An import only
-> resolves when its *module* is part of the project, which is what keeps
-> `from pathlib import Path` from binding to a local class of the same name. TypeScript
-> calls are still resolved within a file only.
+> **Cross-file calls resolved** — an imported symbol followed by a call now generates a
+> direct `calls` edge to the real definition, not a dead end at the import placeholder.
+> Resolution runs after every file is indexed, so it sees the whole project.
+>
+> - **Python**: `from X import f` followed by `f()`, plus `import X as m` + `m.f()`.
+> - **TypeScript/JavaScript**: named, namespace, default and aliased imports resolved.
+>   `type`-only imports ignored. `@/` aliases and barrel exports supported.
+>
+> An import only resolves when its *module* is part of the project. That single rule is what
+> keeps `from pathlib import Path` from binding to a local class of the same name, and
+> `import { useState } from 'react'` from binding to a local `react.ts`.
 >
 > Without the `ts` extra, TypeScript falls back to regex, which blanks comments and string
 > literals before scanning and resolves everything above **except** methods inherited from a

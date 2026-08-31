@@ -3315,3 +3315,302 @@ class TestGlobalSymbolIndex:
         kinds = {n["id"]: n["type"] for n in nodes}
         index = indexer_mod._build_module_index(nodes)
         assert indexer_mod._resolve_imported_symbol("helper", index, kinds) is None
+
+
+class TestTSCrossFileCallResolution:
+    """`calls` edges resolved across TypeScript modules by index_project."""
+
+    def _project(self, tmp_path: Path, files: dict[str, str], *,
+                 tree_sitter: bool, monkeypatch) -> dict:
+        monkeypatch.setattr(indexer_mod, "_TREE_SITTER_AVAILABLE", tree_sitter)
+        for name, source in files.items():
+            path = tmp_path / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(source, encoding="utf-8")
+        return index_project(tmp_path)
+
+    def _calls(self, graph: dict) -> set[tuple[str, str]]:
+        return {
+            (e["source"], e["target"])
+            for e in graph["links"] if e["relation"] == "calls"
+        }
+
+    BOTH = pytest.mark.parametrize(
+        "tree_sitter", [True, False], ids=["treesitter", "regex"]
+    )
+
+    def _skip_if_needed(self, tree_sitter):
+        if tree_sitter and not _TREE_SITTER_AVAILABLE:
+            pytest.skip("requires the 'ts' extra")
+
+    @BOTH
+    def test_named_import_resolves(self, tmp_path, monkeypatch, tree_sitter):
+        self._skip_if_needed(tree_sitter)
+        graph = self._project(tmp_path, {
+            "lib/admin.ts": "export function createAdminClient() { return {}; }\n",
+            "actions.ts": (
+                "import { createAdminClient } from './lib/admin';\n"
+                "export function load() { return createAdminClient(); }\n"
+            ),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert ("actions.load", "lib.admin.createAdminClient") in self._calls(graph)
+
+    @BOTH
+    def test_multiple_named_imports_in_one_statement(self, tmp_path, monkeypatch,
+                                                     tree_sitter):
+        self._skip_if_needed(tree_sitter)
+        graph = self._project(tmp_path, {
+            "lib/admin.ts": (
+                "export function createAdminClient() { return {}; }\n"
+                "export function requireAdmin() { return true; }\n"
+            ),
+            "actions.ts": (
+                "import { createAdminClient, requireAdmin } from './lib/admin';\n"
+                "export function load() {\n"
+                "  requireAdmin();\n"
+                "  return createAdminClient();\n"
+                "}\n"
+            ),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        calls = self._calls(graph)
+        assert ("actions.load", "lib.admin.createAdminClient") in calls
+        assert ("actions.load", "lib.admin.requireAdmin") in calls
+
+    @BOTH
+    def test_namespace_import_resolves(self, tmp_path, monkeypatch, tree_sitter):
+        self._skip_if_needed(tree_sitter)
+        graph = self._project(tmp_path, {
+            "lib/database.ts": "export function createClient() { return {}; }\n",
+            "actions.ts": (
+                "import * as db from './lib/database';\n"
+                "export function load() { return db.createClient(); }\n"
+            ),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert ("actions.load", "lib.database.createClient") in self._calls(graph)
+
+    @BOTH
+    def test_aliased_named_import_resolves_to_the_exported_name(
+        self, tmp_path, monkeypatch, tree_sitter
+    ):
+        self._skip_if_needed(tree_sitter)
+        graph = self._project(tmp_path, {
+            "lib/admin.ts": "export function createAdminClient() { return {}; }\n",
+            "actions.ts": (
+                "import { createAdminClient as mk } from './lib/admin';\n"
+                "export function load() { return mk(); }\n"
+            ),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert ("actions.load", "lib.admin.createAdminClient") in self._calls(graph)
+
+    @BOTH
+    def test_type_only_import_is_ignored(self, tmp_path, monkeypatch, tree_sitter):
+        self._skip_if_needed(tree_sitter)
+        graph = self._project(tmp_path, {
+            "lib/types.ts": "export function User() { return {}; }\n",
+            "actions.ts": (
+                "import type { User } from './lib/types';\n"
+                "export function load() { return User(); }\n"
+            ),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert ("actions.load", "lib.types.User") not in self._calls(graph)
+
+    @BOTH
+    def test_external_package_produces_no_edge(self, tmp_path, monkeypatch,
+                                               tree_sitter):
+        self._skip_if_needed(tree_sitter)
+        graph = self._project(tmp_path, {
+            "actions.ts": (
+                "import { useState } from 'react';\n"
+                "export function load() { return useState(); }\n"
+            ),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert self._calls(graph) == set()
+
+    @BOTH
+    def test_external_package_shadowing_a_local_name_is_not_resolved(
+        self, tmp_path, monkeypatch, tree_sitter
+    ):
+        """A node_modules import must not bind to a same-named local file."""
+        self._skip_if_needed(tree_sitter)
+        graph = self._project(tmp_path, {
+            "react.ts": "export function useState() { return null; }\n",
+            "actions.ts": (
+                "import { useState } from 'react';\n"
+                "export function load() { return useState(); }\n"
+            ),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert ("actions.load", "react.useState") not in self._calls(graph)
+
+    @BOTH
+    def test_name_collision_resolves_per_module(self, tmp_path, monkeypatch,
+                                                tree_sitter):
+        self._skip_if_needed(tree_sitter)
+        graph = self._project(tmp_path, {
+            "lib/alpha.ts": "export function run() { return 'a'; }\n",
+            "lib/beta.ts": "export function run() { return 'b'; }\n",
+            "actions.ts": (
+                "import { run as runA } from './lib/alpha';\n"
+                "export function load() { return runA(); }\n"
+            ),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        calls = self._calls(graph)
+        assert ("actions.load", "lib.alpha.run") in calls
+        assert ("actions.load", "lib.beta.run") not in calls
+
+    @BOTH
+    def test_no_duplicate_edge(self, tmp_path, monkeypatch, tree_sitter):
+        self._skip_if_needed(tree_sitter)
+        graph = self._project(tmp_path, {
+            "lib/admin.ts": "export function createAdminClient() { return {}; }\n",
+            "actions.ts": (
+                "import { createAdminClient } from './lib/admin';\n"
+                "export function load() {\n"
+                "  createAdminClient();\n"
+                "  return createAdminClient();\n"
+                "}\n"
+            ),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        pairs = [
+            (e["source"], e["target"])
+            for e in graph["links"] if e["relation"] == "calls"
+        ]
+        assert pairs.count(("actions.load", "lib.admin.createAdminClient")) == 1
+
+    @BOTH
+    def test_local_definition_wins_over_import(self, tmp_path, monkeypatch,
+                                               tree_sitter):
+        self._skip_if_needed(tree_sitter)
+        graph = self._project(tmp_path, {
+            "lib/admin.ts": "export function helper() { return 1; }\n",
+            "actions.ts": (
+                "import { helper } from './lib/admin';\n"
+                "function helper() { return 2; }\n"
+                "export function load() { return helper(); }\n"
+            ),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        calls = self._calls(graph)
+        assert ("actions.load", "actions.helper") in calls
+        assert ("actions.load", "lib.admin.helper") not in calls
+
+    @BOTH
+    def test_parent_relative_import_resolves(self, tmp_path, monkeypatch,
+                                             tree_sitter):
+        self._skip_if_needed(tree_sitter)
+        graph = self._project(tmp_path, {
+            "lib/admin.ts": "export function createAdminClient() { return {}; }\n",
+            "app/actions.ts": (
+                "import { createAdminClient } from '../lib/admin';\n"
+                "export function load() { return createAdminClient(); }\n"
+            ),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert ("app.actions.load", "lib.admin.createAdminClient") in self._calls(graph)
+
+    @BOTH
+    def test_at_alias_import_resolves(self, tmp_path, monkeypatch, tree_sitter):
+        """`@/lib/x` is the conventional project-root alias in Next.js apps."""
+        self._skip_if_needed(tree_sitter)
+        graph = self._project(tmp_path, {
+            "lib/admin.ts": "export function createAdminClient() { return {}; }\n",
+            "app/actions.ts": (
+                "import { createAdminClient } from '@/lib/admin';\n"
+                "export function load() { return createAdminClient(); }\n"
+            ),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert ("app.actions.load", "lib.admin.createAdminClient") in self._calls(graph)
+
+    @BOTH
+    def test_hyphenated_module_resolves(self, tmp_path, monkeypatch, tree_sitter):
+        """`admin-actions.ts` becomes `admin_actions` in node ids."""
+        self._skip_if_needed(tree_sitter)
+        graph = self._project(tmp_path, {
+            "lib/admin-actions.ts": "export function recalc() { return 1; }\n",
+            "actions.ts": (
+                "import { recalc } from './lib/admin-actions';\n"
+                "export function load() { return recalc(); }\n"
+            ),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert ("actions.load", "lib.admin_actions.recalc") in self._calls(graph)
+
+    @BOTH
+    def test_no_calls_edge_points_at_an_import_node(self, tmp_path, monkeypatch,
+                                                   tree_sitter):
+        self._skip_if_needed(tree_sitter)
+        graph = self._project(tmp_path, {
+            "lib/admin.ts": "export function createAdminClient() { return {}; }\n",
+            "actions.ts": (
+                "import { useState } from 'react';\n"
+                "import { createAdminClient } from './lib/admin';\n"
+                "export function load() {\n"
+                "  useState();\n"
+                "  return createAdminClient();\n"
+                "}\n"
+            ),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        import_ids = {n["id"] for n in graph["nodes"] if n["type"] == "import"}
+        for e in graph["links"]:
+            if e["relation"] == "calls":
+                assert e["target"] not in import_ids
+
+    @BOTH
+    def test_private_keys_never_survive(self, tmp_path, monkeypatch, tree_sitter):
+        self._skip_if_needed(tree_sitter)
+        graph = self._project(tmp_path, {
+            "lib/admin.ts": "export function createAdminClient() { return {}; }\n",
+            "actions.ts": (
+                "import { createAdminClient } from './lib/admin';\n"
+                "export function load() { return createAdminClient(); }\n"
+            ),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        for e in graph["links"]:
+            assert not any(k.startswith("_pending") for k in e)
+
+    @BOTH
+    def test_imports_from_edges_unchanged(self, tmp_path, monkeypatch, tree_sitter):
+        self._skip_if_needed(tree_sitter)
+        graph = self._project(tmp_path, {
+            "lib/admin.ts": "export function createAdminClient() { return {}; }\n",
+            "actions.ts": (
+                "import { createAdminClient } from './lib/admin';\n"
+                "export function load() { return createAdminClient(); }\n"
+            ),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        imports = [e for e in graph["links"] if e["relation"] == "imports_from"]
+        assert len(imports) == 1
+        assert imports[0]["source"] == "actions"
+
+    @pytest.mark.skipif(not _TREE_SITTER_AVAILABLE, reason="requires the 'ts' extra")
+    def test_import_node_records_symbol_metadata(self, tmp_path, monkeypatch):
+        graph = self._project(tmp_path, {
+            "lib/admin.ts": "export function createAdminClient() { return {}; }\n",
+            "actions.ts": (
+                "import { createAdminClient, requireAdmin } from './lib/admin';\n"
+                "export function load() { return createAdminClient(); }\n"
+            ),
+        }, tree_sitter=True, monkeypatch=monkeypatch)
+        node = next(
+            n for n in graph["nodes"]
+            if n["type"] == "import" and n["source_file"].endswith("actions.ts")
+        )
+        assert node[indexer_mod._TS_IMPORTED_SYMBOLS] == [
+            "createAdminClient", "requireAdmin"
+        ]
+        assert node[indexer_mod._TS_IMPORT_KIND] == "named"
+        assert node[indexer_mod._TS_SOURCE_MODULE] == "lib.admin"
+
+
+class TestTSModulePathResolution:
+    """_ts_resolve_module_path — specifier to dotted module id."""
+
+    @pytest.mark.parametrize(("spec", "importer", "expected"), [
+        ("./admin", "actions.ts", "admin"),
+        ("./lib/admin", "actions.ts", "lib.admin"),
+        ("../lib/admin", "app/actions.ts", "lib.admin"),
+        ("@/lib/admin", "app/deep/actions.ts", "lib.admin"),
+        ("./admin-actions", "actions.ts", "admin_actions"),
+        ("./admin.ts", "actions.ts", "admin"),
+        ("react", "actions.ts", None),
+        ("next/navigation", "actions.ts", None),
+        ("@supabase/supabase-js", "actions.ts", None),
+    ])
+    def test_resolution(self, spec, importer, expected):
+        assert indexer_mod._ts_resolve_module_path(spec, Path(importer)) == expected
