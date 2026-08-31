@@ -117,6 +117,23 @@ uv sync --extra rust            # solo una
     línea** (`source_location`), no buscando el nombre por el fichero: una firma
     `abstract` sin cuerpo se quedaba con el `{` del método siguiente y le
     atribuía sus llamadas.
+  - **Cross-file (solo Python)**: la pasada por fichero no puede resolver
+    `from slurp.budget import select_subgraph`, así que emite el edge hacia el
+    **nodo import** con el símbolo punteado en la clave privada
+    `_pending_symbol`; `index_project()` lo reescribe al destino real o lo
+    descarta. En el grafo terminado no sobrevive ninguna clave privada ni
+    ningún edge `calls` hacia un nodo import.
+    - El id del nodo import usa el **scope actual**, no el módulo: un import
+      perezoso dentro de una función vive en `cli.run.import_...`. Anclarlo al
+      módulo hace que todos los edges apunten a nodos inexistentes y el filtro
+      final los borre en silencio.
+    - La mitad-módulo del import se resuelve contra un índice **solo de
+      módulos** (`_build_module_index`). En el índice global el sufijo `audit`
+      es ambiguo (módulo `audit` vs comando `cli.audit`) y se descarta,
+      tumbando toda resolución desde ese módulo.
+    - Un import solo resuelve si su **módulo** pertenece al proyecto. Sin esa
+      guarda, `from pathlib import Path` se enlazaría con cualquier clase local
+      llamada `Path`.
 
 ---
 
@@ -139,7 +156,7 @@ por debajo de la carpeta que abre el editor (`~/Desktop/Slurp/`). Todos los coma
 de este documento (`uv run pytest`, `ruff check`, `uv build`, `git`) se ejecutan
 desde `~/Desktop/Slurp/slurp/`, que es donde vive este CLAUDE.md.
 
-**Estado actual:** v0.9.3 · 1803 tests · `ruff check slurp/` limpio.
+**Estado actual:** v0.9.3 · 1828 tests · `ruff check slurp/` limpio.
 
 **⚠️ IMPORTANTE — `uv sync --extra X` desinstala los extras no mencionados.**
 Sincroniza al conjunto exacto de extras que le pases, así que añadir uno con

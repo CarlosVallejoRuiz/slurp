@@ -240,7 +240,31 @@ class _PythonDefCollector(ast.NodeVisitor):
         self.module_id = module_id
         self.kind: dict[str, str] = {}
         self.bases: dict[str, list[str]] = {}
+        # Local binding name -> (import node id, full dotted path it refers to).
+        # Node ids mirror _PythonVisitor exactly so the two passes agree.
+        self.imports: dict[str, tuple[str, str]] = {}
         self._scope: list[str] = [module_id]
+
+    # DECISION: the import node id uses the *current* scope, not the module,
+    # because _PythonVisitor nests a lazy `from x import y` inside the function
+    # that declares it (`cli.run.import_slurp_viz_build_html`). Anchoring these
+    # to the module instead would point every pending edge at a node that does
+    # not exist, and the final validity filter would silently drop them all.
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            raw = alias.asname or alias.name
+            safe = raw.replace(".", "_").replace("-", "_")
+            self.imports[raw] = (f"{self._scope[-1]}.import_{safe}", alias.name)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        module = node.module or ""
+        for alias in node.names:
+            if alias.name == "*":
+                continue
+            raw = alias.asname or alias.name
+            safe = f"{module}_{raw}".replace(".", "_").replace("-", "_")
+            label = f"{module}.{alias.name}" if module else alias.name
+            self.imports[raw] = (f"{self._scope[-1]}.import_{safe}", label)
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         nid = f"{self._scope[-1]}.{node.name}"
@@ -267,6 +291,11 @@ class _PythonDefCollector(ast.NodeVisitor):
 # Receivers whose attribute access resolves against the enclosing class.
 _PY_SELF_NAMES = frozenset({"self", "cls"})
 
+# Private edge key holding the dotted symbol an import-node call refers to.
+# index_project consumes it during cross-file resolution and strips it, so it
+# never reaches a finished graph.
+_PENDING_SYMBOL = "_pending_symbol"
+
 
 class _PythonCallVisitor(ast.NodeVisitor):
     """Pass 2 — resolve ast.Call nodes to definitions and emit `calls` edges.
@@ -280,7 +309,7 @@ class _PythonCallVisitor(ast.NodeVisitor):
     def __init__(self, defs: _PythonDefCollector) -> None:
         self.defs = defs
         self.edges: list[dict] = []
-        self._seen: set[tuple[str, str]] = set()
+        self._seen: set[tuple[str, str, str | None]] = set()
         # (node id, kind) so bare-name lookup can skip class scopes, which are
         # not visible to functions nested inside them.
         self._scope: list[tuple[str, str]] = [(defs.module_id, "module")]
@@ -330,42 +359,61 @@ class _PythonCallVisitor(ast.NodeVisitor):
 
     # -- resolution -------------------------------------------------------
 
-    def _resolve(self, func: ast.expr) -> str | None:
-        """Resolve a call's callee expression to a node id, or None."""
+    def _resolve(self, func: ast.expr) -> tuple[str, str | None] | None:
+        """Resolve a callee expression to (node id, pending symbol) or None.
+
+        The second element is set only when the target is an *import* node: it
+        carries the dotted symbol the call actually refers to, which
+        index_project resolves against the whole project. Within a single file
+        there is nothing further to resolve, so it stays None.
+        """
         if isinstance(func, ast.Name):
             # Covers both `helper()` and the constructor form `ClassName()`.
-            return self._lookup_name(func.id)
+            local = self._lookup_name(func.id)
+            if local is not None:
+                return (local, None)
+            imported = self.defs.imports.get(func.id)
+            if imported is not None:
+                # `from x import f` + `f()`: the import's label is the symbol.
+                return (imported[0], imported[1])
+            return None
 
         if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
             receiver = func.value.id
             if receiver in _PY_SELF_NAMES and self._class_stack:
-                return self._lookup_member(self._class_stack[-1], func.attr)
+                member = self._lookup_member(self._class_stack[-1], func.attr)
+                return (member, None) if member else None
             class_id = self._locals[-1].get(receiver)
             if class_id is not None:
-                return self._lookup_member(class_id, func.attr)
+                member = self._lookup_member(class_id, func.attr)
+                return (member, None) if member else None
+            imported = self.defs.imports.get(receiver)
+            if imported is not None:
+                # `import x as m` + `m.f()`: the symbol is module + attribute.
+                return (imported[0], f"{imported[1]}.{func.attr}")
 
-        # Module attributes (os.path.join), chained calls, subscripts, lambdas:
-        # not resolvable to a node in this graph.
+        # Chained calls, subscripts, lambdas: not resolvable to a node.
         return None
 
     def _class_of_value(self, value: ast.expr | None) -> str | None:
         """Class node id a value is an instance of, when that is certain."""
         if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
-            target = self._lookup_name(value.func.id)
+            target = self._lookup_name(value.func.id)  # local classes only
             # `token = hash_token(card)` has the same shape as
             # `gateway = PaymentGateway()`; only the class case binds a type.
             if target is not None and self.defs.kind.get(target) == "class":
                 return target
         return None
 
-    def _add(self, target: str) -> None:
-        key = (self._caller, target)
+    def _add(self, target: str, symbol: str | None = None) -> None:
+        key = (self._caller, target, symbol)
         if key in self._seen:
             return
         self._seen.add(key)
-        self.edges.append(
-            {"source": self._caller, "target": target, "relation": "calls"}
-        )
+        edge = {"source": self._caller, "target": target, "relation": "calls"}
+        if symbol is not None:
+            edge[_PENDING_SYMBOL] = symbol
+        self.edges.append(edge)
 
     # -- traversal --------------------------------------------------------
 
@@ -407,9 +455,9 @@ class _PythonCallVisitor(ast.NodeVisitor):
         self._visit_func(node)
 
     def visit_Call(self, node: ast.Call) -> None:
-        target = self._resolve(node.func)
-        if target is not None:
-            self._add(target)
+        resolved = self._resolve(node.func)
+        if resolved is not None:
+            self._add(resolved[0], resolved[1])
         # Nested calls in the arguments still count.
         self.generic_visit(node)
 
@@ -3804,6 +3852,147 @@ def format_parser_summary(summary: list[tuple[str, str, bool]]) -> list[str]:
     return lines
 
 
+# ---------------------------------------------------------------------------
+# Cross-file call resolution
+#
+# Per-file indexing cannot resolve `from slurp.budget import select_subgraph`
+# followed by `select_subgraph(...)` — the target lives in another module that
+# has not been parsed yet. Those calls are emitted pointing at the file's own
+# import node, carrying the dotted symbol they mean; once every file is indexed,
+# index_project rewrites them to the real definition.
+# ---------------------------------------------------------------------------
+
+_GLOBAL_INDEX_TYPES = ("function", "class", "module")
+
+
+def _build_global_symbol_index(
+    nodes: list[dict], types: tuple[str, ...] = _GLOBAL_INDEX_TYPES
+) -> dict[str, str]:
+    """Index definitions by each dotted suffix of their id, when unambiguous.
+
+    `budget.select_subgraph` is indexed under both `select_subgraph` and
+    `budget.select_subgraph`. A suffix shared by two different nodes is dropped,
+    so an ambiguous short name never resolves and only the longer, unique form
+    does.
+
+    Args:
+        nodes: Every node in the project graph.
+        types: Node types to index. Narrowing it is what makes a name unique
+            within one kind of node even when it collides across kinds.
+
+    Returns:
+        Mapping of unambiguous suffix to node id.
+    """
+    candidates: dict[str, set[str]] = {}
+    for node in nodes:
+        if node.get("type") not in types:
+            continue
+        nid = node["id"]
+        parts = nid.split(".")
+        for start in range(len(parts)):
+            candidates.setdefault(".".join(parts[start:]), set()).add(nid)
+    return {
+        suffix: next(iter(ids))
+        for suffix, ids in candidates.items()
+        if len(ids) == 1
+    }
+
+
+def _build_module_index(nodes: list[dict]) -> dict[str, str]:
+    """Index module nodes by each dotted suffix of their id, when unambiguous.
+
+    DECISION: modules get their own index rather than sharing the symbol one.
+    `audit` names both the module and the `slurp audit` CLI command, so in a
+    combined index the suffix is ambiguous and gets dropped — taking every
+    `from slurp.audit import ...` resolution down with it. Among modules alone
+    the name is unique.
+    """
+    return _build_global_symbol_index(nodes, types=("module",))
+
+
+def _resolve_imported_symbol(
+    symbol: str, index: dict[str, str], kinds: dict[str, str]
+) -> str | None:
+    """Resolve a dotted import path to a definition in this project.
+
+    DECISION: the *module* half must resolve to a module node before the symbol
+    half is looked up. Matching on the bare name alone would map
+    `from pathlib import Path` onto any project class called `Path` — a
+    confident, wrong edge. Requiring the module to exist in the project is what
+    separates a real intra-project import from a third-party one.
+
+    Args:
+        symbol: Dotted path from an import node, e.g. slurp.budget.select_subgraph.
+        index: Output of _build_global_symbol_index.
+        kinds: node id -> node type, for the whole project.
+
+    Returns:
+        Node id of the imported definition, or None when it is external,
+        ambiguous, or simply absent.
+    """
+    if "." not in symbol:
+        return None
+    module_path, _, name = symbol.rpartition(".")
+
+    module_parts = module_path.split(".")
+    for start in range(len(module_parts)):
+        module_id = index.get(".".join(module_parts[start:]))
+        if module_id is None:
+            continue
+        target = f"{module_id}.{name}"
+        if kinds.get(target) in ("function", "class"):
+            return target
+    return None
+
+
+def _resolve_cross_file_calls(
+    nodes: list[dict], edges: list[dict], module_index: dict[str, str]
+) -> list[dict]:
+    """Rewrite calls that route through an import node to their real target.
+
+    Args:
+        nodes: Every node in the project graph.
+        edges: Every edge, including the pending import-node calls.
+        module_index: Output of _build_module_index.
+
+    Returns:
+        The edge list with pending calls resolved, unresolvable ones dropped,
+        and the private pending-symbol key removed from every edge.
+    """
+    kinds = {n["id"]: n.get("type", "") for n in nodes}
+    labels = {n["id"]: n.get("label", "") for n in nodes}
+    import_ids = {nid for nid, kind in kinds.items() if kind == "import"}
+
+    resolved: list[dict] = []
+    seen_calls: set[tuple[str, str]] = set()
+
+    # Direct calls keep priority: an intra-file edge already covers the pair.
+    for edge in edges:
+        if edge.get("relation") == "calls" and edge.get("target") not in import_ids:
+            seen_calls.add((edge["source"], edge["target"]))
+
+    for edge in edges:
+        clean = {k: v for k, v in edge.items() if k != _PENDING_SYMBOL}
+        if edge.get("relation") != "calls" or edge.get("target") not in import_ids:
+            resolved.append(clean)
+            continue
+
+        symbol = edge.get(_PENDING_SYMBOL) or labels.get(edge["target"], "")
+        target = _resolve_imported_symbol(symbol, module_index, kinds)
+        if target is None or target == edge["source"]:
+            # External library, ambiguous name, or a self-reference: dropping the
+            # edge loses nothing, while keeping it would point at a placeholder.
+            continue
+        key = (edge["source"], target)
+        if key in seen_calls:
+            continue
+        seen_calls.add(key)
+        resolved.append(
+            {"source": edge["source"], "target": target, "relation": "calls"}
+        )
+
+    return resolved
+
 def iter_source_files(root: Path) -> Iterator[Path]:
     """Yield every indexable source file under *root*, in deterministic order.
 
@@ -3882,15 +4071,22 @@ def index_project(
 
     known_ids: set[str] = {n["id"] for n in unique_nodes}
 
-    seen_edges: set[tuple[str, str]] = set()
+    seen_edges: set[tuple[str, str, str]] = set()
     filtered_edges: list[dict] = []
     for e in all_edges:
         src, tgt = e.get("source", ""), e.get("target", "")
         if src in known_ids and tgt in known_ids:
-            key = (src, tgt)
+            # Two calls into the same module alias (`m.f()` and `m.g()`) share a
+            # target import node, so the pending symbol is part of the identity
+            # until cross-file resolution separates them.
+            key = (src, tgt, e.get(_PENDING_SYMBOL) or "")
             if key not in seen_edges:
                 seen_edges.add(key)
                 filtered_edges.append(e)
+
+    filtered_edges = _resolve_cross_file_calls(
+        unique_nodes, filtered_edges, _build_module_index(unique_nodes)
+    )
 
     return {
         "nodes": unique_nodes,

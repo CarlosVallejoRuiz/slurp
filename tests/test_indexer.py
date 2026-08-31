@@ -2581,9 +2581,23 @@ class TestPythonCallEdges:
         )
         assert ("mod.Gateway.charge", "mod.validate") in self._calls(tmp_path, source)
 
-    def test_stdlib_call_produces_no_edge(self, tmp_path):
+    def test_stdlib_call_resolves_to_nothing_at_project_level(self, tmp_path):
+        """A stdlib call leaves a pending edge that project indexing drops."""
         source = "import os\n\n\ndef where():\n    return os.getcwd()\n"
-        assert self._calls(tmp_path, source) == set()
+        (tmp_path / "mod.py").write_text(source, encoding="utf-8")
+        graph = index_project(tmp_path)
+        assert [e for e in graph["links"] if e["relation"] == "calls"] == []
+
+    def test_stdlib_call_produces_only_a_pending_edge(self, tmp_path):
+        """index_python alone cannot know `os` is external — index_project does."""
+        source = "import os\n\n\ndef where():\n    return os.getcwd()\n"
+        f = tmp_path / "mod.py"
+        f.write_text(source, encoding="utf-8")
+        _, edges = index_python(f, tmp_path)
+        calls = [e for e in edges if e["relation"] == "calls"]
+        assert len(calls) == 1
+        assert calls[0]["target"] == "mod.import_os"
+        assert calls[0][indexer_mod._PENDING_SYMBOL] == "os.getcwd"
 
     def test_builtin_call_produces_no_edge(self, tmp_path):
         source = "def size(items):\n    return len(items)\n"
@@ -3044,3 +3058,260 @@ class TestTSCallEdges:
         calls = self._calls(tmp_path, source, tree_sitter=True, monkeypatch=monkeypatch)
         assert ("payments.Impl.load", "payments.helper") in calls
         assert ("payments.Base.load", "payments.helper") not in calls
+
+
+class TestCrossFileCallResolution:
+    """`calls` edges resolved across modules by index_project."""
+
+    def _project(self, tmp_path: Path, files: dict[str, str]) -> dict:
+        for name, source in files.items():
+            path = tmp_path / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(source, encoding="utf-8")
+        return index_project(tmp_path)
+
+    def _calls(self, graph: dict) -> set[tuple[str, str]]:
+        return {
+            (e["source"], e["target"])
+            for e in graph["links"]
+            if e["relation"] == "calls"
+        }
+
+    def test_cross_file_call_resolves(self, tmp_path):
+        graph = self._project(tmp_path, {
+            "helpers.py": "def helper():\n    return 1\n",
+            "app.py": "from helpers import helper\n\n\ndef run():\n    return helper()\n",
+        })
+        assert ("app.run", "helpers.helper") in self._calls(graph)
+
+    def test_import_alias_resolves(self, tmp_path):
+        graph = self._project(tmp_path, {
+            "helpers.py": "def helper():\n    return 1\n",
+            "app.py": "from helpers import helper as h\n\n\ndef run():\n    return h()\n",
+        })
+        assert ("app.run", "helpers.helper") in self._calls(graph)
+
+    def test_module_alias_attribute_call_resolves(self, tmp_path):
+        graph = self._project(tmp_path, {
+            "helpers.py": "def helper():\n    return 1\n",
+            "app.py": "import helpers as hp\n\n\ndef run():\n    return hp.helper()\n",
+        })
+        assert ("app.run", "helpers.helper") in self._calls(graph)
+
+    def test_class_import_resolves(self, tmp_path):
+        graph = self._project(tmp_path, {
+            "models.py": "class Gateway:\n    pass\n",
+            "app.py": "from models import Gateway\n\n\ndef build():\n    return Gateway()\n",
+        })
+        assert ("app.build", "models.Gateway") in self._calls(graph)
+
+    def test_lazy_import_inside_function_resolves(self, tmp_path):
+        """The import node nests under the function, not the module."""
+        graph = self._project(tmp_path, {
+            "helpers.py": "def helper():\n    return 1\n",
+            "app.py": "def run():\n    from helpers import helper\n    return helper()\n",
+        })
+        assert ("app.run", "helpers.helper") in self._calls(graph)
+
+    def test_short_name_collision_does_not_resolve_wrongly(self, tmp_path):
+        """Two modules define `run`; each import must land on its own module."""
+        graph = self._project(tmp_path, {
+            "alpha.py": "def run():\n    return 'a'\n",
+            "beta.py": "def run():\n    return 'b'\n",
+            "app.py": (
+                "from alpha import run as run_a\n"
+                "from beta import run as run_b\n\n\n"
+                "def main():\n    return run_a() + run_b()\n"
+            ),
+        })
+        calls = self._calls(graph)
+        assert ("app.main", "alpha.run") in calls
+        assert ("app.main", "beta.run") in calls
+
+    def test_external_import_produces_no_edge(self, tmp_path):
+        graph = self._project(tmp_path, {
+            "app.py": "import os\n\n\ndef where():\n    return os.getcwd()\n",
+        })
+        assert self._calls(graph) == set()
+
+    def test_stdlib_name_shadowing_a_project_class_is_not_resolved(self, tmp_path):
+        """`from pathlib import Path` must not bind to a local class named Path."""
+        graph = self._project(tmp_path, {
+            "models.py": "class Path:\n    pass\n",
+            "app.py": "from pathlib import Path\n\n\ndef run():\n    return Path('.')\n",
+        })
+        assert ("app.run", "models.Path") not in self._calls(graph)
+
+    def test_unknown_symbol_does_not_raise_and_emits_nothing(self, tmp_path):
+        graph = self._project(tmp_path, {
+            "app.py": (
+                "from nowhere import missing\n\n\n"
+                "def run():\n    return missing()\n"
+            ),
+        })
+        assert self._calls(graph) == set()
+
+    def test_no_duplicate_when_direct_edge_already_exists(self, tmp_path):
+        """A local definition wins; the import must not add a second edge."""
+        graph = self._project(tmp_path, {
+            "helpers.py": "def helper():\n    return 1\n",
+            "app.py": (
+                "from helpers import helper\n\n\n"
+                "def helper():\n    return 2\n\n\n"
+                "def run():\n    return helper()\n"
+            ),
+        })
+        pairs = [
+            (e["source"], e["target"])
+            for e in graph["links"]
+            if e["relation"] == "calls"
+        ]
+        assert pairs.count(("app.run", "app.helper")) == 1
+        assert ("app.run", "helpers.helper") not in pairs
+
+    def test_repeated_cross_file_call_emits_one_edge(self, tmp_path):
+        graph = self._project(tmp_path, {
+            "helpers.py": "def helper():\n    return 1\n",
+            "app.py": (
+                "from helpers import helper\n\n\n"
+                "def run():\n    helper()\n    helper()\n    return helper()\n"
+            ),
+        })
+        pairs = [
+            (e["source"], e["target"])
+            for e in graph["links"]
+            if e["relation"] == "calls"
+        ]
+        assert pairs.count(("app.run", "helpers.helper")) == 1
+
+    def test_imports_from_edges_are_unchanged(self, tmp_path):
+        graph = self._project(tmp_path, {
+            "helpers.py": "def helper():\n    return 1\n",
+            "app.py": "from helpers import helper\n\n\ndef run():\n    return helper()\n",
+        })
+        imports = [e for e in graph["links"] if e["relation"] == "imports_from"]
+        assert len(imports) == 1
+        assert imports[0]["source"] == "app"
+        assert imports[0]["target"] == "app.import_helpers_helper"
+
+    def test_contains_edges_are_unchanged(self, tmp_path):
+        graph = self._project(tmp_path, {
+            "helpers.py": "def helper():\n    return 1\n",
+            "app.py": "from helpers import helper\n\n\ndef run():\n    return helper()\n",
+        })
+        contains = {
+            (e["source"], e["target"])
+            for e in graph["links"]
+            if e["relation"] == "contains"
+        }
+        assert ("helpers", "helpers.helper") in contains
+        assert ("app", "app.run") in contains
+
+    def test_no_calls_edge_points_at_an_import_node(self, tmp_path):
+        """Every pending edge is either resolved or dropped."""
+        graph = self._project(tmp_path, {
+            "helpers.py": "def helper():\n    return 1\n",
+            "app.py": (
+                "import os\n"
+                "from helpers import helper\n\n\n"
+                "def run():\n    os.getcwd()\n    return helper()\n"
+            ),
+        })
+        import_ids = {n["id"] for n in graph["nodes"] if n["type"] == "import"}
+        for e in graph["links"]:
+            if e["relation"] == "calls":
+                assert e["target"] not in import_ids
+
+    def test_private_pending_key_never_survives(self, tmp_path):
+        graph = self._project(tmp_path, {
+            "helpers.py": "def helper():\n    return 1\n",
+            "app.py": "from helpers import helper\n\n\ndef run():\n    return helper()\n",
+        })
+        for e in graph["links"]:
+            assert not any(k.startswith("_") for k in e)
+
+    def test_all_call_endpoints_exist(self, tmp_path):
+        graph = self._project(tmp_path, {
+            "helpers.py": "def helper():\n    return 1\n",
+            "app.py": (
+                "import json\n"
+                "from helpers import helper\n\n\n"
+                "def run():\n    return json.dumps(helper())\n"
+            ),
+        })
+        ids = {n["id"] for n in graph["nodes"]}
+        for e in graph["links"]:
+            assert e["source"] in ids and e["target"] in ids
+
+    def test_cross_file_calls_increase_on_the_slurp_project(self):
+        """The real measure: cross-file edges exist where none did before."""
+        graph = index_project(Path("slurp"))
+        source_file = {n["id"]: n.get("source_file") for n in graph["nodes"]}
+        cross = [
+            e for e in graph["links"]
+            if e["relation"] == "calls"
+            and source_file.get(e["source"]) != source_file.get(e["target"])
+        ]
+        assert len(cross) > 50
+
+    def test_select_subgraph_has_cross_module_callers(self):
+        graph = index_project(Path("slurp"))
+        callers = {
+            e["source"] for e in graph["links"]
+            if e["relation"] == "calls" and e["target"] == "budget.select_subgraph"
+        }
+        assert "cli.run" in callers
+        assert "mcp._handle" in callers
+
+
+class TestGlobalSymbolIndex:
+    """_build_global_symbol_index / _resolve_imported_symbol."""
+
+    def test_indexes_every_suffix(self):
+        nodes = [{"id": "pkg.mod.func", "type": "function"}]
+        index = indexer_mod._build_global_symbol_index(nodes)
+        assert index["func"] == "pkg.mod.func"
+        assert index["mod.func"] == "pkg.mod.func"
+        assert index["pkg.mod.func"] == "pkg.mod.func"
+
+    def test_ambiguous_short_name_is_dropped(self):
+        nodes = [
+            {"id": "a.run", "type": "function"},
+            {"id": "b.run", "type": "function"},
+        ]
+        index = indexer_mod._build_global_symbol_index(nodes)
+        assert "run" not in index
+        assert index["a.run"] == "a.run"
+        assert index["b.run"] == "b.run"
+
+    def test_type_filter_disambiguates(self):
+        """`audit` names both a module and a CLI command; modules alone are unique."""
+        nodes = [
+            {"id": "audit", "type": "module"},
+            {"id": "cli.audit", "type": "function"},
+        ]
+        assert "audit" not in indexer_mod._build_global_symbol_index(nodes)
+        assert indexer_mod._build_module_index(nodes)["audit"] == "audit"
+
+    def test_resolve_requires_the_module_to_exist(self):
+        nodes = [{"id": "models.Path", "type": "class"}]
+        kinds = {n["id"]: n["type"] for n in nodes}
+        index = indexer_mod._build_module_index(nodes)
+        assert indexer_mod._resolve_imported_symbol("pathlib.Path", index, kinds) is None
+
+    def test_resolve_finds_the_symbol_in_its_module(self):
+        nodes = [
+            {"id": "budget", "type": "module"},
+            {"id": "budget.select_subgraph", "type": "function"},
+        ]
+        kinds = {n["id"]: n["type"] for n in nodes}
+        index = indexer_mod._build_module_index(nodes)
+        assert indexer_mod._resolve_imported_symbol(
+            "slurp.budget.select_subgraph", index, kinds
+        ) == "budget.select_subgraph"
+
+    def test_bare_symbol_without_module_does_not_resolve(self):
+        nodes = [{"id": "budget", "type": "module"}]
+        kinds = {n["id"]: n["type"] for n in nodes}
+        index = indexer_mod._build_module_index(nodes)
+        assert indexer_mod._resolve_imported_symbol("helper", index, kinds) is None
