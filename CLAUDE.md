@@ -103,6 +103,20 @@ uv sync --extra rust            # solo una
   `use`/`import`/`alias`/`require` (Elixir) y `requires` (PowerShell).
 - Los companion objects (Kotlin, Scala) se anidan bajo su clase — si no,
   colisionan con ella en el mismo node id.
+- **Edges `calls` (Python, TypeScript/JavaScript)** — extracción en dos fases:
+  recolectar *todas* las definiciones primero, resolver después. Un solo pase
+  top-down no vale: `checkout` llama a `PaymentGateway.charge` antes de que esa
+  clase aparezca. La política es **cero falsos positivos**: si una llamada no se
+  resuelve con certeza (stdlib, terceros, método sobre objeto de tipo
+  desconocido, callee calculado) no se emite edge. Un edge omitido es un hueco;
+  uno incorrecto es una mentira sobre el código. Ambos extremos de todo edge
+  `calls` se filtran contra los nodos realmente emitidos.
+  - Un nombre suelto nunca resuelve contra un atributo de clase: dentro de un
+    método, `foo()` es la función del módulo (necesita `self.`/`this.`).
+  - La rama regex de TS ancla el cuerpo de cada definición por **número de
+    línea** (`source_location`), no buscando el nombre por el fichero: una firma
+    `abstract` sin cuerpo se quedaba con el `{` del método siguiente y le
+    atribuía sus llamadas.
 
 ---
 
@@ -125,7 +139,7 @@ por debajo de la carpeta que abre el editor (`~/Desktop/Slurp/`). Todos los coma
 de este documento (`uv run pytest`, `ruff check`, `uv build`, `git`) se ejecutan
 desde `~/Desktop/Slurp/slurp/`, que es donde vive este CLAUDE.md.
 
-**Estado actual:** v0.9.2 · 1772 tests · `ruff check slurp/` limpio.
+**Estado actual:** v0.9.2 · 1803 tests · `ruff check slurp/` limpio.
 
 **⚠️ IMPORTANTE — `uv sync --extra X` desinstala los extras no mencionados.**
 Sincroniza al conjunto exacto de extras que le pases, así que añadir uno con

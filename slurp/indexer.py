@@ -803,6 +803,430 @@ class _TSVisitor(_BaseVisitor):
         self.edges.append({"source": self._parent, "target": nid, "relation": "imports_from"})
 
 
+# ---------------------------------------------------------------------------
+# TypeScript / JavaScript call-graph extraction
+#
+# Same two-phase shape as the Python extractor: collect every definition first,
+# then resolve calls against that complete table. TS is easier in one respect —
+# `new X()` is its own node type, so a constructor call can never be confused
+# with a plain function call the way `x = C()` and `x = f()` are in Python.
+# ---------------------------------------------------------------------------
+
+# Receiver expression that resolves against the enclosing class.
+_TS_THIS_TYPES = frozenset({"this"})
+
+# Declarations that open a nested scope, mirroring _TSVisitor._DECL_TYPES so
+# both passes build identical node ids.
+_TS_SCOPE_TYPES = frozenset({
+    "function_declaration", "generator_function_declaration",
+    "class_declaration", "abstract_class_declaration",
+    "interface_declaration", "method_definition",
+    "function_signature", "abstract_method_signature",
+})
+
+
+def _ts_class_bases(node) -> list[str]:
+    """Names in a class declaration's extends clause."""
+    bases: list[str] = []
+    for child in node.children:
+        if child.type not in ("class_heritage", "extends_clause"):
+            continue
+        for sub in child.children:
+            if sub.type in ("identifier", "type_identifier"):
+                bases.append(sub.text.decode("utf-8", "replace"))
+            elif sub.type == "extends_clause":
+                for inner in sub.children:
+                    if inner.type in ("identifier", "type_identifier"):
+                        bases.append(inner.text.decode("utf-8", "replace"))
+    return bases
+
+
+class _TSCallVisitor(_BaseVisitor):
+    """Pass 2 — resolve call/new expressions to definitions and emit `calls`.
+
+    Walks the same tree as _TSVisitor and rebuilds the identical scope stack, so
+    a caller's id here always matches the node id emitted there. Only calls that
+    resolve to a definition in this file produce an edge; console.log, an import,
+    or a method on an object of unknown type resolve to nothing and are skipped.
+    """
+
+    def __init__(self, rel_path: Path, file_id: str, symbols: dict[str, str]) -> None:
+        super().__init__(rel_path, file_id)
+        self.symbols = symbols
+        self.bases: dict[str, list[str]] = {}
+        self.module_id = file_id
+        self._kinds: list[str] = ["module"]
+        self._class_stack: list[str] = []
+        self._locals: list[dict[str, str]] = [{}]
+        self._seen: set[tuple[str, str]] = set()
+
+    # -- scope ------------------------------------------------------------
+
+    def _push(self, nid: str, kind: str) -> None:
+        self._scope.append(nid)
+        self._kinds.append(kind)
+
+    def _pop(self) -> None:
+        self._scope.pop()
+        self._kinds.pop()
+
+    def _lookup_name(self, name: str) -> str | None:
+        """Resolve a bare name outward through function and module scopes.
+
+        Class scopes are skipped: inside a method, a bare `foo()` refers to a
+        module-level function, never to a sibling method (that needs `this.`).
+        """
+        for nid, kind in zip(reversed(self._scope), reversed(self._kinds)):
+            if kind == "class":
+                continue
+            candidate = f"{nid}.{name}"
+            if candidate in self.symbols:
+                return candidate
+        return None
+
+    def _lookup_member(self, class_id: str, prop: str) -> str | None:
+        """Resolve *prop* on *class_id*, following locally-declared base classes."""
+        seen: set[str] = set()
+        queue = [class_id]
+        while queue:
+            current = queue.pop(0)
+            if current in seen:
+                continue
+            seen.add(current)
+            candidate = f"{current}.{prop}"
+            if self.symbols.get(candidate) == "function":
+                return candidate
+            for base in self.bases.get(current, []):
+                base_id = f"{self.module_id}.{base}"
+                if self.symbols.get(base_id) == "class":
+                    queue.append(base_id)
+        return None
+
+    def _class_from_annotation(self, node) -> str | None:
+        """Class id named by a `: Type` annotation, when it is a local class."""
+        if node is None:
+            return None
+        for child in node.children:
+            if child.type in ("type_identifier", "identifier"):
+                target = self._lookup_name(child.text.decode("utf-8", "replace"))
+                if target is not None and self.symbols.get(target) == "class":
+                    return target
+        return None
+
+    def _class_from_new(self, node) -> str | None:
+        """Class id constructed by a `new X()` expression, when X is local."""
+        if node is None or node.type != "new_expression":
+            return None
+        ctor = node.child_by_field_name("constructor")
+        if ctor is None or ctor.type != "identifier":
+            return None
+        target = self._lookup_name(ctor.text.decode("utf-8", "replace"))
+        return target if self.symbols.get(target) == "class" else None
+
+    def _add(self, target: str) -> None:
+        key = (self._parent, target)
+        if key in self._seen:
+            return
+        self._seen.add(key)
+        self.edges.append(
+            {"source": self._parent, "target": target, "relation": "calls"}
+        )
+
+    # -- traversal --------------------------------------------------------
+
+    def _visit_scope_decl(self, node) -> None:
+        name = self._ts_name(node)
+        if not name:
+            self._recurse(node)
+            return
+        nid = f"{self._parent}.{name}"
+        is_class = node.type in ("class_declaration", "abstract_class_declaration")
+        if is_class:
+            self.bases[nid] = _ts_class_bases(node)
+            self._class_stack.append(nid)
+        else:
+            self._locals.append({})
+        self._push(nid, "class" if is_class else "function")
+        self._recurse(node)
+        self._pop()
+        if is_class:
+            self._class_stack.pop()
+        else:
+            self._locals.pop()
+
+    visit_function_declaration = _visit_scope_decl
+    visit_generator_function_declaration = _visit_scope_decl
+    visit_class_declaration = _visit_scope_decl
+    visit_abstract_class_declaration = _visit_scope_decl
+    visit_interface_declaration = _visit_scope_decl
+    visit_method_definition = _visit_scope_decl
+    visit_function_signature = _visit_scope_decl
+    visit_abstract_method_signature = _visit_scope_decl
+
+    def visit_lexical_declaration(self, node) -> None:
+        for child in node.children:
+            if child.type != "variable_declarator":
+                continue
+            self._visit_declarator(child)
+
+    visit_variable_declaration = visit_lexical_declaration
+
+    def _visit_declarator(self, node) -> None:
+        name_node = node.child_by_field_name("name")
+        value = node.child_by_field_name("value")
+        name = self._text(name_node) if name_node is not None else ""
+
+        # `const handler = () => {...}` is emitted as a function node by
+        # _TSVisitor, so its body belongs to that node, not the enclosing one.
+        if name and value is not None and value.type in ("arrow_function", "function", "function_expression"):
+            nid = f"{self._parent}.{name}"
+            if nid in self.symbols:
+                self._locals.append({})
+                self._push(nid, "function")
+                self._recurse(value)
+                self._pop()
+                self._locals.pop()
+                return
+
+        if value is not None:
+            self.visit(value)
+
+        if not name or not isinstance(name_node, type(node)) or name_node.type != "identifier":
+            return
+        class_id = (
+            self._class_from_annotation(node.child_by_field_name("type"))
+            or self._class_from_new(value)
+        )
+        if class_id is not None:
+            self._locals[-1][name] = class_id
+        else:
+            # A rebind to something else must clear a stale type.
+            self._locals[-1].pop(name, None)
+
+    def visit_variable_declarator(self, node) -> None:
+        self._visit_declarator(node)
+
+    def visit_call_expression(self, node) -> None:
+        callee = node.child_by_field_name("function")
+        target = self._resolve_callee(callee)
+        if target is not None:
+            self._add(target)
+        self._recurse(node)
+
+    def visit_new_expression(self, node) -> None:
+        target = self._class_from_new(node)
+        if target is not None:
+            self._add(target)
+        self._recurse(node)
+
+    def _resolve_callee(self, callee) -> str | None:
+        if callee is None:
+            return None
+        if callee.type == "identifier":
+            return self._lookup_name(self._text(callee))
+        if callee.type == "member_expression":
+            obj = callee.child_by_field_name("object")
+            prop = callee.child_by_field_name("property")
+            if obj is None or prop is None:
+                return None
+            prop_name = self._text(prop)
+            if obj.type in _TS_THIS_TYPES and self._class_stack:
+                return self._lookup_member(self._class_stack[-1], prop_name)
+            if obj.type == "identifier":
+                class_id = self._locals[-1].get(self._text(obj))
+                if class_id is not None:
+                    return self._lookup_member(class_id, prop_name)
+        return None
+
+
+# --- regex fallback ---------------------------------------------------------
+
+# Comment and string literals, blanked before scanning so a call-looking
+# fragment inside them can never produce an edge.
+_TS_NOISE_RE = re.compile(
+    r"//[^\n]*|/\*.*?\*/|`(?:[^`\\]|\\.)*`|'(?:[^'\\\n]|\\.)*'|\"(?:[^\"\\\n]|\\.)*\"",
+    re.S,
+)
+_TS_NEW_CALL_RE = re.compile(r"\bnew\s+([A-Za-z_$][\w$]*)\s*\(")
+_TS_THIS_CALL_RE = re.compile(r"\bthis\.([A-Za-z_$][\w$]*)\s*\(")
+_TS_BARE_CALL_RE = re.compile(r"(?<![.\w$])([A-Za-z_$][\w$]*)\s*\(")
+# `const gw: Gw = new Gw(` — the `new` keyword makes the variable's type certain,
+# so the same local-type inference the tree-sitter branch does is safe here too.
+_TS_LOCAL_NEW_RE = re.compile(
+    r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::\s*([A-Za-z_$][\w$]*))?\s*=\s*"
+    r"new\s+([A-Za-z_$][\w$]*)\s*\("
+)
+_TS_VAR_CALL_RE = re.compile(
+    r"(?<![.\w$])([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\s*\("
+)
+# Declaration keywords: the name after them is being defined, not called.
+_TS_DECL_KEYWORDS = frozenset({"function", "class", "interface", "new", "return",
+                               "typeof", "instanceof", "await", "yield", "throw",
+                               "in", "of", "as", "extends", "implements"})
+
+
+def _ts_blank_noise(source: str) -> str:
+    """Replace comments and string literals with spaces, preserving offsets."""
+    return _TS_NOISE_RE.sub(lambda m: " " * len(m.group(0)), source)
+
+
+def _ts_body_span(source: str, start: int) -> tuple[int, int] | None:
+    """Span of the body belonging to the declaration at offset *start*.
+
+    DECISION: whichever of `{` or `;` comes first decides the shape. A brace
+    opens a block body and is matched to its closer; a semicolon means either a
+    concise arrow body (`const f = () => expr;`) or a bodyless signature
+    (`abstract load(id: string): unknown;`), and the span stops there. Scanning
+    for the next `{` unconditionally would hand an abstract signature the body
+    of whatever method follows it, and attribute that method's calls to the
+    wrong node.
+    """
+    open_idx = source.find("{", start)
+    semi_idx = source.find(";", start)
+    if open_idx == -1 or (semi_idx != -1 and semi_idx < open_idx):
+        return (start, semi_idx) if semi_idx != -1 else None
+    depth = 0
+    for i in range(open_idx, len(source)):
+        ch = source[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return open_idx, i
+    return None
+
+
+def _ts_decl_offset(source: str, lineno: int, name: str) -> int | None:
+    """Offset of *name* on 1-based line *lineno*, the declaration's own line.
+
+    Anchoring on the recorded declaration line rather than the first textual
+    match keeps two same-named members (an abstract signature and its concrete
+    override) from resolving to each other's body.
+    """
+    lines = source.splitlines(keepends=True)
+    if not 1 <= lineno <= len(lines):
+        return None
+    offset = sum(len(line) for line in lines[: lineno - 1])
+    column = lines[lineno - 1].find(name)
+    return offset + column + len(name) if column != -1 else offset + len(lines[lineno - 1])
+
+
+def _ts_regex_call_edges(
+    source: str, nodes: list[dict], file_id: str
+) -> list[dict]:
+    """Extract `calls` edges from TS/JS source without tree-sitter.
+
+    Args:
+        source: Raw file text.
+        nodes: Nodes already produced by the regex parser, used as the symbol
+            table so both parsers resolve against the same ids.
+        file_id: Module node id.
+
+    Returns:
+        Deduplicated `calls` edges. Only names that match a definition in this
+        file resolve; everything else is skipped.
+    """
+    symbols = {
+        n["id"]: n["type"] for n in nodes if n.get("type") in ("function", "class")
+    }
+    if not symbols:
+        return []
+
+    clean = _ts_blank_noise(source)
+
+    # Function/method bodies, innermost-last, so a call can be attributed to the
+    # smallest enclosing definition.
+    spans: list[tuple[int, int, str, str | None]] = []
+    for node in nodes:
+        if node.get("type") not in ("function", "class"):
+            continue
+        nid = node["id"]
+        owner = nid.rsplit(".", 1)[0]
+        class_id = owner if symbols.get(owner) == "class" else None
+        location = str(node.get("source_location", ""))
+        if not location.startswith("L") or not location[1:].isdigit():
+            continue
+        start = _ts_decl_offset(clean, int(location[1:]), node["label"])
+        if start is None:
+            continue
+        span = _ts_body_span(clean, start)
+        if span is not None and span[1] > span[0]:
+            spans.append((span[0], span[1], nid, class_id))
+
+    def _enclosing(offset: int) -> tuple[str, str | None] | None:
+        best: tuple[int, str, str | None] | None = None
+        for start, end, nid, class_id in spans:
+            if start < offset < end:
+                width = end - start
+                if best is None or width < best[0]:
+                    best = (width, nid, class_id)
+        return (best[1], best[2]) if best else None
+
+    edges: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _add(caller: str, target: str) -> None:
+        key = (caller, target)
+        if key in seen:
+            return
+        seen.add(key)
+        edges.append({"source": caller, "target": target, "relation": "calls"})
+
+    for match in _TS_NEW_CALL_RE.finditer(clean):
+        enclosing = _enclosing(match.start())
+        target = f"{file_id}.{match.group(1)}"
+        if enclosing and symbols.get(target) == "class":
+            _add(enclosing[0], target)
+
+    for match in _TS_THIS_CALL_RE.finditer(clean):
+        enclosing = _enclosing(match.start())
+        if not enclosing or enclosing[1] is None:
+            continue
+        target = f"{enclosing[1]}.{match.group(1)}"
+        if symbols.get(target) == "function":
+            _add(enclosing[0], target)
+
+    for match in _TS_BARE_CALL_RE.finditer(clean):
+        name = match.group(1)
+        if name in _TS_DECL_KEYWORDS or name in _TS_NOT_MEMBERS:
+            continue
+        preceding = clean[max(0, match.start() - 12):match.start()]
+        if re.search(r"\b(function|class|interface|new)\s+$", preceding):
+            continue
+        enclosing = _enclosing(match.start())
+        target = f"{file_id}.{name}"
+        if enclosing and symbols.get(target) == "function":
+            _add(enclosing[0], target)
+
+    # Local variables whose class is pinned by `new` (or an annotation naming a
+    # local class), scoped to the function they are declared in.
+    local_types: dict[tuple[str, str], str] = {}
+    for match in _TS_LOCAL_NEW_RE.finditer(clean):
+        enclosing = _enclosing(match.start())
+        if not enclosing:
+            continue
+        for candidate in (match.group(2), match.group(3)):
+            if not candidate:
+                continue
+            class_id = f"{file_id}.{candidate}"
+            if symbols.get(class_id) == "class":
+                local_types[(enclosing[0], match.group(1))] = class_id
+                break
+
+    for match in _TS_VAR_CALL_RE.finditer(clean):
+        enclosing = _enclosing(match.start())
+        if not enclosing:
+            continue
+        class_id = local_types.get((enclosing[0], match.group(1)))
+        if class_id is None:
+            continue
+        target = f"{class_id}.{match.group(2)}"
+        if symbols.get(target) == "function":
+            _add(enclosing[0], target)
+
+    return edges
+
 def _parse_ts_tree(source_bytes: bytes, is_tsx: bool = False):
     """Parse TypeScript source with tree-sitter.
 
@@ -855,7 +1279,20 @@ def index_typescript(path: Path, root: Path | None = None) -> tuple[list[dict], 
                 raise ValueError("grammar produced a tree containing ERROR nodes")
             visitor = _TSVisitor(rel, fid)
             visitor.visit(tree.root_node)
-            return [module_node] + visitor.nodes, visitor.edges
+
+            symbols = {
+                n["id"]: n["type"]
+                for n in visitor.nodes
+                if n.get("type") in ("function", "class")
+            }
+            calls = _TSCallVisitor(rel, fid, symbols)
+            calls.visit(tree.root_node)
+            known = {fid} | {n["id"] for n in visitor.nodes}
+            call_edges = [
+                e for e in calls.edges
+                if e["source"] in known and e["target"] in known
+            ]
+            return [module_node] + visitor.nodes, visitor.edges + call_edges
         except Exception as exc:
             # Installed but broken on this file — the user needs to know, because
             # the regex fallback below extracts strictly less.
@@ -868,7 +1305,12 @@ def index_typescript(path: Path, root: Path | None = None) -> tuple[list[dict], 
             )
 
     nodes, edges = _index_typescript_regex(source_text, rel, fid)
-    return [module_node] + nodes, edges
+    known = {fid} | {n["id"] for n in nodes}
+    call_edges = [
+        e for e in _ts_regex_call_edges(source_text, nodes, fid)
+        if e["source"] in known and e["target"] in known
+    ]
+    return [module_node] + nodes, edges + call_edges
 
 
 # ---------------------------------------------------------------------------

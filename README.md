@@ -4,7 +4,7 @@
 
 # slurp
 
-![tests](https://img.shields.io/badge/tests-1772%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-1803%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 ![pypi](https://img.shields.io/badge/PyPI-slurp--graph-orange)
@@ -754,14 +754,28 @@ Indexing /path/to/project ...
 Next: slurp "your query" --graph /path/to/project/graphify-out/graph.json
 ```
 
-> **Python call graph:** `slurp index` now extracts `calls` edges between functions in the
-> same file, enabling accurate risk analysis in [`slurp explain`](#slurp-explain) and impact
-> propagation in [`slurp diff`](#slurp-diff). Resolution covers direct calls, `self.method()`
-> and `cls.method()` (including methods inherited from a base class in the same file),
-> constructors, and calls on a local variable whose type is known from `x = ClassName()`.
-> Anything that cannot be resolved with certainty — stdlib, third-party, a method on an
-> object of unknown type — emits no edge. Currently **Python only**; the other 15 languages
-> still emit `contains` and `imports_from` only.
+> **Call graph (Python, TypeScript, JavaScript):** `slurp index` extracts `calls` edges
+> between functions in the same file, enabling accurate risk analysis in
+> [`slurp explain`](#slurp-explain) and impact propagation in [`slurp diff`](#slurp-diff).
+>
+> | | Python | TypeScript / JavaScript |
+> |---|---|---|
+> | Direct calls | `helper()` | `helper()` |
+> | Own methods | `self.m()`, `cls.m()` | `this.m()` |
+> | Inherited methods | ✅ base class in the same file | ✅ tree-sitter only |
+> | Constructors | `ClassName()` | `new ClassName()` |
+> | Typed local variable | `x = ClassName()` | `const x = new C()`, `const x: C = …` |
+> | Parser | stdlib `ast` | tree-sitter, with a regex fallback |
+>
+> **Anything that cannot be resolved with certainty emits no edge** — stdlib and
+> third-party calls, a method on an object of unknown type, a chained or computed callee.
+> A missing edge is a gap; a wrong edge is a lie about the codebase, so ambiguity always
+> resolves to silence. Both endpoints of every `calls` edge are guaranteed to be nodes that
+> exist in the graph.
+>
+> Without the `ts` extra, TypeScript falls back to regex, which blanks comments and string
+> literals before scanning and resolves everything above **except** methods inherited from a
+> base class. The remaining 14 languages still emit `contains` and `imports_from` only.
 
 | Flag | Default | Description |
 |---|---|---|

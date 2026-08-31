@@ -2806,3 +2806,241 @@ class TestPythonCallEdges:
         f = tmp_path / "broken.py"
         f.write_text("def (:\n", encoding="utf-8")
         assert index_python(f, tmp_path) == ([], [])
+
+
+TS_CALL_SAMPLE = """\
+function hashToken(raw: string): string { return raw; }
+function validateCard(number: string): boolean { return true; }
+
+class PaymentGateway {
+  charge(card: string, amount: number) {
+    if (!validateCard(card)) return null;
+    const token = hashToken(card);
+    return this._submit(token, amount);
+  }
+  private _submit(token: string, amount: number) {}
+}
+
+function checkout(cart: any) {
+  const gateway = new PaymentGateway();
+  return gateway.charge(cart.card, cart.total);
+}
+"""
+
+
+class TestTSCallEdges:
+    """`calls` edges for TypeScript/JavaScript, both parser branches."""
+
+    def _index(self, tmp_path: Path, source: str, *, tree_sitter: bool,
+               monkeypatch, name: str = "payments.ts"):
+        monkeypatch.setattr(indexer_mod, "_TREE_SITTER_AVAILABLE", tree_sitter)
+        f = tmp_path / name
+        f.write_text(source, encoding="utf-8")
+        return indexer_mod.index_typescript(f, tmp_path)
+
+    def _calls(self, tmp_path: Path, source: str, *, tree_sitter: bool,
+               monkeypatch, name: str = "payments.ts") -> set[tuple[str, str]]:
+        _, edges = self._index(
+            tmp_path, source, tree_sitter=tree_sitter, monkeypatch=monkeypatch, name=name
+        )
+        return {
+            (e["source"], e["target"]) for e in edges if e["relation"] == "calls"
+        }
+
+    # -- the reference sample, on both branches ---------------------------
+
+    @pytest.mark.parametrize("tree_sitter", [True, False], ids=["treesitter", "regex"])
+    def test_sample_produces_exactly_the_expected_edges(
+        self, tmp_path, monkeypatch, tree_sitter
+    ):
+        if tree_sitter and not _TREE_SITTER_AVAILABLE:
+            pytest.skip("requires the 'ts' extra")
+        calls = self._calls(
+            tmp_path, TS_CALL_SAMPLE, tree_sitter=tree_sitter, monkeypatch=monkeypatch
+        )
+        assert calls == {
+            ("payments.PaymentGateway.charge", "payments.validateCard"),
+            ("payments.PaymentGateway.charge", "payments.hashToken"),
+            ("payments.PaymentGateway.charge", "payments.PaymentGateway._submit"),
+            ("payments.checkout", "payments.PaymentGateway"),
+            ("payments.checkout", "payments.PaymentGateway.charge"),
+        }
+
+    # -- per-behaviour, parametrised over both branches -------------------
+
+    @pytest.mark.parametrize("tree_sitter", [True, False], ids=["treesitter", "regex"])
+    def test_top_level_function_calls_another(self, tmp_path, monkeypatch, tree_sitter):
+        if tree_sitter and not _TREE_SITTER_AVAILABLE:
+            pytest.skip("requires the 'ts' extra")
+        source = "function helper() { return 1; }\nfunction main() { return helper(); }\n"
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert ("payments.main", "payments.helper") in calls
+
+    @pytest.mark.parametrize("tree_sitter", [True, False], ids=["treesitter", "regex"])
+    def test_this_method_call(self, tmp_path, monkeypatch, tree_sitter):
+        if tree_sitter and not _TREE_SITTER_AVAILABLE:
+            pytest.skip("requires the 'ts' extra")
+        source = "class S {\n  run() { return this.step(); }\n  step() {}\n}\n"
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert ("payments.S.run", "payments.S.step") in calls
+
+    @pytest.mark.parametrize("tree_sitter", [True, False], ids=["treesitter", "regex"])
+    def test_new_class_is_a_constructor_call(self, tmp_path, monkeypatch, tree_sitter):
+        if tree_sitter and not _TREE_SITTER_AVAILABLE:
+            pytest.skip("requires the 'ts' extra")
+        source = "class Gw {}\nfunction build() { return new Gw(); }\n"
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert ("payments.build", "payments.Gw") in calls
+
+    @pytest.mark.parametrize("tree_sitter", [True, False], ids=["treesitter", "regex"])
+    def test_external_api_produces_no_edge(self, tmp_path, monkeypatch, tree_sitter):
+        if tree_sitter and not _TREE_SITTER_AVAILABLE:
+            pytest.skip("requires the 'ts' extra")
+        source = "function noisy() {\n  console.log('x');\n  return Math.random();\n}\n"
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert calls == set()
+
+    @pytest.mark.parametrize("tree_sitter", [True, False], ids=["treesitter", "regex"])
+    def test_method_on_unknown_object_produces_no_edge(
+        self, tmp_path, monkeypatch, tree_sitter
+    ):
+        if tree_sitter and not _TREE_SITTER_AVAILABLE:
+            pytest.skip("requires the 'ts' extra")
+        source = (
+            "class Gw {\n  charge() {}\n}\n"
+            "function report(repo: any) { return repo.charge(); }\n"
+        )
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert ("payments.report", "payments.Gw.charge") not in calls
+
+    @pytest.mark.parametrize("tree_sitter", [True, False], ids=["treesitter", "regex"])
+    def test_module_without_calls_emits_none(self, tmp_path, monkeypatch, tree_sitter):
+        if tree_sitter and not _TREE_SITTER_AVAILABLE:
+            pytest.skip("requires the 'ts' extra")
+        source = "function a() {}\nfunction b() {}\n"
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert calls == set()
+
+    @pytest.mark.parametrize("tree_sitter", [True, False], ids=["treesitter", "regex"])
+    def test_contains_edges_are_unaffected(self, tmp_path, monkeypatch, tree_sitter):
+        if tree_sitter and not _TREE_SITTER_AVAILABLE:
+            pytest.skip("requires the 'ts' extra")
+        _, edges = self._index(
+            tmp_path, TS_CALL_SAMPLE, tree_sitter=tree_sitter, monkeypatch=monkeypatch
+        )
+        contains = {(e["source"], e["target"]) for e in edges if e["relation"] == "contains"}
+        assert contains == {
+            ("payments", "payments.hashToken"),
+            ("payments", "payments.validateCard"),
+            ("payments", "payments.PaymentGateway"),
+            ("payments.PaymentGateway", "payments.PaymentGateway.charge"),
+            ("payments.PaymentGateway", "payments.PaymentGateway._submit"),
+            ("payments", "payments.checkout"),
+        }
+
+    @pytest.mark.parametrize("tree_sitter", [True, False], ids=["treesitter", "regex"])
+    def test_imports_from_edges_are_unaffected(self, tmp_path, monkeypatch, tree_sitter):
+        if tree_sitter and not _TREE_SITTER_AVAILABLE:
+            pytest.skip("requires the 'ts' extra")
+        source = "import { createClient } from '@supabase/supabase-js';\nfunction f() {}\n"
+        _, edges = self._index(
+            tmp_path, source, tree_sitter=tree_sitter, monkeypatch=monkeypatch
+        )
+        assert sum(1 for e in edges if e["relation"] == "imports_from") == 1
+
+    @pytest.mark.parametrize("tree_sitter", [True, False], ids=["treesitter", "regex"])
+    def test_call_edges_only_reference_existing_nodes(
+        self, tmp_path, monkeypatch, tree_sitter
+    ):
+        if tree_sitter and not _TREE_SITTER_AVAILABLE:
+            pytest.skip("requires the 'ts' extra")
+        nodes, edges = self._index(
+            tmp_path, TS_CALL_SAMPLE, tree_sitter=tree_sitter, monkeypatch=monkeypatch
+        )
+        ids = {n["id"] for n in nodes}
+        for e in edges:
+            if e["relation"] == "calls":
+                assert e["source"] in ids and e["target"] in ids
+
+    @pytest.mark.parametrize("tree_sitter", [True, False], ids=["treesitter", "regex"])
+    def test_string_and_comment_contents_do_not_produce_edges(
+        self, tmp_path, monkeypatch, tree_sitter
+    ):
+        if tree_sitter and not _TREE_SITTER_AVAILABLE:
+            pytest.skip("requires the 'ts' extra")
+        source = (
+            "function helper() {}\n"
+            "function main() {\n"
+            "  // helper()\n"
+            "  const s = 'helper()';\n"
+            "  return s;\n"
+            "}\n"
+        )
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert ("payments.main", "payments.helper") not in calls
+
+    @pytest.mark.parametrize("tree_sitter", [True, False], ids=["treesitter", "regex"])
+    def test_duplicate_calls_emit_one_edge(self, tmp_path, monkeypatch, tree_sitter):
+        if tree_sitter and not _TREE_SITTER_AVAILABLE:
+            pytest.skip("requires the 'ts' extra")
+        source = (
+            "function helper() {}\n"
+            "function main() { helper(); helper(); return helper(); }\n"
+        )
+        _, edges = self._index(
+            tmp_path, source, tree_sitter=tree_sitter, monkeypatch=monkeypatch
+        )
+        pairs = [(e["source"], e["target"]) for e in edges if e["relation"] == "calls"]
+        assert pairs.count(("payments.main", "payments.helper")) == 1
+
+    @pytest.mark.parametrize("tree_sitter", [True, False], ids=["treesitter", "regex"])
+    def test_local_variable_from_new_resolves_method(
+        self, tmp_path, monkeypatch, tree_sitter
+    ):
+        if tree_sitter and not _TREE_SITTER_AVAILABLE:
+            pytest.skip("requires the 'ts' extra")
+        source = (
+            "class Gw {\n  charge() {}\n}\n"
+            "function run() {\n  const gw = new Gw();\n  return gw.charge();\n}\n"
+        )
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert ("payments.run", "payments.Gw.charge") in calls
+
+    @pytest.mark.parametrize("tree_sitter", [True, False], ids=["treesitter", "regex"])
+    def test_jsx_file_is_handled(self, tmp_path, monkeypatch, tree_sitter):
+        if tree_sitter and not _TREE_SITTER_AVAILABLE:
+            pytest.skip("requires the 'ts' extra")
+        source = "function helper() {}\nfunction main() { return helper(); }\n"
+        calls = self._calls(
+            tmp_path, source, tree_sitter=tree_sitter, monkeypatch=monkeypatch, name="app.jsx"
+        )
+        assert ("app.main", "app.helper") in calls
+
+    # -- tree-sitter only -------------------------------------------------
+
+    @pytest.mark.skipif(not _TREE_SITTER_AVAILABLE, reason="requires the 'ts' extra")
+    def test_inherited_method_resolves_to_base_class(self, tmp_path, monkeypatch):
+        source = (
+            "class Base {\n  log(m: string) {}\n}\n"
+            "class Child extends Base {\n  run() { return this.log('x'); }\n}\n"
+        )
+        calls = self._calls(tmp_path, source, tree_sitter=True, monkeypatch=monkeypatch)
+        assert ("payments.Child.run", "payments.Base.log") in calls
+
+    @pytest.mark.skipif(not _TREE_SITTER_AVAILABLE, reason="requires the 'ts' extra")
+    def test_arrow_const_body_is_its_own_caller(self, tmp_path, monkeypatch):
+        source = "class Gw {}\nconst build = () => new Gw();\n"
+        calls = self._calls(tmp_path, source, tree_sitter=True, monkeypatch=monkeypatch)
+        assert ("payments.build", "payments.Gw") in calls
+
+    @pytest.mark.skipif(not _TREE_SITTER_AVAILABLE, reason="requires the 'ts' extra")
+    def test_abstract_signature_does_not_capture_next_body(self, tmp_path, monkeypatch):
+        """An abstract member must not be credited with the following method's calls."""
+        source = (
+            "function helper() {}\n"
+            "abstract class Base {\n  abstract load(id: string): unknown;\n}\n"
+            "class Impl extends Base {\n  load(id: string) { return helper(); }\n}\n"
+        )
+        calls = self._calls(tmp_path, source, tree_sitter=True, monkeypatch=monkeypatch)
+        assert ("payments.Impl.load", "payments.helper") in calls
+        assert ("payments.Base.load", "payments.helper") not in calls
