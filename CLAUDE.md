@@ -103,7 +103,7 @@ uv sync --extra rust            # solo una
   `use`/`import`/`alias`/`require` (Elixir) y `requires` (PowerShell).
 - Los companion objects (Kotlin, Scala) se anidan bajo su clase — si no,
   colisionan con ella en el mismo node id.
-- **Edges `calls` (Python, TypeScript/JavaScript)** — extracción en dos fases:
+- **Edges `calls` (Python, TypeScript/JavaScript, Go)** — extracción en dos fases:
   recolectar *todas* las definiciones primero, resolver después. Un solo pase
   top-down no vale: `checkout` llama a `PaymentGateway.charge` antes de que esa
   clase aparezca. La política es **cero falsos positivos**: si una llamada no se
@@ -150,6 +150,23 @@ uv sync --extra rust            # solo una
       guiones igual que `_file_id` (`admin-actions` → `admin_actions`).
     - `import type {...}` y los `type X` en línea se ignoran: no existen en
       runtime, no pueden llamarse.
+  - **Go** (regex-primario, sin gramática): los métodos se **anidan bajo su
+    receiver** — `pkg.Struct.Method`, no `pkg.Method`. Antes el receiver se
+    descartaba en un grupo no-capturador de `_GO_FUNC_RE`.
+    - `_go_body_span()` cierra primero los **paréntesis de parámetros** y solo
+      después busca el `{` del cuerpo. Con la búsqueda ingenua,
+      `func F(cart map[string]interface{})` se queda con la llave de
+      `interface{}` y el cuerpo sale de dos caracteres, perdiendo todas sus
+      llamadas sin error.
+    - Un `{` solo se salta si viene precedido del keyword `interface` o
+      `struct`. Saltarlo por estar vacío hace que `func helper() {}` herede el
+      cuerpo de la función siguiente y se le atribuyan **sus** llamadas — un
+      falso positivo, no una omisión.
+    - `pkg.Func()` solo resuelve si `pkg` es el receiver de la función
+      envolvente o una variable local de tipo conocido; un paquete importado
+      nunca resuelve.
+    - **Limitación**: el tipo de retorno no se propaga. `srv := NewServer()`
+      seguido de `srv.Start()` no genera edge. Sin cross-file todavía.
 
 ---
 
@@ -172,7 +189,7 @@ por debajo de la carpeta que abre el editor (`~/Desktop/Slurp/`). Todos los coma
 de este documento (`uv run pytest`, `ruff check`, `uv build`, `git`) se ejecutan
 desde `~/Desktop/Slurp/slurp/`, que es donde vive este CLAUDE.md.
 
-**Estado actual:** v0.9.5 · 1926 tests · `ruff check slurp/` limpio.
+**Estado actual:** v0.9.6 · 1947 tests · `ruff check slurp/` limpio.
 
 **⚠️ IMPORTANTE — `uv sync --extra X` desinstala los extras no mencionados.**
 Sincroniza al conjunto exacto de extras que le pases, así que añadir uno con

@@ -3614,3 +3614,253 @@ class TestTSModulePathResolution:
     ])
     def test_resolution(self, spec, importer, expected):
         assert indexer_mod._ts_resolve_module_path(spec, Path(importer)) == expected
+
+
+GO_CALL_SAMPLE = """\
+package payments
+
+func hashToken(raw string) string { return raw }
+func validateCard(number string) bool { return true }
+
+type PaymentGateway struct{}
+
+func (p *PaymentGateway) Charge(card string, amount float64) *string {
+    if !validateCard(card) { return nil }
+    token := hashToken(card)
+    result := p.submit(token, amount)
+    return &result
+}
+
+func (p *PaymentGateway) submit(token string, amount float64) string {
+    return token
+}
+
+func Checkout(cart map[string]interface{}) *string {
+    gw := &PaymentGateway{}
+    return gw.Charge(cart["card"].(string), 100.0)
+}
+"""
+
+
+class TestGoCallEdges:
+    """`calls` edges extracted from Go source."""
+
+    def _index(self, tmp_path: Path, source: str, name: str = "payments.go"):
+        f = tmp_path / name
+        f.write_text(source, encoding="utf-8")
+        return index_go(f, tmp_path)
+
+    def _calls(self, tmp_path: Path, source: str, name: str = "payments.go"):
+        _, edges = self._index(tmp_path, source, name)
+        return {(e["source"], e["target"]) for e in edges if e["relation"] == "calls"}
+
+    def test_sample_produces_the_expected_edges(self, tmp_path):
+        calls = self._calls(tmp_path, GO_CALL_SAMPLE)
+        assert ("payments.PaymentGateway.Charge", "payments.validateCard") in calls
+        assert ("payments.PaymentGateway.Charge", "payments.hashToken") in calls
+        assert (
+            "payments.PaymentGateway.Charge",
+            "payments.PaymentGateway.submit",
+        ) in calls
+        assert ("payments.Checkout", "payments.PaymentGateway.Charge") in calls
+
+    def test_same_package_function_call(self, tmp_path):
+        source = (
+            "package app\n\n"
+            "func helper() int { return 1 }\n\n"
+            "func Run() int { return helper() }\n"
+        )
+        assert ("payments.Run", "payments.helper") in self._calls(tmp_path, source)
+
+    def test_receiver_method_call(self, tmp_path):
+        source = (
+            "package app\n\n"
+            "type Service struct{}\n\n"
+            "func (s *Service) Run() { s.step() }\n\n"
+            "func (s *Service) step() {}\n"
+        )
+        calls = self._calls(tmp_path, source)
+        assert ("payments.Service.Run", "payments.Service.step") in calls
+
+    def test_value_receiver_method_call(self, tmp_path):
+        """A value receiver resolves the same as a pointer receiver."""
+        source = (
+            "package app\n\n"
+            "type Service struct{}\n\n"
+            "func (s Service) Run() { s.step() }\n\n"
+            "func (s Service) step() {}\n"
+        )
+        assert ("payments.Service.Run", "payments.Service.step") in self._calls(
+            tmp_path, source
+        )
+
+    def test_struct_literal_is_a_constructor_call(self, tmp_path):
+        source = (
+            "package app\n\n"
+            "type Gateway struct{}\n\n"
+            "func Build() *Gateway { return &Gateway{} }\n"
+        )
+        assert ("payments.Build", "payments.Gateway") in self._calls(tmp_path, source)
+
+    def test_struct_literal_without_ampersand(self, tmp_path):
+        source = (
+            "package app\n\n"
+            "type Gateway struct{}\n\n"
+            "func Build() Gateway { return Gateway{} }\n"
+        )
+        assert ("payments.Build", "payments.Gateway") in self._calls(tmp_path, source)
+
+    def test_local_variable_type_resolves_method_call(self, tmp_path):
+        source = (
+            "package app\n\n"
+            "type Gateway struct{}\n\n"
+            "func (g *Gateway) Charge() {}\n\n"
+            "func Run() {\n"
+            "    gw := &Gateway{}\n"
+            "    gw.Charge()\n"
+            "}\n"
+        )
+        assert ("payments.Run", "payments.Gateway.Charge") in self._calls(
+            tmp_path, source
+        )
+
+    def test_var_declaration_resolves_method_call(self, tmp_path):
+        source = (
+            "package app\n\n"
+            "type Gateway struct{}\n\n"
+            "func (g *Gateway) Charge() {}\n\n"
+            "func Run() {\n"
+            "    var gw Gateway\n"
+            "    gw.Charge()\n"
+            "}\n"
+        )
+        assert ("payments.Run", "payments.Gateway.Charge") in self._calls(
+            tmp_path, source
+        )
+
+    def test_external_package_call_produces_no_edge(self, tmp_path):
+        source = (
+            "package app\n\n"
+            'import "fmt"\n\n'
+            'func Log() { fmt.Println("hi") }\n'
+        )
+        assert self._calls(tmp_path, source) == set()
+
+    def test_builtin_call_produces_no_edge(self, tmp_path):
+        source = (
+            "package app\n\n"
+            "func Size(items []string) int { return len(items) }\n"
+        )
+        assert self._calls(tmp_path, source) == set()
+
+    def test_control_flow_keywords_are_not_calls(self, tmp_path):
+        source = (
+            "package app\n\n"
+            "func Loop(items []int) int {\n"
+            "    total := 0\n"
+            "    for _, v := range items {\n"
+            "        if v > 0 { total += v }\n"
+            "    }\n"
+            "    switch total {\n"
+            "    case 0:\n"
+            "        return 0\n"
+            "    }\n"
+            "    return total\n"
+            "}\n"
+        )
+        assert self._calls(tmp_path, source) == set()
+
+    def test_recursive_function_gets_self_edge(self, tmp_path):
+        source = (
+            "package app\n\n"
+            "func fib(n int) int {\n"
+            "    if n < 2 { return n }\n"
+            "    return fib(n-1) + fib(n-2)\n"
+            "}\n"
+        )
+        assert ("payments.fib", "payments.fib") in self._calls(tmp_path, source)
+
+    def test_module_without_calls_emits_none(self, tmp_path):
+        source = "package app\n\nfunc a() {}\n\nfunc b() {}\n"
+        assert self._calls(tmp_path, source) == set()
+
+    def test_comments_and_strings_do_not_produce_edges(self, tmp_path):
+        source = (
+            "package app\n\n"
+            "func helper() {}\n\n"
+            "func Run() {\n"
+            "    // helper()\n"
+            '    s := "helper()"\n'
+            "    _ = s\n"
+            "}\n"
+        )
+        assert ("payments.Run", "payments.helper") not in self._calls(tmp_path, source)
+
+    def test_raw_string_literal_does_not_produce_edges(self, tmp_path):
+        source = (
+            "package app\n\n"
+            "func helper() {}\n\n"
+            "func Run() {\n"
+            "    s := `helper()`\n"
+            "    _ = s\n"
+            "}\n"
+        )
+        assert ("payments.Run", "payments.helper") not in self._calls(tmp_path, source)
+
+    def test_interface_in_signature_does_not_truncate_the_body(self, tmp_path):
+        """`map[string]interface{}` in the params must not be read as the body."""
+        source = (
+            "package app\n\n"
+            "func helper() {}\n\n"
+            "func Run(cart map[string]interface{}) { helper() }\n"
+        )
+        assert ("payments.Run", "payments.helper") in self._calls(tmp_path, source)
+
+    def test_duplicate_calls_emit_one_edge(self, tmp_path):
+        source = (
+            "package app\n\n"
+            "func helper() {}\n\n"
+            "func Run() {\n    helper()\n    helper()\n    helper()\n}\n"
+        )
+        _, edges = self._index(tmp_path, source)
+        pairs = [
+            (e["source"], e["target"]) for e in edges if e["relation"] == "calls"
+        ]
+        assert pairs.count(("payments.Run", "payments.helper")) == 1
+
+    def test_methods_nest_under_their_receiver(self, tmp_path):
+        nodes, edges = self._index(tmp_path, GO_CALL_SAMPLE)
+        ids = {n["id"] for n in nodes}
+        assert "payments.PaymentGateway.Charge" in ids
+        assert "payments.PaymentGateway.submit" in ids
+        contains = {
+            (e["source"], e["target"]) for e in edges if e["relation"] == "contains"
+        }
+        assert ("payments.PaymentGateway", "payments.PaymentGateway.Charge") in contains
+
+    def test_contains_edges_are_unaffected_for_plain_functions(self, tmp_path):
+        _, edges = self._index(tmp_path, GO_CALL_SAMPLE)
+        contains = {
+            (e["source"], e["target"]) for e in edges if e["relation"] == "contains"
+        }
+        assert ("payments", "payments.hashToken") in contains
+        assert ("payments", "payments.validateCard") in contains
+        assert ("payments", "payments.Checkout") in contains
+        assert ("payments", "payments.PaymentGateway") in contains
+
+    def test_imports_from_edges_are_unaffected(self, tmp_path):
+        source = (
+            "package app\n\n"
+            'import (\n    "fmt"\n    "os"\n)\n\n'
+            "func Run() {}\n"
+        )
+        _, edges = self._index(tmp_path, source)
+        imports = [e for e in edges if e["relation"] == "imports_from"]
+        assert len(imports) == 2
+
+    def test_call_edges_only_reference_existing_nodes(self, tmp_path):
+        nodes, edges = self._index(tmp_path, GO_CALL_SAMPLE)
+        ids = {n["id"] for n in nodes}
+        for e in edges:
+            if e["relation"] == "calls":
+                assert e["source"] in ids and e["target"] in ids

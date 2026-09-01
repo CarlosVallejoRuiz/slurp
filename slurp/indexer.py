@@ -1594,8 +1594,10 @@ def index_typescript(path: Path, root: Path | None = None) -> tuple[list[dict], 
 # ---------------------------------------------------------------------------
 
 _GO_PACKAGE_RE = re.compile(r"^package\s+(\w+)", re.MULTILINE)
+# Captures the receiver variable and type alongside the name, so a method can be
+# nested under the struct it belongs to and `p.method()` can be resolved.
 _GO_FUNC_RE = re.compile(
-    r"^func\s+(?:\(\s*\w+\s+\*?[\w.]+\s*\)\s+)?(\w+)\s*\(",
+    r"^func\s+(?:\(\s*(\w+)\s+\*?([\w.]+)\s*\)\s+)?(\w+)\s*\(",
     re.MULTILINE,
 )
 _GO_STRUCT_RE = re.compile(r"^type\s+(\w+)\s+struct\b", re.MULTILINE)
@@ -1604,6 +1606,191 @@ _GO_IMPORT_BLOCK_RE = re.compile(r"import\s*\((.*?)\)", re.DOTALL)
 _GO_IMPORT_SINGLE_RE = re.compile(r'^import\s+"([^"]+)"', re.MULTILINE)
 _GO_IMPORT_PATH_RE = re.compile(r'"([^"]+)"')
 
+
+# Go call-graph extraction. Go is regex-primary, so both phases work on text:
+# definitions are collected while nodes are emitted, then each function body is
+# scanned for calls that resolve to one of them.
+
+# Comments and literals, blanked before scanning so a call-looking fragment
+# inside them can never produce an edge. Backticks are Go's raw strings.
+_GO_NOISE_RE = re.compile(
+    r"//[^\n]*|/\*.*?\*/|`[^`]*`|\"(?:[^\"\\\n]|\\.)*\"|'(?:[^'\\\n]|\\.)*'",
+    re.S,
+)
+_GO_BARE_CALL_RE = re.compile(r"(?<![.\w])([A-Za-z_]\w*)\s*\(")
+_GO_QUALIFIED_CALL_RE = re.compile(r"(?<![.\w])([A-Za-z_]\w*)\.([A-Za-z_]\w*)\s*\(")
+_GO_COMPOSITE_LIT_RE = re.compile(r"&?\b([A-Z]\w*)\s*\{")
+# `gw := &PaymentGateway{}` / `gw := PaymentGateway{}` / `var gw PaymentGateway`
+_GO_SHORT_DECL_RE = re.compile(r"\b(\w+)\s*:=\s*&?([A-Za-z_]\w*)\s*\{")
+_GO_VAR_DECL_RE = re.compile(r"\bvar\s+(\w+)\s+\*?([A-Za-z_]\w*)\b")
+
+# Keywords and builtins that match the call pattern but are not calls to a
+# package-level function.
+_GO_NOT_CALLS = frozenset({
+    "if", "for", "switch", "select", "func", "return", "go", "defer", "range",
+    "case", "else", "type", "var", "const", "package", "import", "struct",
+    "interface", "map", "chan", "make", "new", "len", "cap", "append", "copy",
+    "delete", "panic", "recover", "print", "println", "close", "complex",
+    "real", "imag", "string", "int", "int8", "int16", "int32", "int64", "uint",
+    "uint8", "uint16", "uint32", "uint64", "float32", "float64", "bool", "byte",
+    "rune", "error", "any", "uintptr", "min", "max", "clear",
+})
+
+
+def _go_blank_noise(source: str) -> str:
+    """Replace comments and literals with spaces, preserving offsets."""
+    return _GO_NOISE_RE.sub(lambda m: " " * len(m.group(0)), source)
+
+
+def _go_body_span(source: str, start: int) -> tuple[int, int] | None:
+    """Span of the function body, given *start* just after the parameter `(`.
+
+    DECISION: the parameter list is closed first, and empty type literals are
+    skipped. `func Checkout(cart map[string]interface{}) *string {` otherwise
+    hands the scanner the brace of `interface{}` and yields a two-character
+    body, which silently drops every call the function makes.
+    """
+    depth = 1
+    index = start
+    while index < len(source) and depth > 0:
+        if source[index] == "(":
+            depth += 1
+        elif source[index] == ")":
+            depth -= 1
+        index += 1
+    if depth > 0:
+        return None
+
+    while index < len(source):
+        if source[index] == "{":
+            # Skip only a type literal's brace, identified by the keyword right
+            # before it. Skipping on emptiness instead would also swallow a
+            # legitimately empty function body, handing that function the next
+            # one's body and every call inside it.
+            preceding = source[:index].rstrip()
+            if preceding.endswith(("interface", "struct")):
+                depth_t = 0
+                for j in range(index, len(source)):
+                    if source[j] == "{":
+                        depth_t += 1
+                    elif source[j] == "}":
+                        depth_t -= 1
+                        if depth_t == 0:
+                            index = j + 1
+                            break
+                else:
+                    return None
+                continue
+            break
+        index += 1
+    if index >= len(source) or source[index] != "{":
+        return None
+
+    open_idx, depth = index, 0
+    for i in range(open_idx, len(source)):
+        char = source[i]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return open_idx, i
+    return None
+
+
+def _go_call_edges(
+    source: str,
+    file_id: str,
+    functions: list[tuple[str, str, str | None, int]],
+    types: dict[str, str],
+    symbols: dict[str, str],
+) -> list[dict]:
+    """Extract `calls` edges from one Go file.
+
+    Args:
+        source: Raw file text.
+        file_id: Package node id.
+        functions: (node id, receiver variable, receiver type node id, decl end)
+            for every function and method in the file.
+        types: Local type name -> node id, for structs and interfaces.
+        symbols: node id -> type, for every definition in the file.
+
+    Returns:
+        Deduplicated `calls` edges. A call that cannot be resolved to a
+        definition in this file — an imported package, a builtin, a method on a
+        value of unknown type — produces nothing.
+    """
+    clean = _go_blank_noise(source)
+
+    spans: list[tuple[int, int, str, str, str | None]] = []
+    for nid, recv_var, recv_type_id, decl_end in functions:
+        span = _go_body_span(clean, decl_end)
+        if span is not None:
+            spans.append((span[0], span[1], nid, recv_var, recv_type_id))
+
+    def _enclosing(offset: int):
+        """Innermost function whose body contains *offset*."""
+        best = None
+        for start, end, nid, recv_var, recv_type_id in spans:
+            if start < offset < end and (best is None or end - start < best[0]):
+                best = (end - start, nid, recv_var, recv_type_id)
+        return best[1:] if best else None
+
+    edges: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _emit(caller: str, target: str) -> None:
+        if (caller, target) in seen:
+            return
+        seen.add((caller, target))
+        edges.append({"source": caller, "target": target, "relation": "calls"})
+
+    # Local variables whose struct type is pinned by a composite literal or an
+    # explicit `var` declaration, scoped to the function they appear in.
+    local_types: dict[tuple[str, str], str] = {}
+    for pattern in (_GO_SHORT_DECL_RE, _GO_VAR_DECL_RE):
+        for match in pattern.finditer(clean):
+            enclosing = _enclosing(match.start())
+            type_id = types.get(match.group(2))
+            if enclosing and type_id is not None:
+                local_types[(enclosing[0], match.group(1))] = type_id
+
+    for match in _GO_BARE_CALL_RE.finditer(clean):
+        name = match.group(1)
+        if name in _GO_NOT_CALLS:
+            continue
+        enclosing = _enclosing(match.start())
+        if not enclosing:
+            continue
+        target = f"{file_id}.{name}"
+        if symbols.get(target) == "function":
+            _emit(enclosing[0], target)
+
+    for match in _GO_QUALIFIED_CALL_RE.finditer(clean):
+        receiver, method = match.group(1), match.group(2)
+        enclosing = _enclosing(match.start())
+        if not enclosing:
+            continue
+        caller, recv_var, recv_type_id = enclosing
+        owner = None
+        if recv_var and receiver == recv_var and recv_type_id is not None:
+            owner = recv_type_id          # `p.submit()` inside a method on p
+        else:
+            owner = local_types.get((caller, receiver))
+        if owner is None:
+            # An imported package (fmt.Println) or a value of unknown type.
+            continue
+        target = f"{owner}.{method}"
+        if symbols.get(target) == "function":
+            _emit(caller, target)
+
+    for match in _GO_COMPOSITE_LIT_RE.finditer(clean):
+        enclosing = _enclosing(match.start())
+        type_id = types.get(match.group(1))
+        if enclosing and type_id is not None:
+            _emit(enclosing[0], type_id)
+
+    return edges
 
 def index_go(path: Path, root: Path | None = None) -> tuple[list[dict], list[dict]]:
     """Index a Go source file using regex.
@@ -1639,8 +1826,8 @@ def index_go(path: Path, root: Path | None = None) -> tuple[list[dict], list[dic
         "file_type": "code",
     })
 
-    def _add(name: str, ntype: str, lineno: int) -> None:
-        nid = f"{fid}.{name}"
+    def _add(name: str, ntype: str, lineno: int, parent: str = fid) -> str:
+        nid = f"{parent}.{name}"
         nodes.append({
             "id": nid,
             "label": name,
@@ -1650,16 +1837,25 @@ def index_go(path: Path, root: Path | None = None) -> tuple[list[dict], list[dic
             "source_location": f"L{lineno}",
             "file_type": "code",
         })
-        edges.append({"source": fid, "target": nid, "relation": "contains"})
+        edges.append({"source": parent, "target": nid, "relation": "contains"})
+        return nid
 
+    # Types first: a method's receiver must already exist as a node so the
+    # method can be nested under it rather than under the package.
+    types: dict[str, str] = {}
     for m in _GO_STRUCT_RE.finditer(source):
-        _add(m.group(1), "class", _lineno(source, m.start()))
-
+        types[m.group(1)] = _add(m.group(1), "class", _lineno(source, m.start()))
     for m in _GO_INTERFACE_RE.finditer(source):
-        _add(m.group(1), "interface", _lineno(source, m.start()))
+        types[m.group(1)] = _add(m.group(1), "interface", _lineno(source, m.start()))
 
+    # (function node id, receiver variable, receiver type node id) per definition,
+    # handed to the call scanner below.
+    functions: list[tuple[str, str, str | None, int]] = []
     for m in _GO_FUNC_RE.finditer(source):
-        _add(m.group(1), "function", _lineno(source, m.start()))
+        recv_var, recv_type, name = m.group(1), m.group(2), m.group(3)
+        owner = types.get(recv_type or "", fid)
+        nid = _add(name, "function", _lineno(source, m.start()), parent=owner)
+        functions.append((nid, recv_var or "", owner if recv_type else None, m.end()))
 
     seen_imports: set[str] = set()
 
@@ -1698,6 +1894,13 @@ def index_go(path: Path, root: Path | None = None) -> tuple[list[dict], list[dic
                 "file_type": "code",
             })
             edges.append({"source": fid, "target": nid, "relation": "imports_from"})
+
+    known = {n["id"] for n in nodes}
+    symbols = {n["id"]: n["type"] for n in nodes}
+    edges.extend(
+        e for e in _go_call_edges(source, fid, functions, types, symbols)
+        if e["source"] in known and e["target"] in known
+    )
 
     return nodes, edges
 
