@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import re
 
-import pytest
 import networkx as nx
+import pytest
+from click.testing import CliRunner
 
 from slurp.benchmark import (
     MODEL_PRICES_PER_MTok,
@@ -20,6 +21,7 @@ from slurp.benchmark import (
     price_per_mtok,
     run_benchmark,
 )
+from slurp.cli import cli
 
 
 # ---------------------------------------------------------------------------
@@ -408,9 +410,6 @@ class TestFormatBenchmark:
 # ---------------------------------------------------------------------------
 # CLI — slurp benchmark
 # ---------------------------------------------------------------------------
-
-from click.testing import CliRunner
-from slurp.cli import cli
 
 
 def _runner() -> CliRunner:

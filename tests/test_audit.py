@@ -173,7 +173,9 @@ class TestLogQueryAppend:
         for i in range(5):
             _log(audit_dir, query=f"query {i}")
         lines = [
-            l for l in (audit_dir / _AUDIT_FILE).read_text().splitlines() if l.strip()
+            line
+            for line in (audit_dir / _AUDIT_FILE).read_text().splitlines()
+            if line.strip()
         ]
         assert len(lines) == 5
 

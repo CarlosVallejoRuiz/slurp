@@ -412,7 +412,7 @@ class TestServe:
         inp = io.StringIO("{ not valid json }\n")
         out = io.StringIO()
         serve(sample_graph_json, inp=inp, out=out)
-        resps = [json.loads(l) for l in out.getvalue().splitlines() if l.strip()]
+        resps = [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
         assert len(resps) == 1
         assert resps[0]["error"]["code"] == -32700
 
@@ -420,7 +420,7 @@ class TestServe:
         inp = io.StringIO("[1, 2, 3]\n")
         out = io.StringIO()
         serve(sample_graph_json, inp=inp, out=out)
-        resps = [json.loads(l) for l in out.getvalue().splitlines() if l.strip()]
+        resps = [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
         assert len(resps) == 1
         assert resps[0]["error"]["code"] == -32600
 
@@ -428,7 +428,7 @@ class TestServe:
         inp = io.StringIO("\n\n" + json.dumps(_req("ping")) + "\n\n")
         out = io.StringIO()
         serve(sample_graph_json, inp=inp, out=out)
-        resps = [json.loads(l) for l in out.getvalue().splitlines() if l.strip()]
+        resps = [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
         assert len(resps) == 1
 
     def test_mixed_valid_and_invalid_messages(self, sample_graph_json):
@@ -439,7 +439,7 @@ class TestServe:
         )
         out = io.StringIO()
         serve(sample_graph_json, inp=inp, out=out)
-        resps = [json.loads(l) for l in out.getvalue().splitlines() if l.strip()]
+        resps = [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
         assert len(resps) == 3  # ping ok + parse error + ping ok
         assert resps[0]["id"] == 1
         assert resps[1]["error"]["code"] == -32700

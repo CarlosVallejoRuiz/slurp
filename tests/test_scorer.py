@@ -1,13 +1,14 @@
 """Tests for slurp/scorer.py."""
 
 import sys
+import weakref
 from unittest.mock import patch
 
 import networkx as nx
 import pytest
+from click.testing import CliRunner
 
-import weakref
-
+from slurp.cli import cli
 from slurp.scorer import (
     _pagerank,
     _pagerank_cache,
@@ -589,9 +590,6 @@ class TestEmbeddingBackendDetailed:
 # ---------------------------------------------------------------------------
 # CLI --backend flag (integration via CliRunner)
 # ---------------------------------------------------------------------------
-
-from click.testing import CliRunner
-from slurp.cli import cli
 
 
 class TestBackendCLI:
