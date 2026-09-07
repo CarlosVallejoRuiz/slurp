@@ -3864,3 +3864,262 @@ class TestGoCallEdges:
         for e in edges:
             if e["relation"] == "calls":
                 assert e["source"] in ids and e["target"] in ids
+
+
+JAVA_CALL_SAMPLE = """\
+package com.example.payments;
+
+@Service
+public class PaymentGateway extends BaseGateway implements Chargeable {
+    @Autowired
+    private TokenService tokenService;
+
+    public String charge(String card, double amount) {
+        if (!validateCard(card)) return null;
+        String token = tokenService.hash(card);
+        return submit(token, amount);
+    }
+
+    private String submit(String token, double amount) {
+        return token;
+    }
+
+    private boolean validateCard(String number) {
+        return true;
+    }
+}
+
+public class Checkout {
+    public String process(Map<String, Object> cart) {
+        PaymentGateway gw = new PaymentGateway();
+        return gw.charge((String)cart.get("card"), 100.0);
+    }
+}
+"""
+
+
+class TestJavaCallEdges:
+    """`calls` edges for Java, across both parser branches."""
+
+    BOTH = pytest.mark.parametrize(
+        "tree_sitter", [True, False], ids=["treesitter", "regex"]
+    )
+
+    def _skip(self, tree_sitter):
+        if tree_sitter and not _JAVA_TS_AVAILABLE:
+            pytest.skip("requires the 'java' extra")
+
+    def _index(self, tmp_path: Path, source: str, *, tree_sitter: bool, monkeypatch,
+               name: str = "Payments.java"):
+        monkeypatch.setattr(indexer_mod, "_JAVA_TS_AVAILABLE", tree_sitter)
+        f = tmp_path / name
+        f.write_text(source, encoding="utf-8")
+        return indexer_mod.index_java(f, tmp_path)
+
+    def _calls(self, tmp_path: Path, source: str, *, tree_sitter: bool, monkeypatch,
+               name: str = "Payments.java") -> set[tuple[str, str]]:
+        _, edges = self._index(tmp_path, source, tree_sitter=tree_sitter,
+                               monkeypatch=monkeypatch, name=name)
+        return {(e["source"], e["target"]) for e in edges if e["relation"] == "calls"}
+
+    # -- the reference sample --------------------------------------------
+
+    @BOTH
+    def test_sample_produces_exactly_the_expected_edges(self, tmp_path, monkeypatch,
+                                                        tree_sitter):
+        self._skip(tree_sitter)
+        calls = self._calls(tmp_path, JAVA_CALL_SAMPLE, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert calls == {
+            ("Payments.PaymentGateway.charge", "Payments.PaymentGateway.validateCard"),
+            ("Payments.PaymentGateway.charge", "Payments.PaymentGateway.submit"),
+            ("Payments.Checkout.process", "Payments.PaymentGateway"),
+            ("Payments.Checkout.process", "Payments.PaymentGateway.charge"),
+        }
+
+    @BOTH
+    def test_field_of_external_type_produces_no_edge(self, tmp_path, monkeypatch,
+                                                     tree_sitter):
+        """TokenService is not declared here, so tokenService.hash() cannot resolve."""
+        self._skip(tree_sitter)
+        calls = self._calls(tmp_path, JAVA_CALL_SAMPLE, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert not any(target.endswith(".hash") for _, target in calls)
+
+    # -- per behaviour ----------------------------------------------------
+
+    @BOTH
+    def test_unqualified_call_to_own_method(self, tmp_path, monkeypatch, tree_sitter):
+        self._skip(tree_sitter)
+        source = ("public class A {\n"
+                  "    void run() { helper(); }\n"
+                  "    void helper() {}\n}\n")
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert ("Payments.A.run", "Payments.A.helper") in calls
+
+    @BOTH
+    def test_explicit_this_call(self, tmp_path, monkeypatch, tree_sitter):
+        self._skip(tree_sitter)
+        source = ("public class A {\n"
+                  "    void run() { this.helper(); }\n"
+                  "    void helper() {}\n}\n")
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert ("Payments.A.run", "Payments.A.helper") in calls
+
+    @BOTH
+    def test_new_class_is_a_constructor_edge(self, tmp_path, monkeypatch, tree_sitter):
+        self._skip(tree_sitter)
+        source = ("public class Gw {}\n"
+                  "public class B {\n    void build() { new Gw(); }\n}\n")
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert ("Payments.B.build", "Payments.Gw") in calls
+
+    @BOTH
+    def test_local_variable_method_resolves(self, tmp_path, monkeypatch, tree_sitter):
+        self._skip(tree_sitter)
+        source = ("public class Gw {\n    void charge() {}\n}\n"
+                  "public class B {\n"
+                  "    void run() {\n        Gw gw = new Gw();\n        gw.charge();\n    }\n}\n")
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert ("Payments.B.run", "Payments.Gw.charge") in calls
+
+    @BOTH
+    def test_static_method_of_own_class_resolves(self, tmp_path, monkeypatch,
+                                                 tree_sitter):
+        self._skip(tree_sitter)
+        source = ("public class Util {\n    static int helper() { return 1; }\n}\n"
+                  "public class B {\n    void run() { Util.helper(); }\n}\n")
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert ("Payments.B.run", "Payments.Util.helper") in calls
+
+    @BOTH
+    def test_external_static_method_produces_no_edge(self, tmp_path, monkeypatch,
+                                                     tree_sitter):
+        self._skip(tree_sitter)
+        source = ("public class B {\n"
+                  "    void run() { String s = String.format(\"%d\", 1); }\n}\n")
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert calls == set()
+
+    @BOTH
+    def test_jdk_api_produces_no_edge(self, tmp_path, monkeypatch, tree_sitter):
+        self._skip(tree_sitter)
+        source = ("public class B {\n"
+                  "    void run() { System.out.println(\"noise\"); }\n}\n")
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert calls == set()
+
+    @BOTH
+    def test_super_call_resolves_to_the_parent_class(self, tmp_path, monkeypatch,
+                                                     tree_sitter):
+        self._skip(tree_sitter)
+        source = ("public class Base {\n    protected void log(String m) {}\n}\n"
+                  "public class Child extends Base {\n"
+                  "    void run() { super.log(\"x\"); }\n}\n")
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert ("Payments.Child.run", "Payments.Base.log") in calls
+
+    @BOTH
+    def test_recursive_method_gets_a_self_edge(self, tmp_path, monkeypatch,
+                                               tree_sitter):
+        self._skip(tree_sitter)
+        source = ("public class A {\n"
+                  "    int walk(int n) { return n > 0 ? walk(n - 1) : 0; }\n}\n")
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert ("Payments.A.walk", "Payments.A.walk") in calls
+
+    @BOTH
+    def test_class_without_calls_emits_none(self, tmp_path, monkeypatch, tree_sitter):
+        self._skip(tree_sitter)
+        source = "public class A {\n    void a() {}\n    void b() {}\n}\n"
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert calls == set()
+
+    @BOTH
+    def test_comments_and_strings_do_not_produce_edges(self, tmp_path, monkeypatch,
+                                                       tree_sitter):
+        self._skip(tree_sitter)
+        source = ("public class A {\n"
+                  "    void run() {\n"
+                  "        // helper();\n"
+                  "        String s = \"helper()\";\n"
+                  "    }\n"
+                  "    void helper() {}\n}\n")
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert ("Payments.A.run", "Payments.A.helper") not in calls
+
+    @BOTH
+    def test_duplicate_calls_emit_one_edge(self, tmp_path, monkeypatch, tree_sitter):
+        self._skip(tree_sitter)
+        source = ("public class A {\n"
+                  "    void run() { helper(); helper(); helper(); }\n"
+                  "    void helper() {}\n}\n")
+        _, edges = self._index(tmp_path, source, tree_sitter=tree_sitter,
+                               monkeypatch=monkeypatch)
+        pairs = [(e["source"], e["target"]) for e in edges if e["relation"] == "calls"]
+        assert pairs.count(("Payments.A.run", "Payments.A.helper")) == 1
+
+    @BOTH
+    def test_contains_edges_are_unaffected(self, tmp_path, monkeypatch, tree_sitter):
+        self._skip(tree_sitter)
+        _, edges = self._index(tmp_path, JAVA_CALL_SAMPLE, tree_sitter=tree_sitter,
+                               monkeypatch=monkeypatch)
+        contains = {(e["source"], e["target"]) for e in edges
+                    if e["relation"] == "contains"}
+        assert ("Payments", "Payments.PaymentGateway") in contains
+        assert ("Payments.PaymentGateway", "Payments.PaymentGateway.charge") in contains
+        assert ("Payments", "Payments.Checkout") in contains
+
+    @BOTH
+    def test_extends_and_implements_edges_are_unaffected(self, tmp_path, monkeypatch,
+                                                         tree_sitter):
+        self._skip(tree_sitter)
+        _, edges = self._index(tmp_path, JAVA_CALL_SAMPLE, tree_sitter=tree_sitter,
+                               monkeypatch=monkeypatch)
+        relations = {e["relation"] for e in edges}
+        assert "extends" in relations
+        assert "implements" in relations
+
+    @BOTH
+    def test_call_edges_only_reference_existing_nodes(self, tmp_path, monkeypatch,
+                                                      tree_sitter):
+        self._skip(tree_sitter)
+        nodes, edges = self._index(tmp_path, JAVA_CALL_SAMPLE, tree_sitter=tree_sitter,
+                                   monkeypatch=monkeypatch)
+        ids = {n["id"] for n in nodes}
+        for e in edges:
+            if e["relation"] == "calls":
+                assert e["source"] in ids and e["target"] in ids
+
+    # -- tree-sitter only -------------------------------------------------
+
+    @pytest.mark.skipif(not _JAVA_TS_AVAILABLE, reason="requires the 'java' extra")
+    def test_injected_field_of_local_type_resolves(self, tmp_path, monkeypatch):
+        """A @Autowired field whose type is declared in the same file resolves."""
+        source = ("public class TokenService {\n    public String hash(String s) { return s; }\n}\n"
+                  "@Service\npublic class Gateway {\n"
+                  "    @Autowired\n    private TokenService tokenService;\n"
+                  "    public String charge(String c) { return tokenService.hash(c); }\n}\n")
+        calls = self._calls(tmp_path, source, tree_sitter=True, monkeypatch=monkeypatch)
+        assert ("Payments.Gateway.charge", "Payments.TokenService.hash") in calls
+
+    @pytest.mark.skipif(not _JAVA_TS_AVAILABLE, reason="requires the 'java' extra")
+    def test_local_variable_shadows_a_class_name(self, tmp_path, monkeypatch):
+        source = ("public class Gw {\n    void run() {}\n}\n"
+                  "public class Holder {\n    void run() {}\n}\n"
+                  "public class B {\n"
+                  "    void go() {\n        Holder Gw = new Holder();\n        Gw.run();\n    }\n}\n")
+        calls = self._calls(tmp_path, source, tree_sitter=True, monkeypatch=monkeypatch)
+        assert ("Payments.B.go", "Payments.Holder.run") in calls
+        assert ("Payments.B.go", "Payments.Gw.run") not in calls

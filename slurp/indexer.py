@@ -2067,6 +2067,223 @@ _JAVA_NOT_MEMBERS = frozenset({
 })
 
 
+# ---------------------------------------------------------------------------
+# Java call-graph extraction
+#
+# Java is the easiest of the four languages to resolve: every variable and field
+# carries a declared type, so nothing has to be inferred from an initialiser the
+# way `x = ClassName()` does in Python. The work is mapping a declared type name
+# back to a class node in this file, and refusing to guess when it is not one.
+# ---------------------------------------------------------------------------
+
+_JAVA_TYPE_DECLS = frozenset({
+    "class_declaration", "interface_declaration", "enum_declaration",
+    "record_declaration", "annotation_type_declaration",
+})
+_JAVA_MEMBER_DECLS = frozenset({
+    "method_declaration", "constructor_declaration", "compact_constructor_declaration",
+})
+
+
+def _java_bare_type(text: str) -> str:
+    """Strip generics, arrays and package qualifiers from a declared type.
+
+    `Map<String, Object>` -> `Map`, `com.example.Gateway[]` -> `Gateway`. The
+    result is what a class node in this file would be named.
+    """
+    name = text.split("<", 1)[0].strip()
+    name = name.replace("[", " ").replace("]", " ").strip()
+    return name.rsplit(".", 1)[-1].strip()
+
+
+class _JavaCallVisitor(_BaseVisitor):
+    """Pass 2 — resolve Java method invocations to definitions in this file.
+
+    Rebuilds the same scope stack as _JavaVisitor so a caller's id always
+    matches the node id emitted there. Only invocations that resolve to a
+    declaration in this file produce an edge; the JDK, Spring, and any field
+    whose type is declared elsewhere resolve to nothing and are skipped.
+    """
+
+    def __init__(self, rel_path: Path, file_id: str, symbols: dict[str, str]) -> None:
+        super().__init__(rel_path, file_id)
+        self.symbols = symbols
+        self.module_id = file_id
+        self.bases: dict[str, list[str]] = {}
+        self._class_stack: list[str] = []
+        # Per-method frame: variable name -> class node id it is declared as.
+        self._locals: list[dict[str, str]] = [{}]
+        # Per-class: field name -> class node id, from the declared field type.
+        self._fields: dict[str, dict[str, str]] = {}
+        self._seen: set[tuple[str, str]] = set()
+
+    # -- lookups ----------------------------------------------------------
+
+    def _class_node(self, type_name: str) -> str | None:
+        """Class node in this file for a declared type name, or None."""
+        candidate = f"{self.module_id}.{_java_bare_type(type_name)}"
+        return candidate if self.symbols.get(candidate) in (
+            "class", "interface", "enum", "record"
+        ) else None
+
+    def _lookup_member(self, class_id: str, name: str) -> str | None:
+        """Resolve *name* on *class_id*, following superclasses in this file."""
+        seen: set[str] = set()
+        queue = [class_id]
+        while queue:
+            current = queue.pop(0)
+            if current in seen:
+                continue
+            seen.add(current)
+            candidate = f"{current}.{name}"
+            if self.symbols.get(candidate) in ("method", "constructor"):
+                return candidate
+            for base in self.bases.get(current, []):
+                base_id = self._class_node(base)
+                if base_id is not None:
+                    queue.append(base_id)
+        return None
+
+    def _first_base(self, class_id: str) -> str | None:
+        """Node id of the class's superclass, when it is declared in this file."""
+        for base in self.bases.get(class_id, []):
+            base_id = self._class_node(base)
+            if base_id is not None:
+                return base_id
+        return None
+
+    def _add(self, target: str) -> None:
+        key = (self._parent, target)
+        if key in self._seen:
+            return
+        self._seen.add(key)
+        self.edges.append(
+            {"source": self._parent, "target": target, "relation": "calls"}
+        )
+
+    # -- traversal --------------------------------------------------------
+
+    def _visit_type(self, node) -> None:
+        name = self._ts_name(node)
+        if not name:
+            self._recurse(node)
+            return
+        nid = f"{self._parent}.{name}"
+        self.bases[nid] = _JavaVisitor._type_names(node) if any(
+            c.type in ("superclass", "extends_interfaces", "super_interfaces")
+            for c in node.children
+        ) else []
+        # Field types are needed before any method body is walked, because a
+        # method declared first may use a field declared last.
+        self._fields.setdefault(nid, {}).update(self._collect_fields(node, nid))
+        self._scope.append(nid)
+        self._class_stack.append(nid)
+        self._recurse(node)
+        self._class_stack.pop()
+        self._scope.pop()
+
+    visit_class_declaration = _visit_type
+    visit_interface_declaration = _visit_type
+    visit_enum_declaration = _visit_type
+    visit_record_declaration = _visit_type
+    visit_annotation_type_declaration = _visit_type
+
+    def _collect_fields(self, class_node, class_id: str) -> dict[str, str]:
+        """Map each field of a class body to the class node its type names."""
+        found: dict[str, str] = {}
+        body = class_node.child_by_field_name("body")
+        for member in (body.children if body is not None else ()):
+            if member.type != "field_declaration":
+                continue
+            type_node = member.child_by_field_name("type")
+            if type_node is None:
+                continue
+            target = self._class_node(self._text(type_node))
+            if target is None:
+                continue
+            for child in member.children:
+                if child.type == "variable_declarator":
+                    field_name = self._text(child.child_by_field_name("name"))
+                    if field_name:
+                        found[field_name] = target
+        return found
+
+    def _visit_member(self, node) -> None:
+        name = self._ts_name(node)
+        if not name:
+            return
+        nid = f"{self._parent}.{name}"
+        self._scope.append(nid)
+        self._locals.append({})
+        self._recurse(node)
+        self._locals.pop()
+        self._scope.pop()
+
+    visit_method_declaration = _visit_member
+    visit_constructor_declaration = _visit_member
+    visit_compact_constructor_declaration = _visit_member
+
+    def visit_local_variable_declaration(self, node) -> None:
+        type_node = node.child_by_field_name("type")
+        target = self._class_node(self._text(type_node)) if type_node else None
+        for child in node.children:
+            if child.type != "variable_declarator":
+                continue
+            var_name = self._text(child.child_by_field_name("name"))
+            if var_name:
+                if target is not None:
+                    self._locals[-1][var_name] = target
+                else:
+                    self._locals[-1].pop(var_name, None)
+        self._recurse(node)
+
+    def visit_method_invocation(self, node) -> None:
+        target = self._resolve_invocation(node)
+        if target is not None:
+            self._add(target)
+        self._recurse(node)
+
+    def visit_object_creation_expression(self, node) -> None:
+        type_node = node.child_by_field_name("type")
+        target = self._class_node(self._text(type_node)) if type_node else None
+        if target is not None:
+            self._add(target)
+        self._recurse(node)
+
+    def _resolve_invocation(self, node) -> str | None:
+        name_node = node.child_by_field_name("name")
+        if name_node is None:
+            return None
+        name = self._text(name_node)
+        receiver = node.child_by_field_name("object")
+
+        # `validateCard(card)` and `this.validateCard(card)` are the same thing.
+        if receiver is None or receiver.type == "this":
+            return (
+                self._lookup_member(self._class_stack[-1], name)
+                if self._class_stack else None
+            )
+
+        if receiver.type == "super":
+            base = self._first_base(self._class_stack[-1]) if self._class_stack else None
+            return self._lookup_member(base, name) if base else None
+
+        if receiver.type == "identifier":
+            receiver_name = self._text(receiver)
+            # A local variable shadows a field, which shadows a class name.
+            class_id = self._locals[-1].get(receiver_name)
+            if class_id is None and self._class_stack:
+                class_id = self._fields.get(self._class_stack[-1], {}).get(receiver_name)
+            if class_id is None:
+                # `Child.helper()` — a static call on a class declared here.
+                class_id = self._class_node(receiver_name)
+            if class_id is not None:
+                return self._lookup_member(class_id, name)
+
+        # field_access (System.out.println), array access, chained calls:
+        # not resolvable to a node in this file.
+        return None
+
 def _index_java_regex(source: str, rel_path: Path, file_id: str) -> tuple[list[dict], list[dict]]:
     """Regex fallback for Java. Captures packages, imports, types and members.
 
@@ -2159,6 +2376,184 @@ def _index_java_regex(source: str, rel_path: Path, file_id: str) -> tuple[list[d
     return nodes, edges
 
 
+# --- Java regex fallback ----------------------------------------------------
+
+# Text blocks first, then block comments, line comments, strings and char
+# literals. Blanked before scanning so a call-looking fragment inside one can
+# never produce an edge.
+_JAVA_NOISE_RE = re.compile(
+    r'"""(?:[^"\\]|\\.|"(?!""))*"""|/\*.*?\*/|//[^\n]*'
+    r"|\"(?:[^\"\\\n]|\\.)*\"|'(?:[^'\\\n]|\\.)*'",
+    re.S,
+)
+_JAVA_NEW_RE = re.compile(r"\bnew\s+([A-Z]\w*)\s*[(<]")
+_JAVA_THIS_CALL_RE = re.compile(r"\bthis\.(\w+)\s*\(")
+_JAVA_SUPER_CALL_RE = re.compile(r"\bsuper\.(\w+)\s*\(")
+_JAVA_QUALIFIED_RE = re.compile(r"(?<![.\w])(\w+)\.(\w+)\s*\(")
+_JAVA_BARE_CALL_RE = re.compile(r"(?<![.\w])(\w+)\s*\(")
+# A declared local: `Gateway gw = ...` or `Gateway gw;`.
+_JAVA_LOCAL_DECL_RE = re.compile(
+    r"(?<![.\w])([A-Z]\w*)(?:<[^;=()]*>)?(?:\[\s*\])?\s+(\w+)\s*[=;]"
+)
+# `class Child extends Base` — needed to resolve `super.m()` without an AST.
+_JAVA_EXTENDS_RE = re.compile(
+    r"\b(?:class|interface)\s+(\w+)[^{;]*?\bextends\s+([A-Z]\w*)"
+)
+# Words that take a parenthesis but are control flow, not a call.
+_JAVA_KEYWORDS = frozenset({
+    "if", "for", "while", "switch", "catch", "return", "new", "throw", "throws",
+    "synchronized", "super", "this", "try", "do", "else", "assert",
+    "instanceof", "case", "yield", "record", "class", "interface", "enum",
+    "void", "public", "private", "protected", "static", "final", "native",
+})
+
+
+def _java_blank_noise(source: str) -> str:
+    """Replace comments and literals with spaces, preserving every offset."""
+    return _JAVA_NOISE_RE.sub(lambda m: " " * len(m.group(0)), source)
+
+
+def _java_regex_call_edges(
+    source: str, nodes: list[dict], file_id: str
+) -> list[dict]:
+    """Extract `calls` edges from Java source without tree-sitter.
+
+    Resolves the same shapes as the AST branch except fields injected by DI:
+    the regex parser emits no field nodes, so a field's declared type is not
+    available. That is a missing edge, never a wrong one.
+
+    Args:
+        source: Raw file text.
+        nodes: Nodes already produced by the regex parser, used as the symbol
+            table so both branches resolve against identical ids.
+        file_id: Module node id.
+
+    Returns:
+        Deduplicated `calls` edges between nodes that exist in the graph.
+    """
+    kinds = {n["id"]: n.get("type", "") for n in nodes}
+    classes = {
+        nid.rsplit(".", 1)[-1]: nid
+        for nid, kind in kinds.items()
+        if kind in ("class", "interface", "enum", "record")
+    }
+    members = {nid for nid, kind in kinds.items() if kind in ("method", "constructor")}
+    if not members:
+        return []
+
+    clean = _java_blank_noise(source)
+
+    # Method bodies, anchored on the declaration line the parser recorded.
+    spans: list[tuple[int, int, str, str]] = []
+    for node in nodes:
+        if node.get("type") not in ("method", "constructor"):
+            continue
+        location = str(node.get("source_location", ""))
+        if not location.startswith("L") or not location[1:].isdigit():
+            continue
+        start = _ts_decl_offset(clean, int(location[1:]), node["label"])
+        if start is None:
+            continue
+        span = _ts_body_span(clean, start)
+        if span is None or span[1] <= span[0]:
+            continue
+        spans.append((span[0], span[1], node["id"], node["id"].rsplit(".", 1)[0]))
+
+    def _enclosing(offset: int) -> tuple[str, str] | None:
+        best: tuple[int, str, str] | None = None
+        for begin, end, nid, class_id in spans:
+            if begin < offset < end:
+                width = end - begin
+                if best is None or width < best[0]:
+                    best = (width, nid, class_id)
+        return (best[1], best[2]) if best else None
+
+    edges: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _add(caller: str, target: str) -> None:
+        key = (caller, target)
+        if key in seen or target not in kinds:
+            return
+        seen.add(key)
+        edges.append({"source": caller, "target": target, "relation": "calls"})
+
+    def _member_of(class_id: str, name: str) -> str | None:
+        candidate = f"{class_id}.{name}"
+        return candidate if candidate in members else None
+
+    # Locals declared inside each method body, scoped to that method.
+    local_types: dict[tuple[str, str], str] = {}
+    for match in _JAVA_LOCAL_DECL_RE.finditer(clean):
+        enclosing = _enclosing(match.start())
+        if not enclosing:
+            continue
+        class_id = classes.get(match.group(1))
+        if class_id is not None:
+            local_types[(enclosing[0], match.group(2))] = class_id
+
+    for match in _JAVA_NEW_RE.finditer(clean):
+        enclosing = _enclosing(match.start())
+        target = classes.get(match.group(1))
+        if enclosing and target:
+            _add(enclosing[0], target)
+
+    for match in _JAVA_THIS_CALL_RE.finditer(clean):
+        enclosing = _enclosing(match.start())
+        if not enclosing:
+            continue
+        member = _member_of(enclosing[1], match.group(1))
+        if member:
+            _add(enclosing[0], member)
+
+    # `class Child extends Base` lets super.m() resolve the same way the AST
+    # branch does, instead of silently dropping every inherited call.
+    superclasses: dict[str, str] = {}
+    for match in _JAVA_EXTENDS_RE.finditer(clean):
+        child_id = classes.get(match.group(1))
+        parent_id = classes.get(match.group(2))
+        if child_id and parent_id:
+            superclasses[child_id] = parent_id
+
+    for match in _JAVA_SUPER_CALL_RE.finditer(clean):
+        enclosing = _enclosing(match.start())
+        if not enclosing:
+            continue
+        parent = superclasses.get(enclosing[1])
+        if parent is None:
+            continue
+        member = _member_of(parent, match.group(1))
+        if member:
+            _add(enclosing[0], member)
+
+    for match in _JAVA_QUALIFIED_RE.finditer(clean):
+        receiver, name = match.group(1), match.group(2)
+        if receiver in ("this", "super"):
+            continue
+        enclosing = _enclosing(match.start())
+        if not enclosing:
+            continue
+        # A local variable shadows a class name, exactly as in the AST branch.
+        class_id = local_types.get((enclosing[0], receiver)) or classes.get(receiver)
+        if class_id is None:
+            continue
+        member = _member_of(class_id, name)
+        if member:
+            _add(enclosing[0], member)
+
+    for match in _JAVA_BARE_CALL_RE.finditer(clean):
+        name = match.group(1)
+        if name in _JAVA_KEYWORDS:
+            continue
+        enclosing = _enclosing(match.start())
+        if not enclosing:
+            continue
+        member = _member_of(enclosing[1], name)
+        if member:
+            _add(enclosing[0], member)
+
+    return edges
+
 def index_java(path: Path, root: Path | None = None) -> tuple[list[dict], list[dict]]:
     """Index a Java file.
 
@@ -2185,7 +2580,16 @@ def index_java(path: Path, root: Path | None = None) -> tuple[list[dict], list[d
                 raise ValueError("grammar produced a tree containing ERROR nodes")
             visitor = _JavaVisitor(rel, fid)
             visitor.visit(tree.root_node)
-            return [module_node] + visitor.nodes, visitor.edges
+
+            symbols = {n["id"]: n["type"] for n in visitor.nodes}
+            calls = _JavaCallVisitor(rel, fid, symbols)
+            calls.visit(tree.root_node)
+            known = {fid} | set(symbols)
+            call_edges = [
+                e for e in calls.edges
+                if e["source"] in known and e["target"] in known
+            ]
+            return [module_node] + visitor.nodes, visitor.edges + call_edges
         except Exception as exc:
             import click  # noqa: PLC0415
 
@@ -2193,7 +2597,12 @@ def index_java(path: Path, root: Path | None = None) -> tuple[list[dict], list[d
                        f"falling back to regex: {exc}", err=True)
 
     nodes, edges = _index_java_regex(source_text, rel, fid)
-    return [module_node] + nodes, edges
+    known = {fid} | {n["id"] for n in nodes}
+    call_edges = [
+        e for e in _java_regex_call_edges(source_text, nodes, fid)
+        if e["source"] in known and e["target"] in known
+    ]
+    return [module_node] + nodes, edges + call_edges
 
 
 # ---------------------------------------------------------------------------

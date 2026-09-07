@@ -103,7 +103,7 @@ uv sync --extra rust            # solo una
   `use`/`import`/`alias`/`require` (Elixir) y `requires` (PowerShell).
 - Los companion objects (Kotlin, Scala) se anidan bajo su clase — si no,
   colisionan con ella en el mismo node id.
-- **Edges `calls` (Python, TypeScript/JavaScript, Go)** — extracción en dos fases:
+- **Edges `calls` (Python, TypeScript/JavaScript, Go, Java)** — extracción en dos fases:
   recolectar *todas* las definiciones primero, resolver después. Un solo pase
   top-down no vale: `checkout` llama a `PaymentGateway.charge` antes de que esa
   clase aparezca. La política es **cero falsos positivos**: si una llamada no se
@@ -167,6 +167,27 @@ uv sync --extra rust            # solo una
       nunca resuelve.
     - **Limitación**: el tipo de retorno no se propaga. `srv := NewServer()`
       seguido de `srv.Start()` no genera edge. Sin cross-file todavía.
+  - **Java** (tree-sitter + fallback regex): el lenguaje más barato de los
+    cuatro — los tipos de variables y campos están **declarados**, no se
+    infieren de un inicializador. Los métodos ya venían anidados bajo su clase
+    (`Fichero.Clase.metodo`); los node ids usan el **stem del fichero**, no el
+    paquete.
+    - Precedencia del receptor: **variable local → campo → nombre de clase**
+      (estático). Un local `Holder Gw` gana al tipo `Gw` del mismo nombre.
+    - Los campos se recolectan **antes** de recorrer ningún cuerpo: un método
+      declarado arriba usa campos declarados al final de la clase.
+    - Las anotaciones no participan en la resolución. Un campo `@Autowired`
+      resuelve por su **tipo declarado**, no por la anotación; `@Service` y
+      compañía siguen siendo metadata de nodo, no señal de grafo.
+    - `super.m()` resuelve contra la primera superclase si está en el fichero;
+      `this.m()` y `m()` contra la clase actual; `Clase.m()` contra la clase si
+      es local. `System.out.println` y `String.format` no generan nada.
+    - `_java_bare_type()` limpia genéricos y arrays antes de buscar la clase:
+      `Map<String,Object>` → `Map`, `com.example.Gateway[]` → `Gateway`.
+    - **Divergencia de ramas documentada**: la rama regex no emite nodos
+      `field`, así que un campo inyectado no resuelve sin tree-sitter. Es un
+      edge omitido, nunca uno falso — las dos ramas coinciden en todo lo demás.
+    - Sin cross-file todavía.
 
 ---
 
@@ -189,7 +210,7 @@ por debajo de la carpeta que abre el editor (`~/Desktop/Slurp/`). Todos los coma
 de este documento (`uv run pytest`, `ruff check`, `uv build`, `git`) se ejecutan
 desde `~/Desktop/Slurp/slurp/`, que es donde vive este CLAUDE.md.
 
-**Estado actual:** v0.9.6 · 1947 tests · `ruff check slurp/` limpio.
+**Estado actual:** v0.9.6 · 1983 tests · `ruff check slurp/` limpio.
 
 **⚠️ IMPORTANTE — `uv sync --extra X` desinstala los extras no mencionados.**
 Sincroniza al conjunto exacto de extras que le pases, así que añadir uno con

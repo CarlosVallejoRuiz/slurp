@@ -4,7 +4,7 @@
 
 # slurp
 
-![tests](https://img.shields.io/badge/tests-1947%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-1983%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 ![pypi](https://img.shields.io/badge/PyPI-slurp--graph-orange)
@@ -811,18 +811,20 @@ Indexing /path/to/project ...
 Next: slurp "your query" --graph /path/to/project/graphify-out/graph.json
 ```
 
-> **Call graph (Python, TypeScript, JavaScript, Go):** `slurp index` extracts `calls` edges
-> between functions, enabling accurate risk analysis in
+> **Call graph (Python, TypeScript, JavaScript, Go, Java):** `slurp index` extracts `calls`
+> edges between functions, enabling accurate risk analysis in
 > [`slurp explain`](#slurp-explain) and impact propagation in [`slurp diff`](#slurp-diff).
 >
-> | | Python | TypeScript / JavaScript | Go |
-> |---|---|---|---|
-> | Direct calls | `helper()` | `helper()` | `helper()` (same package) |
-> | Own methods | `self.m()`, `cls.m()` | `this.m()` | `p.m()` on the receiver |
-> | Inherited methods | ✅ base class in the same file | ✅ tree-sitter only | — |
-> | Constructors | `ClassName()` | `new ClassName()` | `&Struct{}`, `Struct{}` |
-> | Typed local variable | `x = ClassName()` | `const x = new C()`, `const x: C = …` | `x := &S{}`, `var x S` |
-> | Parser | stdlib `ast` | tree-sitter, with a regex fallback | regex |
+> | | Python | TypeScript / JavaScript | Go | Java |
+> |---|---|---|---|---|
+> | Direct calls | `helper()` | `helper()` | `helper()` (same package) | `helper()` |
+> | Own methods | `self.m()`, `cls.m()` | `this.m()` | `p.m()` on the receiver | `this.m()` |
+> | Inherited methods | ✅ base class in the same file | ✅ tree-sitter only | — | ✅ incl. `super.m()` |
+> | Constructors | `ClassName()` | `new ClassName()` | `&Struct{}`, `Struct{}` | `new ClassName()` |
+> | Typed local variable | `x = ClassName()` | `const x = new C()`, `const x: C = …` | `x := &S{}`, `var x S` | `C x = …` (declared) |
+> | Static calls | — | — | — | `ClassName.method()` |
+> | Fields | — | — | — | ✅ declared type, incl. `@Autowired` |
+> | Parser | stdlib `ast` | tree-sitter, with a regex fallback | regex | tree-sitter, with a regex fallback |
 >
 > **Anything that cannot be resolved with certainty emits no edge** — stdlib and
 > third-party calls, a method on an object of unknown type, a chained or computed callee.
@@ -848,9 +850,16 @@ Next: slurp "your query" --graph /path/to/project/graphify-out/graph.json
 > typed by a struct literal or a `var` declaration do resolve. Go methods are nested under
 > their receiver, so a method's node id is `pkg.Struct.Method`.
 >
+> Java resolves within a file and has no cross-file pass yet. Because Java declares every
+> variable and field type, nothing has to be inferred from an initialiser — a field resolves
+> whenever its declared type is a class in the same file, which is what makes dependency-
+> injected collaborators navigable. A field whose type lives elsewhere resolves to nothing.
+>
 > Without the `ts` extra, TypeScript falls back to regex, which blanks comments and string
 > literals before scanning and resolves everything above **except** methods inherited from a
-> base class. The remaining 13 languages still emit `contains` and `imports_from` only.
+> base class. Without the `java` extra, Java falls back to regex, which resolves everything
+> above **except** fields, since the regex parser emits no field nodes to read a type from.
+> The remaining 12 languages still emit `contains` and `imports_from` only.
 
 | Flag | Default | Description |
 |---|---|---|
