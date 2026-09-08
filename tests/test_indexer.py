@@ -4463,3 +4463,320 @@ class TestRustCallEdges:
         assert ("payments.Db", "Storage") in _relations(edges, "implements")
         assert ("payments.Db", "payments.Db.get") in _relations(edges, "contains")
         assert "payments.Storage" in _ids(nodes)
+
+
+class TestJavaCrossFileCallResolution:
+    """`calls` edges resolved across Java files by index_project."""
+
+    BOTH = pytest.mark.parametrize(
+        "tree_sitter", [True, False], ids=["treesitter", "regex"]
+    )
+
+    def _skip(self, tree_sitter):
+        if tree_sitter and not _JAVA_TS_AVAILABLE:
+            pytest.skip("requires the 'java' extra")
+
+    def _project(self, tmp_path: Path, files: dict[str, str], *,
+                 tree_sitter: bool, monkeypatch) -> dict:
+        monkeypatch.setattr(indexer_mod, "_JAVA_TS_AVAILABLE", tree_sitter)
+        for name, source in files.items():
+            path = tmp_path / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(source, encoding="utf-8")
+        return index_project(tmp_path)
+
+    def _calls(self, graph: dict) -> set[tuple[str, str]]:
+        return {(e["source"], e["target"])
+                for e in graph["links"] if e["relation"] == "calls"}
+
+    @staticmethod
+    def _cls(pkg: str, name: str, body: str) -> str:
+        return f"package {pkg};\n\npublic class {name} {{\n{body}\n}}\n"
+
+    # -- simple import ----------------------------------------------------
+
+    @BOTH
+    def test_simple_import_resolves_across_files(self, tmp_path, monkeypatch,
+                                                 tree_sitter):
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "util/Hasher.java": self._cls(
+                "com.util", "Hasher", "    public String hash(String r) { return r; }"),
+            "app/Gateway.java": (
+                "package com.app;\n\nimport com.util.Hasher;\n\n"
+                "public class Gateway {\n"
+                "    private Hasher hasher;\n"
+                "    public String charge(String c) { return hasher.hash(c); }\n}\n"),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert ("app.Gateway.Gateway.charge", "util.Hasher.Hasher.hash") \
+            in self._calls(graph)
+
+    @BOTH
+    def test_local_variable_of_imported_type_resolves(self, tmp_path, monkeypatch,
+                                                      tree_sitter):
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "util/Hasher.java": self._cls(
+                "com.util", "Hasher", "    public String hash(String r) { return r; }"),
+            "app/Gateway.java": (
+                "package com.app;\n\nimport com.util.Hasher;\n\n"
+                "public class Gateway {\n"
+                "    public String charge(String c) {\n"
+                "        Hasher h = new Hasher();\n        return h.hash(c);\n    }\n}\n"),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        calls = self._calls(graph)
+        assert ("app.Gateway.Gateway.charge", "util.Hasher.Hasher.hash") in calls
+        assert ("app.Gateway.Gateway.charge", "util.Hasher.Hasher") in calls
+
+    @BOTH
+    def test_static_method_on_imported_class_resolves(self, tmp_path, monkeypatch,
+                                                      tree_sitter):
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "util/Hasher.java": self._cls(
+                "com.util", "Hasher", "    public static String salt() { return \"s\"; }"),
+            "app/Gateway.java": (
+                "package com.app;\n\nimport com.util.Hasher;\n\n"
+                "public class Gateway {\n"
+                "    public String charge() { return Hasher.salt(); }\n}\n"),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert ("app.Gateway.Gateway.charge", "util.Hasher.Hasher.salt") \
+            in self._calls(graph)
+
+    # -- static import ----------------------------------------------------
+
+    @BOTH
+    def test_static_import_resolves_to_the_member(self, tmp_path, monkeypatch,
+                                                  tree_sitter):
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "util/Utils.java": self._cls(
+                "com.util", "Utils",
+                "    public static String format(String s) { return s; }"),
+            "app/Gateway.java": (
+                "package com.app;\n\nimport static com.util.Utils.format;\n\n"
+                "public class Gateway {\n"
+                "    public String charge(String c) { return format(c); }\n}\n"),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert ("app.Gateway.Gateway.charge", "util.Utils.Utils.format") \
+            in self._calls(graph)
+
+    @BOTH
+    def test_static_import_of_an_unknown_member_produces_no_edge(
+            self, tmp_path, monkeypatch, tree_sitter):
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "util/Utils.java": self._cls(
+                "com.util", "Utils",
+                "    public static String format(String s) { return s; }"),
+            "app/Gateway.java": (
+                "package com.app;\n\nimport static com.util.Utils.missing;\n\n"
+                "public class Gateway {\n"
+                "    public String charge(String c) { return missing(c); }\n}\n"),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert self._calls(graph) == set()
+
+    # -- wildcards --------------------------------------------------------
+
+    @BOTH
+    def test_wildcard_with_a_single_candidate_resolves(self, tmp_path, monkeypatch,
+                                                       tree_sitter):
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "util/Only.java": self._cls(
+                "com.util", "Only", "    public String pick() { return \"g\"; }"),
+            "app/Gateway.java": (
+                "package com.app;\n\nimport com.util.*;\n\n"
+                "public class Gateway {\n"
+                "    private Only only;\n"
+                "    public String charge() { return only.pick(); }\n}\n"),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert ("app.Gateway.Gateway.charge", "util.Only.Only.pick") \
+            in self._calls(graph)
+
+    @BOTH
+    def test_wildcard_with_two_candidates_is_ambiguous(self, tmp_path, monkeypatch,
+                                                       tree_sitter):
+        """`Repo` reachable through two wildcards resolves to neither."""
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "alpha/Repo.java": self._cls(
+                "com.alpha", "Repo", "    public String find() { return \"a\"; }"),
+            "beta/Repo.java": self._cls(
+                "com.beta", "Repo", "    public String find() { return \"b\"; }"),
+            "app/Gateway.java": (
+                "package com.app;\n\nimport com.alpha.*;\nimport com.beta.*;\n\n"
+                "public class Gateway {\n"
+                "    private Repo repo;\n"
+                "    public String charge() { return repo.find(); }\n}\n"),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert self._calls(graph) == set()
+
+    @BOTH
+    def test_two_wildcards_keep_separate_import_nodes(self, tmp_path, monkeypatch,
+                                                      tree_sitter):
+        """A wildcard's id is its whole path; `import_*` would collide."""
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "app/Gateway.java": (
+                "package com.app;\n\nimport com.alpha.*;\nimport com.beta.*;\n\n"
+                "public class Gateway {\n    public void charge() {}\n}\n"),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        labels = {n["label"] for n in graph["nodes"] if n["type"] == "import"}
+        assert labels == {"com.alpha.*", "com.beta.*"}
+
+    # -- what must stay silent --------------------------------------------
+
+    @BOTH
+    def test_jdk_wildcard_import_produces_no_edge(self, tmp_path, monkeypatch,
+                                                  tree_sitter):
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "app/Gateway.java": (
+                "package com.app;\n\nimport java.util.*;\nimport java.util.List;\n\n"
+                "public class Gateway {\n"
+                "    public void charge() {\n"
+                "        List<String> items = new ArrayList<>();\n"
+                "        items.add(\"x\");\n    }\n}\n"),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert self._calls(graph) == set()
+
+    @BOTH
+    def test_colliding_simple_names_resolve_only_by_qualified_name(
+            self, tmp_path, monkeypatch, tree_sitter):
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "alpha/Repo.java": self._cls(
+                "com.alpha", "Repo", "    public String find() { return \"a\"; }"),
+            "beta/Repo.java": self._cls(
+                "com.beta", "Repo", "    public String find() { return \"b\"; }"),
+            "app/Gateway.java": (
+                "package com.app;\n\nimport com.alpha.Repo;\n\n"
+                "public class Gateway {\n"
+                "    private Repo repo;\n"
+                "    public String charge() { return repo.find(); }\n}\n"),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        calls = self._calls(graph)
+        assert ("app.Gateway.Gateway.charge", "alpha.Repo.Repo.find") in calls
+        assert ("app.Gateway.Gateway.charge", "beta.Repo.Repo.find") not in calls
+
+    @BOTH
+    def test_uncalled_import_produces_no_edge(self, tmp_path, monkeypatch,
+                                              tree_sitter):
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "util/Hasher.java": self._cls(
+                "com.util", "Hasher", "    public String hash(String r) { return r; }"),
+            "app/Gateway.java": (
+                "package com.app;\n\nimport com.util.Hasher;\n\n"
+                "public class Gateway {\n    public void charge() {}\n}\n"),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert self._calls(graph) == set()
+
+    @BOTH
+    def test_unknown_method_on_an_imported_class_produces_no_edge(
+            self, tmp_path, monkeypatch, tree_sitter):
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "util/Hasher.java": self._cls(
+                "com.util", "Hasher", "    public String hash(String r) { return r; }"),
+            "app/Gateway.java": (
+                "package com.app;\n\nimport com.util.Hasher;\n\n"
+                "public class Gateway {\n"
+                "    private Hasher hasher;\n"
+                "    public String charge() { return hasher.missing(); }\n}\n"),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert self._calls(graph) == set()
+
+    # -- graph hygiene ----------------------------------------------------
+
+    @BOTH
+    def test_edge_is_not_duplicated(self, tmp_path, monkeypatch, tree_sitter):
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "util/Hasher.java": self._cls(
+                "com.util", "Hasher", "    public String hash(String r) { return r; }"),
+            "app/Gateway.java": (
+                "package com.app;\n\nimport com.util.Hasher;\n\n"
+                "public class Gateway {\n"
+                "    private Hasher hasher;\n"
+                "    public String charge(String c) {\n"
+                "        hasher.hash(c);\n        hasher.hash(c);\n"
+                "        return hasher.hash(c);\n    }\n}\n"),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        pairs = [(e["source"], e["target"])
+                 for e in graph["links"] if e["relation"] == "calls"]
+        assert pairs.count(
+            ("app.Gateway.Gateway.charge", "util.Hasher.Hasher.hash")) == 1
+
+    @BOTH
+    def test_no_call_edge_points_at_an_import_node(self, tmp_path, monkeypatch,
+                                                   tree_sitter):
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "util/Hasher.java": self._cls(
+                "com.util", "Hasher", "    public String hash(String r) { return r; }"),
+            "app/Gateway.java": (
+                "package com.app;\n\nimport com.util.Hasher;\nimport java.util.List;\n"
+                "import static com.util.Missing.gone;\n\n"
+                "public class Gateway {\n"
+                "    private Hasher hasher;\n"
+                "    public String charge(String c) { return hasher.hash(gone(c)); }\n}\n"),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        imports = {n["id"] for n in graph["nodes"] if n["type"] == "import"}
+        for e in graph["links"]:
+            if e["relation"] == "calls":
+                assert e["target"] not in imports
+
+    @BOTH
+    def test_no_private_keys_survive(self, tmp_path, monkeypatch, tree_sitter):
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "util/Hasher.java": self._cls(
+                "com.util", "Hasher", "    public String hash(String r) { return r; }"),
+            "app/Gateway.java": (
+                "package com.app;\n\nimport com.util.Hasher;\n\n"
+                "public class Gateway {\n"
+                "    private Hasher hasher;\n"
+                "    public String charge(String c) { return hasher.hash(c); }\n}\n"),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        for e in graph["links"]:
+            assert not any(k.startswith("_") for k in e)
+
+    @BOTH
+    def test_intra_file_calls_still_resolve(self, tmp_path, monkeypatch,
+                                            tree_sitter):
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "util/Hasher.java": self._cls(
+                "com.util", "Hasher", "    public String hash(String r) { return r; }"),
+            "app/Gateway.java": (
+                "package com.app;\n\nimport com.util.Hasher;\n\n"
+                "public class Gateway {\n"
+                "    private Hasher hasher;\n"
+                "    public String charge(String c) { return check(hasher.hash(c)); }\n"
+                "    private String check(String s) { return s; }\n}\n"),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        calls = self._calls(graph)
+        assert ("app.Gateway.Gateway.charge", "app.Gateway.Gateway.check") in calls
+        assert ("app.Gateway.Gateway.charge", "util.Hasher.Hasher.hash") in calls
+
+    @BOTH
+    def test_python_and_typescript_resolution_is_unaffected(
+            self, tmp_path, monkeypatch, tree_sitter):
+        """The Java pass runs between the other two and must not eat their edges."""
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "util/Hasher.java": self._cls(
+                "com.util", "Hasher", "    public String hash(String r) { return r; }"),
+            "app/Gateway.java": (
+                "package com.app;\n\nimport com.util.Hasher;\n\n"
+                "public class Gateway {\n"
+                "    private Hasher hasher;\n"
+                "    public String charge(String c) { return hasher.hash(c); }\n}\n"),
+            "helpers.py": "def helper():\n    return 1\n",
+            "main.py": "from helpers import helper\n\n\ndef run():\n    return helper()\n",
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        calls = self._calls(graph)
+        assert ("main.run", "helpers.helper") in calls
+        assert ("app.Gateway.Gateway.charge", "util.Hasher.Hasher.hash") in calls

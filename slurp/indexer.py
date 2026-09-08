@@ -1956,18 +1956,13 @@ class _JavaVisitor(_BaseVisitor):
             self._emit(name, "package", node.start_point[0] + 1)
 
     def visit_import_declaration(self, node) -> None:
-        module = self._text(node).removeprefix("import").strip().rstrip(";").strip()
-        if not module:
+        raw = self._text(node).removeprefix("import").strip().rstrip(";").strip()
+        record = _java_import_node(raw, self._parent, self.rel_path,
+                                   node.start_point[0] + 1)
+        if record is None:
             return
-        safe = module.rsplit(".", 1)[-1]
-        nid = f"{self._parent}.import_{safe}"
-        self.nodes.append({
-            "id": nid, "label": module, "type": "import", "description": "",
-            "source_file": str(self.rel_path),
-            "source_location": f"L{node.start_point[0] + 1}",
-            "file_type": "code",
-        })
-        self._edge(self._parent, nid, "imports_from")
+        self.nodes.append(record)
+        self._edge(self._parent, record["id"], "imports_from")
 
     def _visit_type(self, node) -> None:
         name = self._ts_name(node)
@@ -2050,7 +2045,9 @@ class _JavaVisitor(_BaseVisitor):
 
 
 _JAVA_PACKAGE_RE = re.compile(r"(?m)^\s*package\s+([\w.]+)\s*;")
-_JAVA_IMPORT_RE = re.compile(r"(?m)^\s*import\s+(?:static\s+)?([\w.*]+)\s*;")
+# The `static` keyword stays inside the group: _java_import_parts() needs it to
+# tell a member import from a class one.
+_JAVA_IMPORT_RE = re.compile(r"(?m)^\s*import\s+((?:static\s+)?[\w.*]+)\s*;")
 _JAVA_TYPE_RE = re.compile(
     r"(?m)^[ \t]*(?:(?:public|private|protected|static|final|abstract|sealed)\s+)*"
     r"(class|interface|enum|record)\s+(\w+)"
@@ -2096,6 +2093,47 @@ def _java_bare_type(text: str) -> str:
     return name.rsplit(".", 1)[-1].strip()
 
 
+_JAVA_IMPORT_FQN = "_java_import"
+_JAVA_IMPORT_KIND = "_java_import_type"
+_JAVA_TYPE_NODES = ("class", "interface", "enum")
+
+
+def _java_import_parts(raw: str) -> tuple[str, str, str]:
+    """Split one import statement into `(path, kind, id_segment)`.
+
+    *raw* is the text between `import` and `;`. Kind is one of `class`,
+    `static`, `wildcard` or `static_wildcard`. The `static` keyword is dropped
+    from the path so both parser branches record the same label — the keyword
+    lives in the kind instead.
+
+    A wildcard's last segment is `*`, which every wildcard in a file shares, so
+    its id segment is the whole dotted path; two wildcard imports would
+    otherwise collapse onto one node and silently lose a package.
+    """
+    stripped = raw.strip()
+    is_static = stripped.startswith("static") and stripped[6:7].isspace()
+    path = stripped[6:].strip() if is_static else stripped
+    wildcard = path.endswith(".*")
+    kind = ("static_wildcard" if is_static and wildcard
+            else "static" if is_static
+            else "wildcard" if wildcard else "class")
+    segment = path.replace(".", "_") if wildcard else path.rsplit(".", 1)[-1]
+    return path, kind, segment
+
+
+def _java_import_node(raw: str, parent: str, rel_path: Path, lineno: int) -> dict | None:
+    """Build the graph node for one Java import statement."""
+    if not raw.strip():
+        return None
+    path, kind, segment = _java_import_parts(raw)
+    return {
+        "id": f"{parent}.import_{segment}", "label": path, "type": "import",
+        "description": "", "source_file": str(rel_path),
+        "source_location": f"L{lineno}", "file_type": "code",
+        _JAVA_IMPORT_FQN: path, _JAVA_IMPORT_KIND: kind,
+    }
+
+
 class _JavaCallVisitor(_BaseVisitor):
     """Pass 2 — resolve Java method invocations to definitions in this file.
 
@@ -2113,9 +2151,14 @@ class _JavaCallVisitor(_BaseVisitor):
         self._class_stack: list[str] = []
         # Per-method frame: variable name -> class node id it is declared as.
         self._locals: list[dict[str, str]] = [{}]
-        # Per-class: field name -> class node id, from the declared field type.
+        # Per-class: field name -> declared type name, bare.
         self._fields: dict[str, dict[str, str]] = {}
         self._seen: set[tuple[str, str]] = set()
+        # Imports, for the calls this file cannot resolve on its own.
+        self.imports: dict[str, str] = {}          # simple class name -> node id
+        self.static_members: dict[str, str] = {}   # member name -> node id
+        self.wildcards: list[str] = []             # class-wildcard node ids
+        self.static_wildcards: list[str] = []      # static-wildcard node ids
 
     # -- lookups ----------------------------------------------------------
 
@@ -2161,7 +2204,53 @@ class _JavaCallVisitor(_BaseVisitor):
             {"source": self._parent, "target": target, "relation": "calls"}
         )
 
+    def _add_pending(self, import_id: str, symbol: str) -> None:
+        """Route a call through an import node for the cross-file pass.
+
+        The per-file pass cannot see `com.example.auth.AuthService`, so the edge
+        is parked on the import node with the dotted symbol it needs;
+        index_project() rewrites it to the real definition or drops it.
+        """
+        key = (self._parent, import_id, symbol)
+        if key in self._seen:
+            return
+        self._seen.add(key)
+        self.edges.append({"source": self._parent, "target": import_id,
+                           "relation": "calls", _PENDING_SYMBOL: symbol})
+
+    def _dispatch(self, type_name: str, member: str) -> None:
+        """Emit a call on *type_name*, resolving here or deferring to imports."""
+        bare = _java_bare_type(type_name)
+        if not bare:
+            return
+        local = self._class_node(bare)
+        if local is not None:
+            target = self._lookup_member(local, member) if member else local
+            if target is not None:
+                self._add(target)
+            return
+        # Declared elsewhere: only this file's imports can name it.
+        symbol = f"{bare}.{member}" if member else bare
+        direct = self.imports.get(bare)
+        for import_id in ([direct] if direct else self.wildcards):
+            self._add_pending(import_id, symbol)
+
     # -- traversal --------------------------------------------------------
+
+    def visit_import_declaration(self, node) -> None:
+        raw = self._text(node).removeprefix("import").strip().rstrip(";").strip()
+        if not raw:
+            return
+        path, kind, segment = _java_import_parts(raw)
+        nid = f"{self.module_id}.import_{segment}"
+        if kind == "class":
+            self.imports[path.rsplit(".", 1)[-1]] = nid
+        elif kind == "static":
+            self.static_members[path.rsplit(".", 1)[-1]] = nid
+        elif kind == "wildcard":
+            self.wildcards.append(nid)
+        else:
+            self.static_wildcards.append(nid)
 
     def _visit_type(self, node) -> None:
         name = self._ts_name(node)
@@ -2198,14 +2287,14 @@ class _JavaCallVisitor(_BaseVisitor):
             type_node = member.child_by_field_name("type")
             if type_node is None:
                 continue
-            target = self._class_node(self._text(type_node))
-            if target is None:
+            declared = _java_bare_type(self._text(type_node))
+            if not declared:
                 continue
             for child in member.children:
                 if child.type == "variable_declarator":
                     field_name = self._text(child.child_by_field_name("name"))
                     if field_name:
-                        found[field_name] = target
+                        found[field_name] = declared
         return found
 
     def _visit_member(self, node) -> None:
@@ -2225,64 +2314,67 @@ class _JavaCallVisitor(_BaseVisitor):
 
     def visit_local_variable_declaration(self, node) -> None:
         type_node = node.child_by_field_name("type")
-        target = self._class_node(self._text(type_node)) if type_node else None
+        declared = _java_bare_type(self._text(type_node)) if type_node else ""
         for child in node.children:
             if child.type != "variable_declarator":
                 continue
             var_name = self._text(child.child_by_field_name("name"))
             if var_name:
-                if target is not None:
-                    self._locals[-1][var_name] = target
+                if declared:
+                    self._locals[-1][var_name] = declared
                 else:
                     self._locals[-1].pop(var_name, None)
         self._recurse(node)
 
     def visit_method_invocation(self, node) -> None:
-        target = self._resolve_invocation(node)
-        if target is not None:
-            self._add(target)
+        self._resolve_invocation(node)
         self._recurse(node)
 
     def visit_object_creation_expression(self, node) -> None:
         type_node = node.child_by_field_name("type")
-        target = self._class_node(self._text(type_node)) if type_node else None
-        if target is not None:
-            self._add(target)
+        if type_node is not None:
+            self._dispatch(self._text(type_node), "")
         self._recurse(node)
 
-    def _resolve_invocation(self, node) -> str | None:
+    def _resolve_invocation(self, node) -> None:
         name_node = node.child_by_field_name("name")
         if name_node is None:
-            return None
+            return
         name = self._text(name_node)
         receiver = node.child_by_field_name("object")
 
         # `validateCard(card)` and `this.validateCard(card)` are the same thing.
         if receiver is None or receiver.type == "this":
-            return (
-                self._lookup_member(self._class_stack[-1], name)
-                if self._class_stack else None
-            )
+            target = (self._lookup_member(self._class_stack[-1], name)
+                      if self._class_stack else None)
+            if target is not None:
+                self._add(target)
+            elif receiver is None:
+                # A bare name can also be a statically imported member. An
+                # explicit `this.` cannot, which is why the two differ here.
+                static = self.static_members.get(name)
+                for import_id in ([static] if static else self.static_wildcards):
+                    self._add_pending(import_id, name)
+            return
 
         if receiver.type == "super":
             base = self._first_base(self._class_stack[-1]) if self._class_stack else None
-            return self._lookup_member(base, name) if base else None
+            target = self._lookup_member(base, name) if base else None
+            if target is not None:
+                self._add(target)
+            return
 
         if receiver.type == "identifier":
             receiver_name = self._text(receiver)
             # A local variable shadows a field, which shadows a class name.
-            class_id = self._locals[-1].get(receiver_name)
-            if class_id is None and self._class_stack:
-                class_id = self._fields.get(self._class_stack[-1], {}).get(receiver_name)
-            if class_id is None:
-                # `Child.helper()` — a static call on a class declared here.
-                class_id = self._class_node(receiver_name)
-            if class_id is not None:
-                return self._lookup_member(class_id, name)
+            declared = self._locals[-1].get(receiver_name)
+            if declared is None and self._class_stack:
+                declared = self._fields.get(self._class_stack[-1], {}).get(receiver_name)
+            # `Child.helper()` — a static call, on a local class or an imported one.
+            self._dispatch(declared or receiver_name, name)
 
         # field_access (System.out.println), array access, chained calls:
         # not resolvable to a node in this file.
-        return None
 
 def _index_java_regex(source: str, rel_path: Path, file_id: str) -> tuple[list[dict], list[dict]]:
     """Regex fallback for Java. Captures packages, imports, types and members.
@@ -2325,15 +2417,13 @@ def _index_java_regex(source: str, rel_path: Path, file_id: str) -> tuple[list[d
         _add(m.group(1), "package", _lineno(source, m.start()), file_id)
 
     for m in _JAVA_IMPORT_RE.finditer(source):
-        module = m.group(1)
-        nid = f"{file_id}.import_{module.rsplit('.', 1)[-1]}"
-        nodes.append({
-            "id": nid, "label": module, "type": "import", "description": "",
-            "source_file": str(rel_path),
-            "source_location": f"L{_lineno(source, m.start())}",
-            "file_type": "code",
-        })
-        edges.append({"source": file_id, "target": nid, "relation": "imports_from"})
+        record = _java_import_node(m.group(1), file_id, rel_path,
+                                   _lineno(source, m.start()))
+        if record is None:
+            continue
+        nodes.append(record)
+        edges.append({"source": file_id, "target": record["id"],
+                      "relation": "imports_from"})
 
     for m in _JAVA_TYPE_RE.finditer(source):
         kind, name = m.group(1), m.group(2)
@@ -2420,7 +2510,9 @@ def _java_regex_call_edges(
 
     Resolves the same shapes as the AST branch except fields injected by DI:
     the regex parser emits no field nodes, so a field's declared type is not
-    available. That is a missing edge, never a wrong one.
+    available. That is a missing edge, never a wrong one. Calls onto an
+    imported type are parked on the import node for the cross-file pass, the
+    same as in the AST branch.
 
     Args:
         source: Raw file text.
@@ -2469,34 +2561,101 @@ def _java_regex_call_edges(
         return (best[1], best[2]) if best else None
 
     edges: list[dict] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
+
+    # Imports, so a call onto a type declared in another file is not lost.
+    imports: dict[str, str] = {}
+    static_members: dict[str, str] = {}
+    wildcards: list[str] = []
+    static_wildcards: list[str] = []
+    for node in nodes:
+        if node.get("type") != "import" or _JAVA_IMPORT_KIND not in node:
+            continue
+        path, kind, nid = node[_JAVA_IMPORT_FQN], node[_JAVA_IMPORT_KIND], node["id"]
+        if kind == "class":
+            imports[path.rsplit(".", 1)[-1]] = nid
+        elif kind == "static":
+            static_members[path.rsplit(".", 1)[-1]] = nid
+        elif kind == "wildcard":
+            wildcards.append(nid)
+        else:
+            static_wildcards.append(nid)
 
     def _add(caller: str, target: str) -> None:
-        key = (caller, target)
+        key = (caller, target, "")
         if key in seen or target not in kinds:
             return
         seen.add(key)
         edges.append({"source": caller, "target": target, "relation": "calls"})
 
+    def _add_pending(caller: str, import_id: str, symbol: str) -> None:
+        key = (caller, import_id, symbol)
+        if key in seen:
+            return
+        seen.add(key)
+        edges.append({"source": caller, "target": import_id, "relation": "calls",
+                      _PENDING_SYMBOL: symbol})
+
     def _member_of(class_id: str, name: str) -> str | None:
         candidate = f"{class_id}.{name}"
         return candidate if candidate in members else None
 
-    # Locals declared inside each method body, scoped to that method.
+    def _dispatch(caller: str, type_name: str, member: str) -> None:
+        """Resolve here, or park the call on the import that names the type."""
+        bare = _java_bare_type(type_name)
+        if not bare:
+            return
+        class_id = classes.get(bare)
+        if class_id is not None:
+            target = _member_of(class_id, member) if member else class_id
+            if target is not None:
+                _add(caller, target)
+            return
+        symbol = f"{bare}.{member}" if member else bare
+        direct = imports.get(bare)
+        for import_id in ([direct] if direct else wildcards):
+            _add_pending(caller, import_id, symbol)
+
+    # Class bodies, so a declaration outside any method can be read as a field.
+    class_spans: list[tuple[int, int, str]] = []
+    for node in nodes:
+        if node.get("type") not in ("class", "interface", "enum", "record"):
+            continue
+        location = str(node.get("source_location", ""))
+        if not location.startswith("L") or not location[1:].isdigit():
+            continue
+        start = _ts_decl_offset(clean, int(location[1:]), node["label"])
+        span = _ts_body_span(clean, start) if start is not None else None
+        if span is not None and span[1] > span[0]:
+            class_spans.append((span[0], span[1], node["id"]))
+
+    def _enclosing_class(offset: int) -> str | None:
+        best: tuple[int, str] | None = None
+        for begin, end, nid in class_spans:
+            if begin < offset < end and (best is None or end - begin < best[0]):
+                best = (end - begin, nid)
+        return best[1] if best else None
+
+    # Locals declared inside each method body, scoped to that method. The
+    # declared type name is kept, not just a resolved id, so an imported type
+    # survives to the dispatch step. The same shape outside every method body
+    # is a field — the regex parser emits no field nodes, but the declaration
+    # is right there and it is what makes an injected collaborator navigable.
     local_types: dict[tuple[str, str], str] = {}
+    field_types: dict[str, dict[str, str]] = {}
     for match in _JAVA_LOCAL_DECL_RE.finditer(clean):
         enclosing = _enclosing(match.start())
-        if not enclosing:
+        if enclosing:
+            local_types[(enclosing[0], match.group(2))] = match.group(1)
             continue
-        class_id = classes.get(match.group(1))
-        if class_id is not None:
-            local_types[(enclosing[0], match.group(2))] = class_id
+        owner = _enclosing_class(match.start())
+        if owner:
+            field_types.setdefault(owner, {})[match.group(2)] = match.group(1)
 
     for match in _JAVA_NEW_RE.finditer(clean):
         enclosing = _enclosing(match.start())
-        target = classes.get(match.group(1))
-        if enclosing and target:
-            _add(enclosing[0], target)
+        if enclosing:
+            _dispatch(enclosing[0], match.group(1), "")
 
     for match in _JAVA_THIS_CALL_RE.finditer(clean):
         enclosing = _enclosing(match.start())
@@ -2533,13 +2692,11 @@ def _java_regex_call_edges(
         enclosing = _enclosing(match.start())
         if not enclosing:
             continue
-        # A local variable shadows a class name, exactly as in the AST branch.
-        class_id = local_types.get((enclosing[0], receiver)) or classes.get(receiver)
-        if class_id is None:
-            continue
-        member = _member_of(class_id, name)
-        if member:
-            _add(enclosing[0], member)
+        # A local shadows a field, which shadows a class name — as in the AST branch.
+        declared = (local_types.get((enclosing[0], receiver))
+                    or field_types.get(enclosing[1], {}).get(receiver)
+                    or receiver)
+        _dispatch(enclosing[0], declared, name)
 
     for match in _JAVA_BARE_CALL_RE.finditer(clean):
         name = match.group(1)
@@ -2551,6 +2708,10 @@ def _java_regex_call_edges(
         member = _member_of(enclosing[1], name)
         if member:
             _add(enclosing[0], member)
+            continue
+        static = static_members.get(name)
+        for import_id in ([static] if static else static_wildcards):
+            _add_pending(enclosing[0], import_id, name)
 
     return edges
 
@@ -5735,6 +5896,162 @@ def _resolve_ts_symbol(
     return None
 
 
+def _build_java_symbol_index(nodes: list[dict]) -> dict[str, str]:
+    """Index Java types by fully-qualified name and by simple name.
+
+    `com.example.payments.PaymentGateway` and `PaymentGateway` both point at
+    the same node id. A simple name shared by two classes is dropped, so only
+    the fully-qualified form resolves it — which is exactly what an `import`
+    statement always provides.
+
+    The qualified name is rebuilt from the node id relative to its file, not
+    from the label, so a nested class comes out as `com.example.Outer.Inner`
+    rather than colliding with a top-level `com.example.Inner`.
+
+    Args:
+        nodes: Every node in the project graph.
+
+    Returns:
+        Mapping of qualified or unambiguous simple name to node id.
+    """
+    packages: dict[str, str] = {}
+    modules: dict[str, str] = {}
+    for node in nodes:
+        source = str(node.get("source_file", ""))
+        if not source.endswith(".java"):
+            continue
+        if node.get("type") == "package":
+            packages[source] = node.get("label", "")
+        elif node.get("type") == "module":
+            modules[source] = node["id"]
+
+    index: dict[str, str] = {}
+    by_simple: dict[str, set[str]] = {}
+    for node in nodes:
+        source = str(node.get("source_file", ""))
+        if node.get("type") not in _JAVA_TYPE_NODES or not source.endswith(".java"):
+            continue
+        simple = node.get("label", "")
+        if not simple:
+            continue
+        by_simple.setdefault(simple, set()).add(node["id"])
+        package, module = packages.get(source), modules.get(source)
+        if not package or not module:
+            continue
+        nid = node["id"]
+        nested = nid[len(module) + 1:] if nid.startswith(f"{module}.") else simple
+        index[f"{package}.{nested}"] = nid
+
+    for simple, ids in by_simple.items():
+        if len(ids) == 1:
+            index.setdefault(simple, next(iter(ids)))
+    return index
+
+
+def _resolve_java_cross_file_calls(
+    nodes: list[dict], edges: list[dict], java_symbol_index: dict[str, str]
+) -> list[dict]:
+    """Rewrite Java calls routed through an import node to their real target.
+
+    Java names one class per import, which makes resolution more direct than
+    TypeScript's named-import lists and more precise than Go's whole-package
+    import. Ambiguity only enters through wildcards, and it is resolved by
+    silence: a simple name reachable through two `import pkg.*` lines resolves
+    to neither.
+
+    Args:
+        nodes: Every node in the project graph.
+        edges: Every edge, including pending import-node calls.
+        java_symbol_index: Output of _build_java_symbol_index.
+
+    Returns:
+        The edge list with Java pending calls resolved and unresolvable ones
+        dropped. Edges belonging to other languages pass through untouched,
+        pending key included, for the resolver that owns them.
+    """
+    kinds = {n["id"]: n.get("type", "") for n in nodes}
+    known_ids = set(kinds)
+    import_ids = {nid for nid, kind in kinds.items() if kind == "import"}
+
+    by_file: dict[str, list[dict]] = {}
+    import_source: dict[str, str] = {}
+    for node in nodes:
+        if node.get("type") == "import" and _JAVA_IMPORT_KIND in node:
+            source = str(node.get("source_file", ""))
+            by_file.setdefault(source, []).append(node)
+            import_source[node["id"]] = source
+
+    def _class_for(simple: str, source: str) -> str | None:
+        """Node id the file's imports give to *simple*, or None if unclear."""
+        found: set[str] = set()
+        for node in by_file.get(source, ()):
+            path, kind = node[_JAVA_IMPORT_FQN], node[_JAVA_IMPORT_KIND]
+            if kind == "class" and path.rsplit(".", 1)[-1] == simple:
+                found.add(java_symbol_index.get(path) or "")
+            elif kind == "wildcard":
+                found.add(java_symbol_index.get(f"{path[:-1]}{simple}") or "")
+        found.discard("")
+        return next(iter(found)) if len(found) == 1 else None
+
+    def _static_member_for(name: str, source: str) -> str | None:
+        """Node id of a statically imported member, or None if unclear."""
+        found: set[str] = set()
+        for node in by_file.get(source, ()):
+            path, kind = node[_JAVA_IMPORT_FQN], node[_JAVA_IMPORT_KIND]
+            if kind == "static" and path.rsplit(".", 1)[-1] == name:
+                owner = java_symbol_index.get(path.rsplit(".", 1)[0])
+            elif kind == "static_wildcard":
+                owner = java_symbol_index.get(path[:-2])
+            else:
+                continue
+            if owner and f"{owner}.{name}" in known_ids:
+                found.add(f"{owner}.{name}")
+        return next(iter(found)) if len(found) == 1 else None
+
+    resolved: list[dict] = []
+    seen_calls: set[tuple[str, str]] = set()
+    for edge in edges:
+        if edge.get("relation") == "calls" and edge.get("target") not in import_ids:
+            seen_calls.add((edge["source"], edge["target"]))
+
+    for edge in edges:
+        if (edge.get("relation") != "calls"
+                or edge.get("target") not in import_source):
+            # Not ours: a Python or TypeScript pending edge keeps its key for
+            # the resolver that can read it.
+            resolved.append(edge)
+            continue
+
+        symbol = edge.get(_PENDING_SYMBOL)
+        if not symbol:
+            continue
+        source_file = import_source[edge["target"]]
+
+        if "." in symbol:
+            simple, member = symbol.split(".", 1)
+            owner = _class_for(simple, source_file)
+            target = f"{owner}.{member}" if owner else None
+            if target not in known_ids:
+                target = None
+        else:
+            # A bare symbol is either a statically imported member or, from a
+            # `new`, the imported class itself.
+            target = (_static_member_for(symbol, source_file)
+                      or _class_for(symbol, source_file))
+
+        if target is None or target == edge["source"]:
+            continue
+        key = (edge["source"], target)
+        if key in seen_calls:
+            continue
+        seen_calls.add(key)
+        resolved.append(
+            {"source": edge["source"], "target": target, "relation": "calls"}
+        )
+
+    return resolved
+
+
 def _resolve_ts_cross_file_calls(
     nodes: list[dict], edges: list[dict], ts_symbol_index: dict[str, str]
 ) -> list[dict]:
@@ -5894,6 +6211,11 @@ def index_project(
 
     filtered_edges = _resolve_cross_file_calls(
         unique_nodes, filtered_edges, _build_module_index(unique_nodes)
+    )
+    # Java runs before TypeScript: the TS pass is the sweeper that drops every
+    # unresolved pending edge, so a Java edge reaching it would be destroyed.
+    filtered_edges = _resolve_java_cross_file_calls(
+        unique_nodes, filtered_edges, _build_java_symbol_index(unique_nodes)
     )
     filtered_edges = _resolve_ts_cross_file_calls(
         unique_nodes, filtered_edges, _build_ts_symbol_index(unique_nodes)

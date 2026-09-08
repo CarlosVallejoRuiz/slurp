@@ -4,7 +4,7 @@
 
 # slurp
 
-![tests](https://img.shields.io/badge/tests-2035%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-2069%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 ![pypi](https://img.shields.io/badge/PyPI-slurp--graph-orange)
@@ -840,6 +840,8 @@ Next: slurp "your query" --graph /path/to/project/graphify-out/graph.json
 > - **Python**: `from X import f` followed by `f()`, plus `import X as m` + `m.f()`.
 > - **TypeScript/JavaScript**: named, namespace, default and aliased imports resolved.
 >   `type`-only imports ignored. `@/` aliases and barrel exports supported.
+> - **Java**: import statements resolved to their target class. Static imports and
+>   wildcard imports with unique candidates supported.
 >
 > An import only resolves when its *module* is part of the project. That single rule is what
 > keeps `from pathlib import Path` from binding to a local class of the same name, and

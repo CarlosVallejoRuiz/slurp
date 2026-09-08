@@ -223,6 +223,36 @@ uv sync --extra rust            # solo una
       2522 edges tree-sitter vs 2518 regex. Las 26 discrepancias restantes
       salen todas de un mismo fichero de bindings COM autogenerados.
     - Sin cross-file todavía.
+  - **Cross-file de Java**: cada `import` nombra una clase, así que la
+    resolución es más directa que la de TypeScript (listas de símbolos) y más
+    precisa que la de Go (paquete entero). El nodo import lleva
+    `_java_import` (ruta sin la keyword `static`) y `_java_import_type`
+    (`class`/`static`/`wildcard`/`static_wildcard`).
+    - **El resolutor de Java corre ANTES que el de TypeScript.** El pase de TS
+      es el barrendero: descarta todo edge pendiente cuyo nodo import no lleve
+      `_source_module`. Puesto después, TS habría destruido cada edge de Java.
+    - `_build_java_symbol_index()` indexa por FQN y por nombre corto; si el
+      corto colisiona solo resuelve el FQN — que es justo lo que un `import`
+      siempre proporciona. El FQN se reconstruye desde el **id del nodo
+      relativo a su fichero**, no desde el label: si no, una clase anidada
+      `Outer.Inner` colisiona con una `Inner` de primer nivel.
+    - La ambigüedad se resuelve con **silencio**: un nombre alcanzable por dos
+      `import pkg.*` no resuelve a ninguno.
+    - El id de un wildcard es su ruta completa (`import_com_alpha_*`). Con el
+      último segmento (`import_*`) dos wildcards del mismo fichero colapsaban
+      en un nodo y se perdía un paquete entero sin aviso.
+    - **Bug encontrado**: `_JAVA_IMPORT_RE` se comía la keyword en su propio
+      grupo de captura, así que todo import estático se registraba como si
+      fuera una clase. La keyword se conserva para clasificar y se quita del
+      label, que antes divergía entre ramas.
+    - La rama regex ya resuelve campos: no hacían falta nodos `field`, hacía
+      falta el **tipo declarado**. Localiza los cuerpos de clase y lee como
+      campo toda declaración que cae fuera de cualquier método. Con eso
+      desaparece la divergencia de ramas que quedaba en Java.
+    - Sin herencia cross-file ni resolución por paquete implícito (una clase
+      del mismo paquete usada sin `import` no tiene dónde aparcar el edge).
+    - Proyecto en capas de 16 ficheros estilo Spring: **5 → 30 calls (6×)**,
+      25 de ellos cross-file. Las dos ramas dan 30.
 
 ---
 
@@ -245,7 +275,7 @@ por debajo de la carpeta que abre el editor (`~/Desktop/Slurp/`). Todos los coma
 de este documento (`uv run pytest`, `ruff check`, `uv build`, `git`) se ejecutan
 desde `~/Desktop/Slurp/slurp/`, que es donde vive este CLAUDE.md.
 
-**Estado actual:** v0.9.7 · 2035 tests · `ruff check slurp/` limpio.
+**Estado actual:** v0.9.7 · 2069 tests · `ruff check slurp/` limpio.
 
 **⚠️ IMPORTANTE — `uv sync --extra X` desinstala los extras no mencionados.**
 Sincroniza al conjunto exacto de extras que le pases, así que añadir uno con
