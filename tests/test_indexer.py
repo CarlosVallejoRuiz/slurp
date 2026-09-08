@@ -4123,3 +4123,343 @@ class TestJavaCallEdges:
         calls = self._calls(tmp_path, source, tree_sitter=True, monkeypatch=monkeypatch)
         assert ("Payments.B.go", "Payments.Holder.run") in calls
         assert ("Payments.B.go", "Payments.Gw.run") not in calls
+
+
+RUST_CALL_SAMPLE = """\
+mod payments;
+
+fn hash_token(raw: &str) -> String { raw.to_string() }
+fn validate_card(number: &str) -> bool { true }
+
+pub struct PaymentGateway {
+    pub token_service: TokenService,
+}
+
+impl PaymentGateway {
+    pub fn charge(&self, card: &str, amount: f64) -> Option<String> {
+        if !validate_card(card) { return None; }
+        let token = hash_token(card);
+        let result = self.submit(&token, amount);
+        Some(result)
+    }
+
+    fn submit(&self, token: &str, amount: f64) -> String {
+        token.to_string()
+    }
+}
+
+pub fn checkout(cart: &HashMap<String, f64>) -> Option<String> {
+    let gw = PaymentGateway { token_service: TokenService::new() };
+    gw.charge("card", 100.0)
+}
+"""
+
+
+class TestRustCallEdges:
+    """`calls` edges for Rust, across both parser branches."""
+
+    BOTH = pytest.mark.parametrize(
+        "tree_sitter", [True, False], ids=["treesitter", "regex"]
+    )
+
+    def _skip(self, tree_sitter):
+        if tree_sitter and not _RUST_TS_AVAILABLE:
+            pytest.skip("requires the 'rust' extra")
+
+    def _index(self, tmp_path: Path, source: str, *, tree_sitter: bool, monkeypatch):
+        monkeypatch.setattr(indexer_mod, "_RUST_TS_AVAILABLE", tree_sitter)
+        f = tmp_path / "payments.rs"
+        f.write_text(source, encoding="utf-8")
+        return index_rust(f, tmp_path)
+
+    def _calls(self, tmp_path: Path, source: str, *, tree_sitter: bool,
+               monkeypatch) -> set[tuple[str, str]]:
+        _, edges = self._index(tmp_path, source, tree_sitter=tree_sitter,
+                               monkeypatch=monkeypatch)
+        return {(e["source"], e["target"]) for e in edges if e["relation"] == "calls"}
+
+    # -- the reference sample ---------------------------------------------
+
+    @BOTH
+    def test_sample_produces_exactly_the_expected_edges(self, tmp_path, monkeypatch,
+                                                        tree_sitter):
+        self._skip(tree_sitter)
+        calls = self._calls(tmp_path, RUST_CALL_SAMPLE, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert calls == {
+            ("payments.PaymentGateway.charge", "payments.validate_card"),
+            ("payments.PaymentGateway.charge", "payments.hash_token"),
+            ("payments.PaymentGateway.charge", "payments.PaymentGateway.submit"),
+            ("payments.checkout", "payments.PaymentGateway.charge"),
+        }
+
+    @BOTH
+    def test_field_of_external_type_produces_no_edge(self, tmp_path, monkeypatch,
+                                                     tree_sitter):
+        """TokenService is not declared here, so self.token_service.hash() dies."""
+        self._skip(tree_sitter)
+        calls = self._calls(tmp_path, RUST_CALL_SAMPLE, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert not any(target.endswith(".hash") for _, target in calls)
+
+    @BOTH
+    def test_struct_literal_is_not_a_call(self, tmp_path, monkeypatch, tree_sitter):
+        """`PaymentGateway { .. }` types the binding; it is not a constructor."""
+        self._skip(tree_sitter)
+        calls = self._calls(tmp_path, RUST_CALL_SAMPLE, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert ("payments.checkout", "payments.PaymentGateway") not in calls
+
+    # -- per behaviour ----------------------------------------------------
+
+    @BOTH
+    def test_call_to_function_in_the_same_module(self, tmp_path, monkeypatch,
+                                                 tree_sitter):
+        self._skip(tree_sitter)
+        source = "fn helper() -> u32 { 1 }\nfn run() -> u32 { helper() }\n"
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert ("payments.run", "payments.helper") in calls
+
+    @BOTH
+    def test_self_method_in_impl_block(self, tmp_path, monkeypatch, tree_sitter):
+        self._skip(tree_sitter)
+        source = ("struct S;\nimpl S {\n"
+                  "    fn run(&self) -> u32 { self.tick() }\n"
+                  "    fn tick(&self) -> u32 { 1 }\n}\n")
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert ("payments.S.run", "payments.S.tick") in calls
+
+    @BOTH
+    def test_self_type_associated_function(self, tmp_path, monkeypatch, tree_sitter):
+        self._skip(tree_sitter)
+        source = ("struct S;\nimpl S {\n"
+                  "    fn run(&self) -> u32 { Self::helper(1) }\n"
+                  "    fn helper(n: u32) -> u32 { n }\n}\n")
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert ("payments.S.run", "payments.S.helper") in calls
+
+    @BOTH
+    def test_struct_name_associated_function(self, tmp_path, monkeypatch, tree_sitter):
+        self._skip(tree_sitter)
+        source = ("struct S { n: u32 }\nimpl S {\n"
+                  "    fn new() -> Self { S { n: 0 } }\n}\n"
+                  "fn build() -> S { S::new() }\n")
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert ("payments.build", "payments.S.new") in calls
+
+    @BOTH
+    def test_macro_produces_no_edge(self, tmp_path, monkeypatch, tree_sitter):
+        self._skip(tree_sitter)
+        source = ("fn println(x: u32) -> u32 { x }\n"
+                  "fn run() { println!(\"{}\", 1); vec![1]; format!(\"{}\", 2); }\n")
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert calls == set()
+
+    @BOTH
+    def test_call_inside_a_macro_argument_is_not_an_edge(self, tmp_path, monkeypatch,
+                                                         tree_sitter):
+        """A macro's tokens are opaque to tree-sitter; both branches skip them."""
+        self._skip(tree_sitter)
+        source = ("fn helper() -> u32 { 1 }\n"
+                  "fn run() { assert_eq!(helper(), 1); }\n")
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert calls == set()
+
+    @BOTH
+    def test_external_trait_method_produces_no_edge(self, tmp_path, monkeypatch,
+                                                    tree_sitter):
+        self._skip(tree_sitter)
+        source = ("fn run() -> String {\n"
+                  "    let s = \"x\".to_string();\n"
+                  "    s.clone().into()\n}\n")
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert calls == set()
+
+    @BOTH
+    def test_std_path_call_produces_no_edge(self, tmp_path, monkeypatch, tree_sitter):
+        self._skip(tree_sitter)
+        source = "fn run() { std::mem::drop(1); String::new(); }\n"
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert calls == set()
+
+    @BOTH
+    def test_own_trait_impl_resolves(self, tmp_path, monkeypatch, tree_sitter):
+        """A default method on a trait implemented in this file is reachable."""
+        self._skip(tree_sitter)
+        source = ("pub trait Auditable {\n"
+                  "    fn audit(&self) -> u32 { 0 }\n}\n"
+                  "pub struct Gateway;\n"
+                  "impl Auditable for Gateway {}\n"
+                  "impl Gateway {\n"
+                  "    fn charge(&self) -> u32 { self.audit() }\n}\n")
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert ("payments.Gateway.charge", "payments.Auditable.audit") in calls
+
+    @BOTH
+    def test_local_typed_by_struct_literal(self, tmp_path, monkeypatch, tree_sitter):
+        self._skip(tree_sitter)
+        source = ("struct S { n: u32 }\nimpl S {\n    fn tick(&self) -> u32 { 1 }\n}\n"
+                  "fn run() -> u32 {\n    let s = S { n: 1 };\n    s.tick()\n}\n")
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert ("payments.run", "payments.S.tick") in calls
+
+    @BOTH
+    def test_local_with_explicit_type_annotation(self, tmp_path, monkeypatch,
+                                                 tree_sitter):
+        self._skip(tree_sitter)
+        source = ("struct S;\nimpl S {\n    fn tick(&self) -> u32 { 1 }\n"
+                  "    fn new() -> Self { S }\n}\n"
+                  "fn run() -> u32 {\n    let s: S = S::new();\n    s.tick()\n}\n")
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert ("payments.run", "payments.S.tick") in calls
+
+    @BOTH
+    def test_parameter_type_resolves(self, tmp_path, monkeypatch, tree_sitter):
+        """Rust declares parameter types, so nothing has to be inferred."""
+        self._skip(tree_sitter)
+        source = ("struct S;\nimpl S {\n    fn tick(&self) -> u32 { 1 }\n}\n"
+                  "fn drive(s: &S) -> u32 { s.tick() }\n")
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert ("payments.drive", "payments.S.tick") in calls
+
+    @BOTH
+    def test_field_of_local_type_resolves(self, tmp_path, monkeypatch, tree_sitter):
+        self._skip(tree_sitter)
+        source = ("pub struct Tokens;\n"
+                  "impl Tokens {\n    pub fn hash(&self) -> u32 { 1 }\n}\n"
+                  "pub struct Gw { pub tokens: Tokens }\n"
+                  "impl Gw {\n    fn charge(&self) -> u32 { self.tokens.hash() }\n}\n")
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert ("payments.Gw.charge", "payments.Tokens.hash") in calls
+
+    @BOTH
+    def test_recursive_function_gets_a_self_edge(self, tmp_path, monkeypatch,
+                                                 tree_sitter):
+        self._skip(tree_sitter)
+        source = "fn walk(n: u32) -> u32 { if n > 0 { walk(n - 1) } else { 0 } }\n"
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert ("payments.walk", "payments.walk") in calls
+
+    @BOTH
+    def test_duplicate_calls_emit_one_edge(self, tmp_path, monkeypatch, tree_sitter):
+        self._skip(tree_sitter)
+        source = ("fn helper() -> u32 { 1 }\n"
+                  "fn run() -> u32 { helper() + helper() + helper() }\n")
+        _, edges = self._index(tmp_path, source, tree_sitter=tree_sitter,
+                               monkeypatch=monkeypatch)
+        pairs = [(e["source"], e["target"]) for e in edges if e["relation"] == "calls"]
+        assert pairs.count(("payments.run", "payments.helper")) == 1
+
+    @BOTH
+    def test_comments_and_strings_do_not_produce_edges(self, tmp_path, monkeypatch,
+                                                       tree_sitter):
+        self._skip(tree_sitter)
+        source = ("fn helper() -> u32 { 1 }\n"
+                  "fn run() -> u32 {\n"
+                  "    // helper();\n"
+                  "    /* helper(); */\n"
+                  "    let s = \"helper()\";\n"
+                  "    0\n}\n")
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert calls == set()
+
+    @BOTH
+    def test_lifetime_is_not_read_as_a_char_literal(self, tmp_path, monkeypatch,
+                                                    tree_sitter):
+        """`&'a str` must not open a string that swallows the rest of the file."""
+        self._skip(tree_sitter)
+        source = ("fn helper<'a>(x: &'a str) -> &'a str { x }\n"
+                  "fn run<'a>(x: &'a str) -> &'a str { helper(x) }\n")
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert ("payments.run", "payments.helper") in calls
+
+    @BOTH
+    def test_module_scopes_do_not_leak(self, tmp_path, monkeypatch, tree_sitter):
+        """A call in `mod tests` resolves to its own module's function."""
+        self._skip(tree_sitter)
+        source = ("fn helper() -> u32 { 1 }\n"
+                  "mod tests {\n"
+                  "    fn helper() -> u32 { 2 }\n"
+                  "    fn run() -> u32 { helper() }\n}\n")
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert ("payments.tests.run", "payments.tests.helper") in calls
+        assert ("payments.tests.run", "payments.helper") not in calls
+
+    @BOTH
+    def test_bare_call_never_resolves_to_a_method(self, tmp_path, monkeypatch,
+                                                  tree_sitter):
+        """Rust has no implicit receiver: a bare `tick()` is not `self.tick()`."""
+        self._skip(tree_sitter)
+        source = ("struct S;\nimpl S {\n"
+                  "    fn run(&self) -> u32 { tick() }\n"
+                  "    fn tick(&self) -> u32 { 1 }\n}\n")
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert ("payments.S.run", "payments.S.tick") not in calls
+
+    @BOTH
+    def test_trait_signature_without_body_owns_no_calls(self, tmp_path, monkeypatch,
+                                                        tree_sitter):
+        self._skip(tree_sitter)
+        source = ("fn helper() -> u32 { 1 }\n"
+                  "pub trait T {\n    fn get(&self) -> u32;\n}\n"
+                  "fn run() -> u32 { helper() }\n")
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert calls == {("payments.run", "payments.helper")}
+
+    @BOTH
+    def test_generic_impl_attaches_to_the_struct(self, tmp_path, monkeypatch,
+                                                 tree_sitter):
+        """`impl<'a> W<'a>` must not create a `W<'a>` id no edge can reach."""
+        self._skip(tree_sitter)
+        source = ("struct W<'a> { s: &'a str }\n"
+                  "impl<'a> W<'a> {\n"
+                  "    fn run(&self) -> u32 { self.tick() }\n"
+                  "    fn tick(&self) -> u32 { 1 }\n}\n")
+        nodes, _ = self._index(tmp_path, source, tree_sitter=tree_sitter,
+                               monkeypatch=monkeypatch)
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch)
+        assert "payments.W.tick" in _ids(nodes)
+        assert ("payments.W.run", "payments.W.tick") in calls
+
+    @BOTH
+    def test_call_edges_only_reference_existing_nodes(self, tmp_path, monkeypatch,
+                                                      tree_sitter):
+        self._skip(tree_sitter)
+        nodes, edges = self._index(tmp_path, RUST_CALL_SAMPLE,
+                                   tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        ids = _ids(nodes)
+        for e in edges:
+            if e["relation"] == "calls":
+                assert e["source"] in ids and e["target"] in ids
+
+    @BOTH
+    def test_existing_edges_are_unaffected(self, tmp_path, monkeypatch, tree_sitter):
+        self._skip(tree_sitter)
+        source = ("pub trait Storage { fn get(&self) -> u32; }\n"
+                  "pub struct Db;\n"
+                  "impl Storage for Db {\n    fn get(&self) -> u32 { 1 }\n}\n")
+        nodes, edges = self._index(tmp_path, source, tree_sitter=tree_sitter,
+                                   monkeypatch=monkeypatch)
+        assert ("payments.Db", "Storage") in _relations(edges, "implements")
+        assert ("payments.Db", "payments.Db.get") in _relations(edges, "contains")
+        assert "payments.Storage" in _ids(nodes)

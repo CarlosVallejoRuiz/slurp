@@ -4,7 +4,7 @@
 
 # slurp
 
-![tests](https://img.shields.io/badge/tests-1983%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-2035%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 ![pypi](https://img.shields.io/badge/PyPI-slurp--graph-orange)
@@ -811,20 +811,21 @@ Indexing /path/to/project ...
 Next: slurp "your query" --graph /path/to/project/graphify-out/graph.json
 ```
 
-> **Call graph (Python, TypeScript, JavaScript, Go, Java):** `slurp index` extracts `calls`
-> edges between functions, enabling accurate risk analysis in
+> **Call graph (Python, TypeScript, JavaScript, Go, Java, Rust):** `slurp index` extracts
+> `calls` edges between functions, enabling accurate risk analysis in
 > [`slurp explain`](#slurp-explain) and impact propagation in [`slurp diff`](#slurp-diff).
 >
-> | | Python | TypeScript / JavaScript | Go | Java |
-> |---|---|---|---|---|
-> | Direct calls | `helper()` | `helper()` | `helper()` (same package) | `helper()` |
-> | Own methods | `self.m()`, `cls.m()` | `this.m()` | `p.m()` on the receiver | `this.m()` |
-> | Inherited methods | ✅ base class in the same file | ✅ tree-sitter only | — | ✅ incl. `super.m()` |
-> | Constructors | `ClassName()` | `new ClassName()` | `&Struct{}`, `Struct{}` | `new ClassName()` |
-> | Typed local variable | `x = ClassName()` | `const x = new C()`, `const x: C = …` | `x := &S{}`, `var x S` | `C x = …` (declared) |
-> | Static calls | — | — | — | `ClassName.method()` |
-> | Fields | — | — | — | ✅ declared type, incl. `@Autowired` |
-> | Parser | stdlib `ast` | tree-sitter, with a regex fallback | regex | tree-sitter, with a regex fallback |
+> | | Python | TypeScript / JavaScript | Go | Java | Rust |
+> |---|---|---|---|---|---|
+> | Direct calls | `helper()` | `helper()` | `helper()` (same package) | `helper()` | `helper()` |
+> | Own methods | `self.m()`, `cls.m()` | `this.m()` | `p.m()` on the receiver | `this.m()` | `self.m()` in an `impl` |
+> | Inherited methods | ✅ base class in the same file | ✅ tree-sitter only | — | ✅ incl. `super.m()` | ✅ traits `impl`d in the file |
+> | Constructors | `ClassName()` | `new ClassName()` | `&Struct{}`, `Struct{}` | `new ClassName()` | `Type::new()` |
+> | Typed local variable | `x = ClassName()` | `const x = new C()`, `const x: C = …` | `x := &S{}`, `var x S` | `C x = …` (declared) | `let x: T`, `let x = T {…}` |
+> | Static calls | — | — | — | `ClassName.method()` | `Type::assoc()`, `Self::assoc()` |
+> | Fields | — | — | — | ✅ declared type, incl. `@Autowired` | ✅ declared type |
+> | Parameters | — | — | — | — | ✅ declared type |
+> | Parser | stdlib `ast` | tree-sitter, with a regex fallback | regex | tree-sitter, with a regex fallback | tree-sitter, with a regex fallback |
 >
 > **Anything that cannot be resolved with certainty emits no edge** — stdlib and
 > third-party calls, a method on an object of unknown type, a chained or computed callee.
@@ -855,11 +856,30 @@ Next: slurp "your query" --graph /path/to/project/graphify-out/graph.json
 > whenever its declared type is a class in the same file, which is what makes dependency-
 > injected collaborators navigable. A field whose type lives elsewhere resolves to nothing.
 >
+> **Rust** resolves within a file, with no cross-file pass yet. Methods live in `impl`
+> blocks, not in the `struct`, so a method's node id is `module.Type.method` and every
+> `impl Type` block — including `impl Trait for Type` — contributes to the same type. The
+> `self` receiver (`self`, `&self`, `&mut self`) resolves to the enclosing `impl`, `Self::`
+> and `Type::` to an associated function, and a trait's default method resolves through
+> `impl Trait for Type` when the trait is declared in the same file. Types are *declared* in
+> Rust — parameters, struct fields and `let` annotations — so nothing is inferred from an
+> initialiser; `Type::new()` also resolves through a return type declared as `Self`.
+>
+> Two things are deliberately silent. **Macros never produce an edge**, including the calls
+> written inside them: `println!`, `vec!` and `format!` are macro invocations, and even
+> `assert_eq!(build(), 1)` yields nothing, because a macro body is an opaque token tree
+> whose contents are not parsed as code. **External traits are ignored** — `to_string()`,
+> `clone()` and `into()` resolve to nothing, as does any receiver whose type is not declared
+> in the file. A bare `helper()` never resolves to a method either: Rust has no implicit
+> receiver, so inside `impl Gateway` a bare `submit()` is a free function, not `self.submit`.
+>
 > Without the `ts` extra, TypeScript falls back to regex, which blanks comments and string
 > literals before scanning and resolves everything above **except** methods inherited from a
 > base class. Without the `java` extra, Java falls back to regex, which resolves everything
 > above **except** fields, since the regex parser emits no field nodes to read a type from.
-> The remaining 12 languages still emit `contains` and `imports_from` only.
+> Without the `rust` extra, Rust falls back to regex, which resolves everything above:
+> across 600 files from crates.io the two branches agree exactly on 589 of them.
+> The remaining 11 languages still emit `contains` and `imports_from` only.
 
 | Flag | Default | Description |
 |---|---|---|

@@ -2669,7 +2669,9 @@ class _RustVisitor(_BaseVisitor):
         """
         type_node = node.child_by_field_name("type")
         trait_node = node.child_by_field_name("trait")
-        type_name = self._text(type_node)
+        # `impl<'a> Walker<'a>` must attach to the `Walker` struct node. Keeping
+        # the generics made `Walker<'a>.next` an id no other edge could reach.
+        type_name = _rust_bare_type(self._text(type_node))
         if not type_name:
             self._recurse(node)
             return
@@ -2718,6 +2720,344 @@ class _RustVisitor(_BaseVisitor):
         self._edge(self._parent, nid, "imports_from")
 
 
+
+_RUST_TYPE_DECLS = frozenset({"struct", "enum", "trait"})
+_RUST_TYPE_CONTAINERS = frozenset({
+    "struct_item", "enum_item", "trait_item", "union_item",
+})
+_RUST_REF_PREFIXES = ("&", "mut ", "dyn ", "impl ")
+_RUST_LIFETIME_RE = re.compile(r"^'\w+\s*")
+
+
+def _rust_bare_type(text: str) -> str:
+    """Reduce a type expression to the bare name a node id can be built from.
+
+    `&'a mut Gateway` -> `Gateway`, `crate::pay::Gateway` -> `Gateway`,
+    `Vec<Gateway>` -> `Vec`. References, mutability and lifetimes carry
+    ownership, not identity, so they are stripped; the generic *head* is kept
+    because that is the type a method would be looked up on.
+    """
+    name = text.strip()
+    while True:
+        stripped = name
+        for prefix in _RUST_REF_PREFIXES:
+            if stripped.startswith(prefix):
+                stripped = stripped[len(prefix):].strip()
+        stripped = _RUST_LIFETIME_RE.sub("", stripped)
+        if stripped == name:
+            break
+        name = stripped
+    name = name.split("<", 1)[0].strip()
+    return name.rsplit("::", 1)[-1].strip()
+
+
+class _RustCallVisitor(_BaseVisitor):
+    """Pass 2 — resolve Rust calls to definitions in this file.
+
+    Rebuilds the same scope stack as _RustVisitor, so a caller's id always
+    matches the node id emitted there. A prescan runs first to record trait
+    implementations, struct field types and function return types, because a
+    method may be called from a function declared above the `impl` block that
+    defines it.
+
+    Macros never produce an edge: `println!` is a `macro_invocation`, a
+    different node type from `call_expression`, so they cost nothing to skip.
+    """
+
+    def __init__(self, rel_path: Path, file_id: str, symbols: dict[str, str]) -> None:
+        super().__init__(rel_path, file_id)
+        self.symbols = symbols
+        self.module_id = file_id
+        # Type node id -> trait names named in `impl Trait for Type`.
+        self.traits: dict[str, list[str]] = {}
+        # Type node id -> field name -> type node id, from declared field types.
+        self.fields: dict[str, dict[str, str]] = {}
+        # Function node id -> type node id it returns, when that is knowable.
+        self.returns: dict[str, str] = {}
+        self._impl_stack: list[str] = []
+        self._locals: list[dict[str, str]] = [{}]
+        # Scopes a bare `foo()` may resolve against: the file and its modules,
+        # never an impl block. Rust has no implicit receiver, so inside
+        # `impl Gateway` a bare `submit()` is a free function, not `self.submit`.
+        self._value_scopes: list[str] = [file_id]
+        self._seen: set[tuple[str, str]] = set()
+
+    # -- lookups ----------------------------------------------------------
+
+    def _type_node(self, type_text: str) -> str | None:
+        """Node id of a type declared in this file, or None."""
+        bare = _rust_bare_type(type_text)
+        if not bare:
+            return None
+        for scope in reversed(self._value_scopes):
+            candidate = f"{scope}.{bare}"
+            if self.symbols.get(candidate) in _RUST_TYPE_DECLS:
+                return candidate
+        return None
+
+    def _lookup_method(self, type_id: str | None, name: str) -> str | None:
+        """Resolve *name* on *type_id*, then on the traits it implements.
+
+        A trait method only resolves to the trait's own node when the type does
+        not define it, which is what `impl Trait for Type` means at runtime.
+        """
+        if not type_id or not name:
+            return None
+        seen: set[str] = set()
+        queue = [type_id]
+        while queue:
+            current = queue.pop(0)
+            if current in seen:
+                continue
+            seen.add(current)
+            candidate = f"{current}.{name}"
+            if self.symbols.get(candidate) == "function":
+                return candidate
+            for trait in self.traits.get(current, []):
+                trait_id = self._type_node(trait)
+                if trait_id is not None:
+                    queue.append(trait_id)
+        return None
+
+    def _lookup_function(self, name: str) -> str | None:
+        """Resolve a bare `name()` against the enclosing module scopes."""
+        for scope in reversed(self._value_scopes):
+            candidate = f"{scope}.{name}"
+            if self.symbols.get(candidate) == "function":
+                return candidate
+        return None
+
+    def _type_of_expr(self, node) -> str | None:
+        """Type node id of a receiver expression, when it is knowable.
+
+        Resolves `self`, a local binding or parameter, and `self.field`.
+        A chained call, a literal or anything else resolves to nothing.
+        """
+        if node is None:
+            return None
+        if node.type == "self":
+            return self._impl_stack[-1] if self._impl_stack else None
+        if node.type == "identifier":
+            return self._locals[-1].get(self._text(node))
+        if node.type == "field_expression":
+            owner = self._type_of_expr(node.child_by_field_name("value"))
+            field = self._text(node.child_by_field_name("field"))
+            return self.fields.get(owner, {}).get(field) if owner else None
+        return None
+
+    def _resolve_call(self, fn) -> str | None:
+        if fn is None:
+            return None
+        if fn.type == "identifier":
+            return self._lookup_function(self._text(fn))
+        if fn.type == "scoped_identifier":
+            path = fn.child_by_field_name("path")
+            name = self._text(fn.child_by_field_name("name"))
+            # `std::mem::swap` nests a scoped_identifier; only a single
+            # segment can name a type declared in this file.
+            if path is None or path.type != "identifier" or not name:
+                return None
+            path_text = self._text(path)
+            if path_text == "Self":
+                owner = self._impl_stack[-1] if self._impl_stack else None
+            else:
+                owner = self._type_node(path_text)
+            return self._lookup_method(owner, name)
+        if fn.type == "field_expression":
+            owner = self._type_of_expr(fn.child_by_field_name("value"))
+            return self._lookup_method(owner, self._text(fn.child_by_field_name("field")))
+        return None
+
+    def _add(self, target: str) -> None:
+        key = (self._parent, target)
+        if key in self._seen:
+            return
+        self._seen.add(key)
+        self.edges.append(
+            {"source": self._parent, "target": target, "relation": "calls"}
+        )
+
+    # -- prescan ----------------------------------------------------------
+
+    def prescan(self, node, scope: str | None = None, impl_type: str | None = None) -> None:
+        """Record traits, field types and return types before resolving calls."""
+        scope = self.module_id if scope is None else scope
+        for child in node.children:
+            if child.type == "mod_item":
+                name = self._ts_name(child)
+                nested = f"{scope}.{name}" if name else scope
+                if name:
+                    self._value_scopes.append(nested)
+                self.prescan(child, nested, None)
+                if name:
+                    self._value_scopes.pop()
+            elif child.type in _RUST_TYPE_CONTAINERS:
+                name = self._ts_name(child)
+                if not name:
+                    continue
+                nested = f"{scope}.{name}"
+                self._collect_fields(child, nested)
+                self.prescan(child, nested, nested)
+            elif child.type == "impl_item":
+                type_name = _rust_bare_type(self._text(child.child_by_field_name("type")))
+                if not type_name:
+                    continue
+                nested = f"{scope}.{type_name}"
+                trait_node = child.child_by_field_name("trait")
+                if trait_node is not None:
+                    self.traits.setdefault(nested, []).append(self._text(trait_node))
+                self.prescan(child, nested, nested)
+            elif child.type in ("function_item", "function_signature_item"):
+                name = self._ts_name(child)
+                if name and impl_type:
+                    self._record_return(f"{scope}.{name}", child, impl_type)
+            else:
+                self.prescan(child, scope, impl_type)
+
+    def _record_return(self, fn_id: str, node, impl_type: str) -> None:
+        """Bind an associated function to the type it returns, when declared.
+
+        Only an exact `Self` or the impl type itself counts. `Option<Self>` is
+        deliberately excluded: the value is an Option, not the type.
+        """
+        declared = self._text(node.child_by_field_name("return_type")).strip()
+        if not declared:
+            return
+        if declared == "Self" or declared == impl_type.rsplit(".", 1)[-1]:
+            self.returns[fn_id] = impl_type
+
+    def _collect_fields(self, node, type_id: str) -> None:
+        """Map a struct's field names to the types they declare."""
+        for child in node.children:
+            if child.type != "field_declaration_list":
+                continue
+            for field in child.children:
+                if field.type != "field_declaration":
+                    continue
+                name = self._text(field.child_by_field_name("name"))
+                declared = self._text(field.child_by_field_name("type"))
+                if name and declared:
+                    self.fields.setdefault(type_id, {})[name] = declared
+
+    def resolve_field_types(self) -> None:
+        """Rewrite declared field types to node ids, dropping foreign ones."""
+        for type_id, fields in self.fields.items():
+            self.fields[type_id] = {
+                name: resolved
+                for name, declared in fields.items()
+                if (resolved := self._type_node(declared)) is not None
+            }
+
+    # -- traversal --------------------------------------------------------
+
+    def visit_mod_item(self, node) -> None:
+        name = self._ts_name(node)
+        if not name:
+            self._recurse(node)
+            return
+        nid = f"{self._parent}.{name}"
+        self._value_scopes.append(nid)
+        self._descend(node, nid)
+        self._value_scopes.pop()
+
+    def _visit_type_container(self, node) -> None:
+        name = self._ts_name(node)
+        if not name:
+            self._recurse(node)
+            return
+        # A trait's default method bodies live here, so descend rather than skip.
+        self._impl_stack.append(f"{self._parent}.{name}")
+        self._descend(node, f"{self._parent}.{name}")
+        self._impl_stack.pop()
+
+    visit_struct_item = _visit_type_container
+    visit_enum_item = _visit_type_container
+    visit_trait_item = _visit_type_container
+    visit_union_item = _visit_type_container
+
+    def visit_impl_item(self, node) -> None:
+        type_name = _rust_bare_type(self._text(node.child_by_field_name("type")))
+        if not type_name:
+            self._recurse(node)
+            return
+        nid = f"{self._parent}.{type_name}"
+        self._impl_stack.append(nid)
+        self._descend(node, nid)
+        self._impl_stack.pop()
+
+    def _visit_fn(self, node) -> None:
+        name = self._ts_name(node)
+        if not name:
+            return
+        self._locals.append(self._param_types(node))
+        self._descend(node, f"{self._parent}.{name}")
+        self._locals.pop()
+
+    visit_function_item = _visit_fn
+    visit_function_signature_item = _visit_fn
+
+    def _param_types(self, node) -> dict[str, str]:
+        """Parameter name -> type node id. Declared, so nothing is inferred."""
+        frame: dict[str, str] = {}
+        params = node.child_by_field_name("parameters")
+        if params is None:
+            return frame
+        for param in params.children:
+            if param.type != "parameter":
+                continue
+            name = self._text(param.child_by_field_name("pattern"))
+            declared = self._type_node(self._text(param.child_by_field_name("type")))
+            if name and declared:
+                frame[name] = declared
+        return frame
+
+    def visit_let_declaration(self, node) -> None:
+        pattern = node.child_by_field_name("pattern")
+        if pattern is not None and pattern.type == "identifier":
+            bound = self._binding_type(node)
+            if bound is not None:
+                self._locals[-1][self._text(pattern)] = bound
+        self._recurse(node)
+
+    def _binding_type(self, node) -> str | None:
+        """Type of a `let`, from the annotation, a struct literal, or a
+        constructor whose return type is declared."""
+        annotated = node.child_by_field_name("type")
+        if annotated is not None:
+            return self._type_node(self._text(annotated))
+        value = node.child_by_field_name("value")
+        if value is None:
+            return None
+        if value.type == "struct_expression":
+            return self._type_node(self._text(value.child_by_field_name("name")))
+        if value.type == "call_expression":
+            target = self._resolve_call(value.child_by_field_name("function"))
+            return self.returns.get(target) if target else None
+        return None
+
+    def visit_call_expression(self, node) -> None:
+        target = self._resolve_call(node.child_by_field_name("function"))
+        if target is not None:
+            self._add(target)
+        self._recurse(node)
+
+    def visit_macro_invocation(self, node) -> None:
+        """`println!`, `vec!`, `format!` — never a call edge."""
+
+    def visit_use_declaration(self, node) -> None:
+        """A `use` path is not a call."""
+
+
+def _rust_call_edges(tree, rel_path: Path, file_id: str,
+                     symbols: dict[str, str]) -> list[dict]:
+    """Run both passes and return the resolved `calls` edges."""
+    visitor = _RustCallVisitor(rel_path, file_id, symbols)
+    visitor.prescan(tree.root_node)
+    visitor.resolve_field_types()
+    visitor.visit(tree.root_node)
+    return visitor.edges
+
+
 _RUST_USE_RE = re.compile(r"(?m)^\s*use\s+([^;]+);")
 _RUST_ITEM_RE = re.compile(
     r"(?m)^[ \t]*(pub(?:\([^)]*\))?\s+)?(mod|struct|enum|trait|union)\s+(\w+)"
@@ -2727,13 +3067,276 @@ _RUST_FN_RE = re.compile(
     r"fn\s+(\w+)(<[^>{]*>)?\s*(\([^\n]*?\))?"
 )
 _RUST_MACRO_RE = re.compile(r"(?m)^[ \t]*macro_rules!\s*(\w+)")
-_RUST_IMPL_RE = re.compile(r"(?m)^[ \t]*impl(?:<[^>]*>)?\s+([\w:]+)(?:<[^>]*>)?(?:\s+for\s+([\w:]+))?")
+
+
+def _rust_blank_noise(source: str) -> str:
+    """Blank comments, strings and char literals, preserving every offset.
+
+    Lifetimes are the trap: `&'a str` opens what looks like a char literal that
+    never closes. A quote only starts a char literal when a closing quote
+    follows within the width of an escape sequence.
+    """
+    out = list(source)
+    i, n = 0, len(source)
+    while i < n:
+        ch = source[i]
+        if ch == "/" and i + 1 < n and source[i + 1] == "/":
+            while i < n and source[i] != "\n":
+                out[i] = " "
+                i += 1
+        elif ch == "/" and i + 1 < n and source[i + 1] == "*":
+            # Rust block comments nest, unlike C's.
+            depth, start = 0, i
+            while i < n:
+                if source.startswith("/*", i):
+                    depth += 1
+                    i += 2
+                elif source.startswith("*/", i):
+                    depth -= 1
+                    i += 2
+                    if depth == 0:
+                        break
+                else:
+                    i += 1
+            for k in range(start, min(i, n)):
+                if out[k] != "\n":
+                    out[k] = " "
+        elif ch == "r" and i + 1 < n and source[i + 1] in '#"':
+            j = i + 1
+            hashes = 0
+            while j < n and source[j] == "#":
+                hashes += 1
+                j += 1
+            if j >= n or source[j] != '"':
+                i += 1
+                continue
+            close = '"' + "#" * hashes
+            end = source.find(close, j + 1)
+            end = n if end == -1 else end + len(close)
+            for k in range(i, end):
+                if out[k] != "\n":
+                    out[k] = " "
+            i = end
+        elif ch == '"':
+            j = i + 1
+            while j < n and source[j] != '"':
+                j += 2 if source[j] == "\\" else 1
+            for k in range(i, min(j + 1, n)):
+                if out[k] != "\n":
+                    out[k] = " "
+            i = j + 1
+        elif ch == "'":
+            j = i + 1
+            if j < n and source[j] == "\\":
+                j += 2
+            elif j < n:
+                j += 1
+            if j < n and source[j] == "'":
+                for k in range(i, j + 1):
+                    out[k] = " "
+                i = j + 1
+            else:
+                i += 1  # a lifetime, not a literal
+        else:
+            i += 1
+    return "".join(out)
+
+
+_RUST_MACRO_CALL_RE = re.compile(r"\b(\w+)\s*!\s*[({\[]")
+_RUST_MACRO_DEF_RE = re.compile(r"\bmacro_rules!\s*\w+\s*[({\[]")
+_RUST_CLOSERS = {"(": ")", "{": "}", "[": "]"}
+
+
+def _rust_blank_macros(blanked: str) -> str:
+    """Blank the token tree of every macro invocation, preserving offsets.
+
+    tree-sitter parses `assert_eq!(build(), 1)` as a `macro_invocation` whose
+    arguments are an unstructured token tree, so it yields no call at all. The
+    regex branch would otherwise read those tokens as calls and the two
+    branches would disagree on every test module in a codebase.
+    """
+    out = list(blanked)
+    # A macro_rules body is a template, not code: its `$name` placeholders
+    # would otherwise be read as types and its `fn` items as definitions.
+    for m in list(_RUST_MACRO_DEF_RE.finditer(blanked)) + list(
+            _RUST_MACRO_CALL_RE.finditer(blanked)):
+        opener = blanked[m.end() - 1]
+        closer = _RUST_CLOSERS[opener]
+        depth, i, n = 0, m.end() - 1, len(blanked)
+        while i < n:
+            if blanked[i] == opener:
+                depth += 1
+            elif blanked[i] == closer:
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        for k in range(m.end(), min(i, n)):
+            if out[k] != "\n":
+                out[k] = " "
+    return "".join(out)
+
+
+def _rust_block_span(blanked: str, start: int) -> tuple[int, int] | None:
+    """Span of the `{...}` body that follows *start*, or None if there is none.
+
+    Parameter parentheses close first: `fn f(cart: &HashMap<String, f64>)` has
+    no brace, but a `-> impl Fn() {` signature would otherwise be misread. A
+    `;` reached before any `{` means a declaration without a body — a trait
+    method signature, whose calls belong to nobody.
+    """
+    i, n = start, len(blanked)
+    depth = 0
+    while i < n:
+        ch = blanked[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif depth <= 0 and ch == ";":
+            return None
+        elif depth <= 0 and ch == "{":
+            break
+        i += 1
+    if i >= n:
+        return None
+    body, j = 1, i + 1
+    while j < n and body:
+        if blanked[j] == "{":
+            body += 1
+        elif blanked[j] == "}":
+            body -= 1
+        j += 1
+    return i + 1, j - 1
+
+
+_RUST_IMPL_KEYWORD_RE = re.compile(r"(?m)^[ \t]*(?:unsafe\s+)?impl\b")
+
+
+def _rust_impl_head(blanked: str, start: int) -> tuple[str | None, str, int]:
+    """Parse an impl header into `(trait, type, offset_after_head)`.
+
+    Scanning beats a regex here: `impl From<Vec<MailAddr>> for MailAddrList`
+    nests its generics, and a `<[^>]*>` group stops at the first `>` and reads
+    the whole header as `impl From`.
+    """
+    n = len(blanked)
+    i = start
+    while i < n and blanked[i].isspace():
+        i += 1
+    if i < n and blanked[i] == "<":  # impl<'a, T: Into<String>>
+        depth = 0
+        while i < n:
+            if blanked[i] == "<":
+                depth += 1
+            elif blanked[i] == ">":
+                depth -= 1
+                if depth == 0:
+                    i += 1
+                    break
+            i += 1
+    head_start, depth = i, 0
+    while i < n:
+        ch = blanked[i]
+        if ch in "<([":
+            depth += 1
+        elif ch in ">)]":
+            depth -= 1
+        elif depth <= 0 and (ch in "{;" or (
+                ch.isspace() and blanked.startswith("where", i + 1)
+                and not blanked[i + 6:i + 7].isalnum())):
+            break
+        i += 1
+    head, depth, split = blanked[head_start:i], 0, -1
+    for k in range(len(head) - 4):
+        ch = head[k]
+        if ch in "<([":
+            depth += 1
+        elif ch in ">)]":
+            depth -= 1
+        elif depth <= 0 and head[k:k + 5] == " for " and split < 0:
+            split = k
+    if split >= 0:
+        return head[:split].strip(), _rust_bare_type(head[split + 5:]), i
+    return None, _rust_bare_type(head), i
+
+
+def _rust_impl_spans(blanked: str) -> list[tuple[int, int, str, str | None]]:
+    """`(body_start, body_end, type_name, trait_name)` for every impl block."""
+    spans: list[tuple[int, int, str, str | None]] = []
+    for m in _RUST_IMPL_KEYWORD_RE.finditer(blanked):
+        trait, type_name, after = _rust_impl_head(blanked, m.end())
+        span = _rust_block_span(blanked, after)
+        if span is not None and type_name:
+            spans.append((span[0], span[1], type_name, trait))
+    return spans
+
+
+_RUST_TRAIT_HEAD_RE = re.compile(
+    r"(?m)^[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?trait\s+(\w+)"
+)
+_RUST_MOD_HEAD_RE = re.compile(r"(?m)^[ \t]*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)")
+
+
+def _rust_scope_spans(blanked: str) -> list[tuple[int, int, str, str]]:
+    """Every block that contributes a segment to the node ids inside it.
+
+    `(body_start, body_end, name, kind)` for `mod`, `impl` and `trait` blocks.
+    The regex branch has to reproduce the nesting tree-sitter gets for free;
+    without it a `#[cfg(test)] mod tests` flattens onto the file and its
+    functions collide with the ones they are testing.
+    """
+    spans: list[tuple[int, int, str, str]] = []
+    for regex, kind in ((_RUST_MOD_HEAD_RE, "mod"), (_RUST_TRAIT_HEAD_RE, "trait")):
+        for m in regex.finditer(blanked):
+            span = _rust_block_span(blanked, m.end())
+            if span is not None:
+                spans.append((span[0], span[1], m.group(1), kind))
+    spans += [(start, end, type_name, "impl")
+              for start, end, type_name, _trait in _rust_impl_spans(blanked)]
+    return sorted(spans)
+
+
+def _rust_prefix(spans, offset: int, file_id: str, kinds: frozenset[str] | None = None) -> str:
+    """Node-id prefix for a declaration at *offset*, innermost block last."""
+    parts = [name for start, end, name, kind in spans
+             if start <= offset < end and (kinds is None or kind in kinds)]
+    return ".".join([file_id, *parts])
+
+
+def _rust_module_scopes(spans, offset: int, file_id: str) -> list[str]:
+    """Scopes a bare `foo()` may resolve against, innermost first.
+
+    Only modules: Rust has no implicit receiver, so inside `impl Gateway` a
+    bare `submit()` is a free function, never `self.submit`.
+    """
+    parts = [name for start, end, name, kind in spans
+             if start <= offset < end and kind == "mod"]
+    return [".".join([file_id, *parts[:i]]) for i in range(len(parts), -1, -1)]
+
+
+def _rust_impl_traits(blanked: str, spans, file_id: str) -> dict[str, list[str]]:
+    """Type node id -> trait names it implements, from `impl Trait for Type`."""
+    traits: dict[str, list[str]] = {}
+    for start, _end, type_name, trait in _rust_impl_spans(blanked):
+        if not trait:
+            continue
+        prefix = _rust_prefix(spans, start, file_id, frozenset({"mod"}))
+        traits.setdefault(f"{prefix}.{type_name}", []).append(trait)
+    return traits
 
 
 def _index_rust_regex(source: str, rel_path: Path, file_id: str) -> tuple[list[dict], list[dict]]:
     """Regex fallback for Rust."""
     nodes: list[dict] = []
     edges: list[dict] = []
+
+    # tree-sitter sees a macro body as an opaque token tree and never reads a
+    # comment, so neither declares symbols. Blanking both here is what keeps
+    # the two branches emitting the same node ids. Offsets are preserved, so
+    # every line number still points at the real source.
+    blanked_source = _rust_blank_macros(_rust_blank_noise(source))
+    scopes = _rust_scope_spans(blanked_source)
 
     def _add(name: str, ntype: str, lineno: int, parent: str = file_id, **extra) -> str:
         nid = f"{parent}.{name}"
@@ -2747,7 +3350,7 @@ def _index_rust_regex(source: str, rel_path: Path, file_id: str) -> tuple[list[d
         edges.append({"source": parent, "target": nid, "relation": "contains"})
         return nid
 
-    for m in _RUST_USE_RE.finditer(source):
+    for m in _RUST_USE_RE.finditer(blanked_source):
         module = m.group(1).strip()
         safe = module.replace("::", "_").replace("{", "").replace("}", "").split(",")[0].strip()
         nid = f"{file_id}.import_{safe}"
@@ -2759,31 +3362,255 @@ def _index_rust_regex(source: str, rel_path: Path, file_id: str) -> tuple[list[d
         })
         edges.append({"source": file_id, "target": nid, "relation": "imports_from"})
 
+    # Items nest under the mod, impl or trait block that contains them, which
+    # is what tree-sitter produces; a flat file id makes the two branches
+    # disagree on every id inside a module.
     kinds = {"mod": "module", "struct": "struct", "enum": "enum",
              "trait": "trait", "union": "struct"}
-    for m in _RUST_ITEM_RE.finditer(source):
+    for m in _RUST_ITEM_RE.finditer(blanked_source):
         vis = "pub" if m.group(1) else "private"
-        _add(m.group(3), kinds[m.group(2)], _lineno(source, m.start()), visibility=vis)
+        # A block never contains its own header, so a mod's id is built from
+        # the scopes around it, not including itself.
+        _add(m.group(3), kinds[m.group(2)], _lineno(source, m.start()),
+             parent=_rust_prefix(scopes, m.start(), file_id), visibility=vis)
 
-    for m in _RUST_MACRO_RE.finditer(source):
-        _add(m.group(1), "macro", _lineno(source, m.start()))
+    for m in _RUST_MACRO_RE.finditer(blanked_source):
+        _add(m.group(1), "macro", _lineno(source, m.start()),
+             parent=_rust_prefix(scopes, m.start(), file_id))
 
     # `impl Trait for Type` -> Type implements Trait
-    for m in _RUST_IMPL_RE.finditer(source):
-        first, second = m.group(1), m.group(2)
-        if second:
-            edges.append({"source": f"{file_id}.{second}", "target": first,
+    for start, _end, type_name, trait in _rust_impl_spans(blanked_source):
+        if trait:
+            prefix = _rust_prefix(scopes, start, file_id, frozenset({"mod"}))
+            edges.append({"source": f"{prefix}.{type_name}", "target": trait,
                           "relation": "implements"})
 
-    for m in _RUST_FN_RE.finditer(source):
+    _all, top_level = _rust_fn_records(blanked_source)
+    for m, _params, _declared, _body in top_level:
         vis = "pub" if m.group(1) else "private"
         name, generics, params = m.group(2), m.group(3) or "", m.group(4) or ""
         signature = f"{name}{generics}{params}"
-        _add(name, "function", _lineno(source, m.start()), visibility=vis,
-             signature=signature,
+        _add(name, "function", _lineno(source, m.start()),
+             parent=_rust_prefix(scopes, m.start(), file_id),
+             visibility=vis, signature=signature,
              lifetimes=list(dict.fromkeys(re.findall(r"'(\w+)", signature))))
 
     return nodes, edges
+
+
+_RUST_STRUCT_HEAD_RE = re.compile(
+    r"(?m)^[ \t]*(?:pub(?:\([^)]*\))?\s+)?struct\s+(\w+)"
+)
+_RUST_FIELD_RE = re.compile(r"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?(\w+)\s*:\s*([^,\n]+)")
+_RUST_LET_RE = re.compile(r"\blet\s+(?:mut\s+)?(\w+)\s*(?::\s*([^=;]+?))?\s*=\s*([^;]*)")
+_RUST_LET_STRUCT_RE = re.compile(r"^\s*(\w+)\s*\{")
+_RUST_LET_ASSOC_RE = re.compile(r"^\s*(\w+)\s*::\s*(\w+)\s*\(")
+_RUST_SELF_FIELD_CALL_RE = re.compile(r"\bself\s*\.\s*(\w+)\s*\.\s*(\w+)\s*\(")
+_RUST_METHOD_CALL_RE = re.compile(r"\b(\w+)\s*\.\s*(\w+)\s*\(")
+_RUST_PATH_CALL_RE = re.compile(r"(?<![\w:])(\w+)\s*::\s*(\w+)\s*\(")
+# No `!` guard is needed for macros: `println!(` puts the bang between the name
+# and the parenthesis, so it never matches. Excluding a preceding `!` would
+# instead drop the negation operator in `if !validate_card(card)`.
+_RUST_BARE_CALL_RE = re.compile(r"(?<![\w.:])(\w+)\s*\(")
+
+
+def _rust_split_top(text: str) -> list[str]:
+    """Split on commas that are not inside <>, () or []."""
+    parts, depth, current = [], 0, []
+    for ch in text:
+        if ch in "<([":
+            depth += 1
+        elif ch in ">)]":
+            depth -= 1
+        if ch == "," and depth <= 0:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+    parts.append("".join(current))
+    return [p for p in parts if p.strip()]
+
+
+def _rust_signature(blanked: str, start: int) -> tuple[str, str, tuple[int, int] | None]:
+    """Parameters, declared return type and body span of a fn starting at *start*."""
+    n = len(blanked)
+    i = start
+    while i < n and blanked[i] not in "({;":
+        i += 1
+    params = ""
+    if i < n and blanked[i] == "(":
+        depth, j = 0, i
+        while j < n:
+            if blanked[j] == "(":
+                depth += 1
+            elif blanked[j] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        params = blanked[i + 1:j]
+        i = j + 1
+    k = i
+    while k < n and blanked[k] not in "{;":
+        k += 1
+    declared = blanked[i:k].strip()
+    declared = declared[2:].strip() if declared.startswith("->") else ""
+    return params, declared.split(" where", 1)[0].strip(), _rust_block_span(blanked, i)
+
+
+def _rust_fn_records(blanked: str):
+    """Every `fn` and its `(match, params, return_type, body_span)`.
+
+    Returns `(all_records, top_level_records)`. tree-sitter's _RustVisitor does
+    not descend into a function body, so a helper declared inside one is not a
+    symbol on either branch; the full list still matters, because those bodies
+    have to be masked out of the enclosing function's.
+    """
+    records = []
+    for m in _RUST_FN_RE.finditer(blanked):
+        params, declared, body = _rust_signature(blanked, m.end(2))
+        records.append((m, params, declared, body))
+    spans = [r[3] for r in records if r[3] is not None]
+    top = [r for r in records
+           if not any(start <= r[0].start() < end for start, end in spans)]
+    return records, top
+
+
+def _rust_regex_call_edges(source: str, nodes: list[dict], file_id: str) -> list[dict]:
+    """`calls` edges for the regex branch.
+
+    Resolves the same shapes as the tree-sitter branch — bare functions,
+    `self.m()`, `Self::m()`, `Type::m()`, a typed local or parameter, and a
+    field of a locally-declared type. Macros never match: `println!(` puts a
+    `!` between the name and the parenthesis every call pattern requires.
+    """
+    blanked = _rust_blank_macros(_rust_blank_noise(source))
+    symbols = {n["id"]: n["type"] for n in nodes}
+    scopes = _rust_scope_spans(blanked)
+    traits = _rust_impl_traits(blanked, scopes, file_id)
+    # Set per function body, so a type resolves against its own module first.
+    visible: list[str] = [file_id]
+
+    def type_node(text: str) -> str | None:
+        bare = _rust_bare_type(text)
+        if not bare:
+            return None
+        for scope in visible:
+            candidate = f"{scope}.{bare}"
+            if symbols.get(candidate) in _RUST_TYPE_DECLS:
+                return candidate
+        return None
+
+    def lookup_method(type_id: str | None, name: str) -> str | None:
+        if not type_id or not name:
+            return None
+        seen: set[str] = set()
+        queue = [type_id]
+        while queue:
+            current = queue.pop(0)
+            if current in seen:
+                continue
+            seen.add(current)
+            if symbols.get(f"{current}.{name}") == "function":
+                return f"{current}.{name}"
+            for trait in traits.get(current, []):
+                trait_id = type_node(trait)
+                if trait_id is not None:
+                    queue.append(trait_id)
+        return None
+
+    # Struct fields, so `self.field.method()` can resolve to a local type.
+    fields: dict[str, dict[str, str]] = {}
+    for m in _RUST_STRUCT_HEAD_RE.finditer(blanked):
+        visible = _rust_module_scopes(scopes, m.start(), file_id)
+        owner = f"{_rust_prefix(scopes, m.start(), file_id)}.{m.group(1)}"
+        span = _rust_block_span(blanked, m.end())
+        if span is None:
+            continue
+        for fm in _RUST_FIELD_RE.finditer(blanked[span[0]:span[1]]):
+            resolved = type_node(fm.group(2))
+            if resolved is not None:
+                fields.setdefault(owner, {})[fm.group(1)] = resolved
+
+    # Pass 1 — every function's id, owner, body span and return type.
+    funcs: list[tuple[str, str | None, str, tuple[int, int], list[str]]] = []
+    returns: dict[str, str] = {}
+    all_records, top_level = _rust_fn_records(blanked)
+    for m, params, declared, body in top_level:
+        prefix = _rust_prefix(scopes, m.start(), file_id)
+        owner = prefix if prefix != _rust_prefix(
+            scopes, m.start(), file_id, frozenset({"mod"})) else None
+        fn_id = f"{prefix}.{m.group(2)}"
+        if owner and declared in ("Self", owner.rsplit(".", 1)[-1]):
+            returns[fn_id] = owner
+        if body is not None:
+            funcs.append((fn_id, owner, params, body,
+                          _rust_module_scopes(scopes, m.start(), file_id)))
+
+    # A nested `fn` is not a symbol, so its calls belong to nobody. Without
+    # masking, the enclosing body span swallows them.
+    bodies = [r[3] for r in all_records if r[3] is not None]
+
+    def mask_nested(start: int, end: int) -> str:
+        chunk = list(blanked[start:end])
+        for a, b in bodies:
+            if (a, b) != (start, end) and start <= a and b <= end:
+                for k in range(a - start, b - start):
+                    if chunk[k] != "\n":
+                        chunk[k] = " "
+        return "".join(chunk)
+
+    # Pass 2 — resolve the calls in each body.
+    edges: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for fn_id, owner, params, (start, end), scope_chain in funcs:
+        body = mask_nested(start, end)
+        visible = scope_chain
+
+        locals_: dict[str, str] = {}
+        for param in _rust_split_top(params):
+            name, _, declared = param.partition(":")
+            resolved = type_node(declared) if declared else None
+            if resolved is not None:
+                locals_[name.strip()] = resolved
+        for lm in _RUST_LET_RE.finditer(body):
+            name, annotated, value = lm.group(1), lm.group(2), lm.group(3) or ""
+            bound = type_node(annotated) if annotated else None
+            if bound is None and (sm := _RUST_LET_STRUCT_RE.match(value)):
+                bound = type_node(sm.group(1))
+            if bound is None and (am := _RUST_LET_ASSOC_RE.match(value)):
+                head = "Self" if am.group(1) == "Self" else am.group(1)
+                base = owner if head == "Self" else type_node(am.group(1))
+                target = lookup_method(base, am.group(2))
+                bound = returns.get(target) if target else None
+            if bound is not None:
+                locals_[name] = bound
+
+        def add(target: str | None, _fn_id: str = fn_id) -> None:
+            if target and (_fn_id, target) not in seen:
+                seen.add((_fn_id, target))
+                edges.append({"source": _fn_id, "target": target, "relation": "calls"})
+
+        for cm in _RUST_SELF_FIELD_CALL_RE.finditer(body):
+            add(lookup_method(fields.get(owner, {}).get(cm.group(1)), cm.group(2)))
+        for cm in _RUST_METHOD_CALL_RE.finditer(body):
+            receiver = cm.group(1)
+            base = owner if receiver == "self" else locals_.get(receiver)
+            add(lookup_method(base, cm.group(2)))
+        for cm in _RUST_PATH_CALL_RE.finditer(body):
+            base = owner if cm.group(1) == "Self" else type_node(cm.group(1))
+            add(lookup_method(base, cm.group(2)))
+        for cm in _RUST_BARE_CALL_RE.finditer(body):
+            # A nested `fn helper()` declaration is not a call to itself.
+            if body[:cm.start()].rstrip().endswith("fn"):
+                continue
+            for scope in scope_chain:
+                candidate = f"{scope}.{cm.group(1)}"
+                if symbols.get(candidate) == "function":
+                    add(candidate)
+                    break
+
+    return edges
 
 
 # ---------------------------------------------------------------------------
@@ -3207,12 +4034,18 @@ def _index_with_grammar(
     path: Path, root: Path | None, grammar, available: bool,
     visitor_cls, regex_fn, language_label: str,
     language_attr: str = "language",
+    call_edges_fn=None, regex_call_fn=None,
 ) -> tuple[list[dict], list[dict]]:
     """Shared body for the tree-sitter-or-regex language entry points.
 
     Args:
         language_attr: Name of the grammar module's language accessor. Most
             expose `language()`; tree-sitter-php exposes `language_php()`.
+        call_edges_fn: Optional `(tree, rel, file_id, symbols) -> edges` pass
+            that resolves `calls` edges from the parsed tree.
+        regex_call_fn: Optional `(source, nodes, file_id) -> edges` equivalent
+            for the regex branch. Both are filtered so every endpoint is a node
+            that was actually emitted.
     """
     rel = _rel(path, root) if root else path
     fid = _file_id(rel)
@@ -3234,7 +4067,15 @@ def _index_with_grammar(
                 raise ValueError("grammar produced a tree containing ERROR nodes")
             visitor = visitor_cls(rel, fid)
             visitor.visit(tree.root_node)
-            return [module_node] + visitor.nodes, visitor.edges
+            call_edges = []
+            if call_edges_fn is not None:
+                symbols = {n["id"]: n["type"] for n in visitor.nodes}
+                known = {fid} | set(symbols)
+                call_edges = [
+                    e for e in call_edges_fn(tree, rel, fid, symbols)
+                    if e["source"] in known and e["target"] in known
+                ]
+            return [module_node] + visitor.nodes, visitor.edges + call_edges
         except Exception as exc:
             import click  # noqa: PLC0415
 
@@ -3242,13 +4083,21 @@ def _index_with_grammar(
                        f"falling back to regex: {exc}", err=True)
 
     nodes, edges = regex_fn(source_text, rel, fid)
+    if regex_call_fn is not None:
+        known = {fid} | {n["id"] for n in nodes}
+        edges = edges + [
+            e for e in regex_call_fn(source_text, nodes, fid)
+            if e["source"] in known and e["target"] in known
+        ]
     return [module_node] + nodes, edges
 
 
 def index_rust(path: Path, root: Path | None = None) -> tuple[list[dict], list[dict]]:
     """Index a Rust file (tree-sitter with the 'rust' extra, else regex)."""
     return _index_with_grammar(path, root, _tsrust, _RUST_TS_AVAILABLE,
-                               _RustVisitor, _index_rust_regex, "Rust")
+                               _RustVisitor, _index_rust_regex, "Rust",
+                               call_edges_fn=_rust_call_edges,
+                               regex_call_fn=_rust_regex_call_edges)
 
 
 def index_csharp(path: Path, root: Path | None = None) -> tuple[list[dict], list[dict]]:

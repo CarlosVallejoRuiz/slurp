@@ -103,7 +103,7 @@ uv sync --extra rust            # solo una
   `use`/`import`/`alias`/`require` (Elixir) y `requires` (PowerShell).
 - Los companion objects (Kotlin, Scala) se anidan bajo su clase — si no,
   colisionan con ella en el mismo node id.
-- **Edges `calls` (Python, TypeScript/JavaScript, Go, Java)** — extracción en dos fases:
+- **Edges `calls` (Python, TypeScript/JavaScript, Go, Java, Rust)** — extracción en dos fases:
   recolectar *todas* las definiciones primero, resolver después. Un solo pase
   top-down no vale: `checkout` llama a `PaymentGateway.charge` antes de que esa
   clase aparezca. La política es **cero falsos positivos**: si una llamada no se
@@ -188,6 +188,41 @@ uv sync --extra rust            # solo una
       `field`, así que un campo inyectado no resuelve sin tree-sitter. Es un
       edge omitido, nunca uno falso — las dos ramas coinciden en todo lo demás.
     - Sin cross-file todavía.
+  - **Rust** (tree-sitter + fallback regex): los métodos viven en bloques
+    `impl`, no en el `struct` — node id `modulo.Tipo.metodo`. Todos los `impl
+    Tipo` de un fichero, incluido `impl Trait for Tipo`, aportan al mismo tipo.
+    - Los tipos están **declarados** (parámetros, campos, anotaciones de
+      `let`), así que no se infiere nada de un inicializador. El tipo de
+      retorno solo se propaga si es exactamente `Self` o el propio tipo del
+      `impl`: `-> Option<Self>` no vale, el valor es un `Option`.
+    - Un `helper()` suelto **nunca** resuelve a un método. Rust no tiene
+      receptor implícito: dentro de `impl Gateway`, `submit()` es una función
+      libre, no `self.submit`. `_value_scopes` solo contiene módulos.
+    - **Las macros no generan edges, ni las llamadas escritas dentro.**
+      tree-sitter ve un cuerpo de macro como un token tree opaco, así que
+      `assert_eq!(build(), 1)` no produce ningún `call_expression`. La rama
+      regex blanquea esos token trees para no discrepar: sin eso las dos ramas
+      diferían en **548 edges**, casi todos en módulos `#[cfg(test)]`.
+    - `_rust_blank_noise()` distingue un literal de carácter de un lifetime:
+      `&'a str` abre una comilla que nunca cierra. Solo es literal si la
+      comilla de cierre llega en el ancho de un escape.
+    - **Dos defectos preexistentes que destapó comparar las ramas**:
+      `impl<'a> Walker<'a>` metía los genéricos en el node id, dejando
+      `Walker<'a>.next` inalcanzable desde el struct; y
+      `impl From<Vec<T>> for X` se leía como `impl From` porque `<[^>]*>` para
+      en el primer `>`. Ambos arreglados — `_rust_impl_head()` escanea con
+      conteo de profundidad en vez de con un grupo regex.
+    - Para que las ramas emitan los mismos ids, el regex anida también bajo
+      `mod` y bajo cuerpos de trait, y **descarta las `fn` anidadas dentro de
+      otra `fn`** — tree-sitter no desciende a cuerpos de función, así que
+      tampoco son símbolos allí. Antes el regex creaba un `unicode.imp`
+      duplicado 29 veces en el mismo fichero.
+    - Los ítems declarados dentro de un cuerpo de macro o de un comentario no
+      son símbolos en ninguna rama.
+    - Medido sobre 600 ficheros de crates.io: **589 con acuerdo exacto**,
+      2522 edges tree-sitter vs 2518 regex. Las 26 discrepancias restantes
+      salen todas de un mismo fichero de bindings COM autogenerados.
+    - Sin cross-file todavía.
 
 ---
 
@@ -210,7 +245,7 @@ por debajo de la carpeta que abre el editor (`~/Desktop/Slurp/`). Todos los coma
 de este documento (`uv run pytest`, `ruff check`, `uv build`, `git`) se ejecutan
 desde `~/Desktop/Slurp/slurp/`, que es donde vive este CLAUDE.md.
 
-**Estado actual:** v0.9.6 · 1983 tests · `ruff check slurp/` limpio.
+**Estado actual:** v0.9.7 · 2035 tests · `ruff check slurp/` limpio.
 
 **⚠️ IMPORTANTE — `uv sync --extra X` desinstala los extras no mencionados.**
 Sincroniza al conjunto exacto de extras que le pases, así que añadir uno con
