@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import ast
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 # DECISION: resolved once at import, not per file. tree-sitter is an optional
@@ -2857,6 +2857,7 @@ class _RustVisitor(_BaseVisitor):
             # dict.fromkeys de-duplicates while preserving declaration order.
             lifetimes=list(dict.fromkeys(re.findall(r"'(\w+)", signature))),
         )
+        self._collect_body_uses(node)
 
     visit_function_item = _visit_fn
     visit_function_signature_item = _visit_fn
@@ -2867,19 +2868,127 @@ class _RustVisitor(_BaseVisitor):
             self._emit(name, "macro", node.start_point[0] + 1)
 
     def visit_use_declaration(self, node) -> None:
-        module = self._text(node).removeprefix("use").strip().rstrip(";").strip()
-        if not module:
-            return
-        safe = module.replace("::", "_").replace("{", "").replace("}", "").split(",")[0].strip()
-        nid = f"{self._parent}.import_{safe}"
-        self.nodes.append({
-            "id": nid, "label": module, "type": "import", "description": "",
-            "source_file": str(self.rel_path),
-            "source_location": f"L{node.start_point[0] + 1}",
-            "file_type": "code",
-        })
-        self._edge(self._parent, nid, "imports_from")
+        self._emit_use(node)
 
+    def _emit_use(self, node) -> None:
+        """Emit one `use` node, always anchored on the file.
+
+        A `use` inside `mod x` or inside a function body still imports into
+        this file, and anchoring it anywhere else makes the two parser
+        branches disagree on its id.
+        """
+        module = self._text(node).removeprefix("use").strip().rstrip(";").strip()
+        record = _rust_import_node(module, self._scope[0], self.rel_path,
+                                   node.start_point[0] + 1)
+        if record is None or any(n["id"] == record["id"] for n in self.nodes):
+            return
+        self.nodes.append(record)
+        self._edge(self._scope[0], record["id"], "imports_from")
+
+    def _collect_body_uses(self, node) -> None:
+        """Find `use` statements inside a function body.
+
+        _visit_fn deliberately does not descend — a nested item is not a
+        symbol — but a function-local `use` is still an import of this file,
+        and dropping it loses every call that routes through it.
+        """
+        for child in node.children:
+            if child.type == "use_declaration":
+                self._emit_use(child)
+            else:
+                self._collect_body_uses(child)
+
+
+
+_RUST_IMPORT_SYMBOLS = "_rust_symbols"
+
+
+def _rust_import_node(module: str, parent: str, rel_path: Path,
+                      lineno: int) -> dict | None:
+    """Build the graph node for one `use` statement."""
+    module = module.strip()
+    if not module:
+        return None
+    safe = module.replace("::", "_").replace("{", "").replace("}", "").split(",")[0].strip()
+    return {
+        "id": f"{parent}.import_{safe}", "label": module, "type": "import",
+        "description": "", "source_file": str(rel_path),
+        "source_location": f"L{lineno}", "file_type": "code",
+        _RUST_IMPORT_SYMBOLS: _rust_expand_use(module),
+    }
+
+
+def _rust_expand_use(text: str) -> list[list[str]]:
+    """Expand one `use` path into `[local_name, full_path]` pairs.
+
+    `crate::budget::{select_subgraph, Budget}` becomes two entries, and
+    `crate::a::b as c` binds the name `c`. A glob keeps `*` as its local name;
+    the resolver decides whether the module behind it has a unique candidate.
+    Groups nest, so `use crate::{a::{X, Y}, b::Z}` expands to three.
+    """
+    text = text.strip()
+    if not text:
+        return []
+
+    depth, brace = 0, -1
+    for i, ch in enumerate(text):
+        if ch == "{":
+            if depth == 0:
+                brace = i
+                break
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+
+    if brace < 0:
+        head, _, alias = text.partition(" as ")
+        head = head.strip()
+        if not head:
+            return []
+        local = alias.strip() or head.rsplit("::", 1)[-1].strip()
+        return [[local, head]]
+
+    prefix = text[:brace].strip().removesuffix("::").strip()
+    close, depth = -1, 0
+    for i in range(brace, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                close = i
+                break
+    if close < 0:
+        return []
+
+    out: list[list[str]] = []
+    part, depth = [], 0
+    pieces: list[str] = []
+    for ch in text[brace + 1:close]:
+        if ch in "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        if ch == "," and depth == 0:
+            pieces.append("".join(part))
+            part = []
+        else:
+            part.append(ch)
+    pieces.append("".join(part))
+
+    for piece in pieces:
+        piece = piece.strip()
+        if not piece:
+            continue
+        if piece == "self" or piece.startswith("self as "):
+            # `use crate::a::{self, B}` binds the module `a` itself.
+            _, _, alias = piece.partition(" as ")
+            local = alias.strip() or prefix.rsplit("::", 1)[-1]
+            if prefix:
+                out.append([local, prefix])
+            continue
+        out.extend(_rust_expand_use(f"{prefix}::{piece}" if prefix else piece))
+    return out
 
 
 _RUST_TYPE_DECLS = frozenset({"struct", "enum", "trait"})
@@ -2931,10 +3040,13 @@ class _RustCallVisitor(_BaseVisitor):
         self.module_id = file_id
         # Type node id -> trait names named in `impl Trait for Type`.
         self.traits: dict[str, list[str]] = {}
-        # Type node id -> field name -> type node id, from declared field types.
+        # Type node id -> field name -> declared type name, bare.
         self.fields: dict[str, dict[str, str]] = {}
-        # Function node id -> type node id it returns, when that is knowable.
+        # Function node id -> bare type name it returns, when that is knowable.
         self.returns: dict[str, str] = {}
+        # Imported names, for the calls this file cannot resolve on its own.
+        self.imports: dict[str, str] = {}   # local name -> import node id
+        self.globs: list[str] = []          # glob import node ids
         self._impl_stack: list[str] = []
         self._locals: list[dict[str, str]] = [{}]
         # Scopes a bare `foo()` may resolve against: the file and its modules,
@@ -2981,53 +3093,75 @@ class _RustCallVisitor(_BaseVisitor):
         return None
 
     def _lookup_function(self, name: str) -> str | None:
-        """Resolve a bare `name()` against the enclosing module scopes."""
+        """Resolve a bare `name()` against the enclosing module scopes.
+
+        A struct counts: `Pattern(&bytes)` constructs a tuple struct, and
+        calling a non-tuple struct that way does not compile, so a name that
+        is both called and a struct can only be the constructor.
+        """
         for scope in reversed(self._value_scopes):
             candidate = f"{scope}.{name}"
-            if self.symbols.get(candidate) == "function":
+            if self.symbols.get(candidate) in ("function", "struct"):
                 return candidate
         return None
 
-    def _type_of_expr(self, node) -> str | None:
-        """Type node id of a receiver expression, when it is knowable.
+    def _type_of_expr(self, node) -> tuple[str | None, str | None]:
+        """`(node id, type name)` for a receiver expression.
 
-        Resolves `self`, a local binding or parameter, and `self.field`.
-        A chained call, a literal or anything else resolves to nothing.
+        The name is kept alongside the id because a type declared in another
+        file has no node here, and the name is what an import can be matched
+        against. Resolves `self`, a local binding or parameter, and
+        `self.field`; a chained call or a literal resolves to nothing.
         """
         if node is None:
-            return None
+            return None, None
         if node.type == "self":
-            return self._impl_stack[-1] if self._impl_stack else None
+            owner = self._impl_stack[-1] if self._impl_stack else None
+            return owner, owner.rsplit(".", 1)[-1] if owner else None
         if node.type == "identifier":
-            return self._locals[-1].get(self._text(node))
+            name = self._locals[-1].get(self._text(node))
+            return (self._type_node(name) if name else None), name
         if node.type == "field_expression":
-            owner = self._type_of_expr(node.child_by_field_name("value"))
+            owner, _ = self._type_of_expr(node.child_by_field_name("value"))
             field = self._text(node.child_by_field_name("field"))
-            return self.fields.get(owner, {}).get(field) if owner else None
-        return None
+            name = self.fields.get(owner, {}).get(field) if owner else None
+            return (self._type_node(name) if name else None), name
+        return None, None
 
     def _resolve_call(self, fn) -> str | None:
-        if fn is None:
+        """Node id this call resolves to in *this* file, or None."""
+        owner, _name, member = self._call_parts(fn)
+        if member is None:
             return None
+        return owner if not member else self._lookup_method(owner, member)
+
+    def _call_parts(self, fn) -> tuple[str | None, str | None, str | None]:
+        """`(owner node id, owner type name, member)` for a call expression.
+
+        Member is `""` for a free function whose id is the owner slot, and
+        None when the shape is not a call this pass understands.
+        """
+        if fn is None:
+            return None, None, None
         if fn.type == "identifier":
-            return self._lookup_function(self._text(fn))
+            name = self._text(fn)
+            return self._lookup_function(name), name, ""
         if fn.type == "scoped_identifier":
             path = fn.child_by_field_name("path")
             name = self._text(fn.child_by_field_name("name"))
             # `std::mem::swap` nests a scoped_identifier; only a single
-            # segment can name a type declared in this file.
+            # segment can name a type declared in this file or imported.
             if path is None or path.type != "identifier" or not name:
-                return None
+                return None, None, None
             path_text = self._text(path)
             if path_text == "Self":
                 owner = self._impl_stack[-1] if self._impl_stack else None
-            else:
-                owner = self._type_node(path_text)
-            return self._lookup_method(owner, name)
+                return owner, owner.rsplit(".", 1)[-1] if owner else None, name
+            return self._type_node(path_text), path_text, name
         if fn.type == "field_expression":
-            owner = self._type_of_expr(fn.child_by_field_name("value"))
-            return self._lookup_method(owner, self._text(fn.child_by_field_name("field")))
-        return None
+            owner, type_name = self._type_of_expr(fn.child_by_field_name("value"))
+            return owner, type_name, self._text(fn.child_by_field_name("field"))
+        return None, None, None
 
     def _add(self, target: str) -> None:
         key = (self._parent, target)
@@ -3085,7 +3219,7 @@ class _RustCallVisitor(_BaseVisitor):
         if not declared:
             return
         if declared == "Self" or declared == impl_type.rsplit(".", 1)[-1]:
-            self.returns[fn_id] = impl_type
+            self.returns[fn_id] = impl_type.rsplit(".", 1)[-1]
 
     def _collect_fields(self, node, type_id: str) -> None:
         """Map a struct's field names to the types they declare."""
@@ -3096,18 +3230,9 @@ class _RustCallVisitor(_BaseVisitor):
                 if field.type != "field_declaration":
                     continue
                 name = self._text(field.child_by_field_name("name"))
-                declared = self._text(field.child_by_field_name("type"))
+                declared = _rust_bare_type(self._text(field.child_by_field_name("type")))
                 if name and declared:
                     self.fields.setdefault(type_id, {})[name] = declared
-
-    def resolve_field_types(self) -> None:
-        """Rewrite declared field types to node ids, dropping foreign ones."""
-        for type_id, fields in self.fields.items():
-            self.fields[type_id] = {
-                name: resolved
-                for name, declared in fields.items()
-                if (resolved := self._type_node(declared)) is not None
-            }
 
     # -- traversal --------------------------------------------------------
 
@@ -3158,7 +3283,7 @@ class _RustCallVisitor(_BaseVisitor):
     visit_function_signature_item = _visit_fn
 
     def _param_types(self, node) -> dict[str, str]:
-        """Parameter name -> type node id. Declared, so nothing is inferred."""
+        """Parameter name -> bare type name. Declared, so nothing is inferred."""
         frame: dict[str, str] = {}
         params = node.child_by_field_name("parameters")
         if params is None:
@@ -3167,7 +3292,7 @@ class _RustCallVisitor(_BaseVisitor):
             if param.type != "parameter":
                 continue
             name = self._text(param.child_by_field_name("pattern"))
-            declared = self._type_node(self._text(param.child_by_field_name("type")))
+            declared = _rust_bare_type(self._text(param.child_by_field_name("type")))
             if name and declared:
                 frame[name] = declared
         return frame
@@ -3181,32 +3306,64 @@ class _RustCallVisitor(_BaseVisitor):
         self._recurse(node)
 
     def _binding_type(self, node) -> str | None:
-        """Type of a `let`, from the annotation, a struct literal, or a
-        constructor whose return type is declared."""
+        """Bare type name of a `let`, from the annotation, a struct literal, or
+        a constructor whose return type is declared."""
         annotated = node.child_by_field_name("type")
         if annotated is not None:
-            return self._type_node(self._text(annotated))
+            return _rust_bare_type(self._text(annotated))
         value = node.child_by_field_name("value")
         if value is None:
             return None
         if value.type == "struct_expression":
-            return self._type_node(self._text(value.child_by_field_name("name")))
+            return _rust_bare_type(self._text(value.child_by_field_name("name")))
         if value.type == "call_expression":
             target = self._resolve_call(value.child_by_field_name("function"))
             return self.returns.get(target) if target else None
         return None
 
     def visit_call_expression(self, node) -> None:
-        target = self._resolve_call(node.child_by_field_name("function"))
-        if target is not None:
-            self._add(target)
+        owner, type_name, member = self._call_parts(
+            node.child_by_field_name("function"))
+        if member is not None:
+            if owner is not None:
+                target = owner if not member else self._lookup_method(owner, member)
+                if target is not None:
+                    self._add(target)
+            elif type_name:
+                # Nothing here defines it: only this file's `use` lines can.
+                self._add_pending_name(
+                    type_name, f"{type_name}::{member}" if member else type_name)
         self._recurse(node)
+
+    def _add_pending(self, import_id: str, symbol: str) -> None:
+        """Park a call on an import node for the cross-file pass."""
+        key = (self._parent, import_id, symbol)
+        if key in self._seen:
+            return
+        self._seen.add(key)
+        self.edges.append({"source": self._parent, "target": import_id,
+                           "relation": "calls", _PENDING_SYMBOL: symbol})
+
+    def _add_pending_name(self, local_name: str, symbol: str) -> None:
+        """Route *symbol* through whichever `use` line binds *local_name*."""
+        direct = self.imports.get(local_name)
+        for import_id in ([direct] if direct else self.globs):
+            self._add_pending(import_id, symbol)
+
+    def visit_use_declaration(self, node) -> None:
+        module = self._text(node).removeprefix("use").strip().rstrip(";").strip()
+        if not module:
+            return
+        safe = module.replace("::", "_").replace("{", "").replace("}", "").split(",")[0].strip()
+        nid = f"{self.module_id}.import_{safe}"
+        for local, _path in _rust_expand_use(module):
+            if local == "*":
+                self.globs.append(nid)
+            else:
+                self.imports[local] = nid
 
     def visit_macro_invocation(self, node) -> None:
         """`println!`, `vec!`, `format!` — never a call edge."""
-
-    def visit_use_declaration(self, node) -> None:
-        """A `use` path is not a call."""
 
 
 def _rust_call_edges(tree, rel_path: Path, file_id: str,
@@ -3214,7 +3371,6 @@ def _rust_call_edges(tree, rel_path: Path, file_id: str,
     """Run both passes and return the resolved `calls` edges."""
     visitor = _RustCallVisitor(rel_path, file_id, symbols)
     visitor.prescan(tree.root_node)
-    visitor.resolve_field_types()
     visitor.visit(tree.root_node)
     return visitor.edges
 
@@ -3512,16 +3668,13 @@ def _index_rust_regex(source: str, rel_path: Path, file_id: str) -> tuple[list[d
         return nid
 
     for m in _RUST_USE_RE.finditer(blanked_source):
-        module = m.group(1).strip()
-        safe = module.replace("::", "_").replace("{", "").replace("}", "").split(",")[0].strip()
-        nid = f"{file_id}.import_{safe}"
-        nodes.append({
-            "id": nid, "label": module, "type": "import", "description": "",
-            "source_file": str(rel_path),
-            "source_location": f"L{_lineno(source, m.start())}",
-            "file_type": "code",
-        })
-        edges.append({"source": file_id, "target": nid, "relation": "imports_from"})
+        record = _rust_import_node(m.group(1), file_id, rel_path,
+                                   _lineno(source, m.start()))
+        if record is None:
+            continue
+        nodes.append(record)
+        edges.append({"source": file_id, "target": record["id"],
+                      "relation": "imports_from"})
 
     # Items nest under the mod, impl or trait block that contains them, which
     # is what tree-sitter produces; a flat file id makes the two branches
@@ -3644,11 +3797,23 @@ def _rust_regex_call_edges(source: str, nodes: list[dict], file_id: str) -> list
     `self.m()`, `Self::m()`, `Type::m()`, a typed local or parameter, and a
     field of a locally-declared type. Macros never match: `println!(` puts a
     `!` between the name and the parenthesis every call pattern requires.
+    Anything the file cannot resolve is parked on the `use` node that binds
+    the name, for the cross-file pass.
     """
     blanked = _rust_blank_macros(_rust_blank_noise(source))
     symbols = {n["id"]: n["type"] for n in nodes}
     scopes = _rust_scope_spans(blanked)
     traits = _rust_impl_traits(blanked, scopes, file_id)
+
+    # `use` bindings, so a call onto a name declared elsewhere is not lost.
+    use_imports: dict[str, str] = {}
+    use_globs: list[str] = []
+    for node in nodes:
+        for local, _path in node.get(_RUST_IMPORT_SYMBOLS) or ():
+            if local == "*":
+                use_globs.append(node["id"])
+            else:
+                use_imports[local] = node["id"]
     # Set per function body, so a type resolves against its own module first.
     visible: list[str] = [file_id]
 
@@ -3680,18 +3845,17 @@ def _rust_regex_call_edges(source: str, nodes: list[dict], file_id: str) -> list
                     queue.append(trait_id)
         return None
 
-    # Struct fields, so `self.field.method()` can resolve to a local type.
+    # Struct fields, kept as declared type names so an imported type survives.
     fields: dict[str, dict[str, str]] = {}
     for m in _RUST_STRUCT_HEAD_RE.finditer(blanked):
-        visible = _rust_module_scopes(scopes, m.start(), file_id)
         owner = f"{_rust_prefix(scopes, m.start(), file_id)}.{m.group(1)}"
         span = _rust_block_span(blanked, m.end())
         if span is None:
             continue
         for fm in _RUST_FIELD_RE.finditer(blanked[span[0]:span[1]]):
-            resolved = type_node(fm.group(2))
-            if resolved is not None:
-                fields.setdefault(owner, {})[fm.group(1)] = resolved
+            bare = _rust_bare_type(fm.group(2))
+            if bare:
+                fields.setdefault(owner, {})[fm.group(1)] = bare
 
     # Pass 1 — every function's id, owner, body span and return type.
     funcs: list[tuple[str, str | None, str, tuple[int, int], list[str]]] = []
@@ -3703,7 +3867,7 @@ def _rust_regex_call_edges(source: str, nodes: list[dict], file_id: str) -> list
             scopes, m.start(), file_id, frozenset({"mod"})) else None
         fn_id = f"{prefix}.{m.group(2)}"
         if owner and declared in ("Self", owner.rsplit(".", 1)[-1]):
-            returns[fn_id] = owner
+            returns[fn_id] = owner.rsplit(".", 1)[-1]
         if body is not None:
             funcs.append((fn_id, owner, params, body,
                           _rust_module_scopes(scopes, m.start(), file_id)))
@@ -3724,52 +3888,83 @@ def _rust_regex_call_edges(source: str, nodes: list[dict], file_id: str) -> list
     # Pass 2 — resolve the calls in each body.
     edges: list[dict] = []
     seen: set[tuple[str, str]] = set()
+    pending_seen: set[tuple[str, str, str]] = set()
     for fn_id, owner, params, (start, end), scope_chain in funcs:
         body = mask_nested(start, end)
         visible = scope_chain
 
-        locals_: dict[str, str] = {}
+        # Declared type *names*, not resolved ids: a type defined in another
+        # file has no node here, and the name is what a `use` line binds.
+        local_names: dict[str, str] = {}
         for param in _rust_split_top(params):
             name, _, declared = param.partition(":")
-            resolved = type_node(declared) if declared else None
-            if resolved is not None:
-                locals_[name.strip()] = resolved
+            bare = _rust_bare_type(declared) if declared else ""
+            if bare:
+                local_names[name.strip()] = bare
         for lm in _RUST_LET_RE.finditer(body):
             name, annotated, value = lm.group(1), lm.group(2), lm.group(3) or ""
-            bound = type_node(annotated) if annotated else None
-            if bound is None and (sm := _RUST_LET_STRUCT_RE.match(value)):
-                bound = type_node(sm.group(1))
-            if bound is None and (am := _RUST_LET_ASSOC_RE.match(value)):
-                head = "Self" if am.group(1) == "Self" else am.group(1)
-                base = owner if head == "Self" else type_node(am.group(1))
-                target = lookup_method(base, am.group(2))
-                bound = returns.get(target) if target else None
-            if bound is not None:
-                locals_[name] = bound
+            bound = _rust_bare_type(annotated) if annotated else ""
+            if not bound and (sm := _RUST_LET_STRUCT_RE.match(value)):
+                bound = _rust_bare_type(sm.group(1))
+            if not bound and (am := _RUST_LET_ASSOC_RE.match(value)):
+                head = am.group(1)
+                base = owner if head == "Self" else type_node(head)
+                target = lookup_method(base, am.group(2)) if base else None
+                bound = returns.get(target, "") if target else ""
+            if bound:
+                local_names[name] = bound
 
         def add(target: str | None, _fn_id: str = fn_id) -> None:
             if target and (_fn_id, target) not in seen:
                 seen.add((_fn_id, target))
                 edges.append({"source": _fn_id, "target": target, "relation": "calls"})
 
+        def defer(local: str, symbol: str, _fn_id: str = fn_id) -> None:
+            """Park the call on whichever `use` line binds *local*."""
+            direct = use_imports.get(local)
+            for import_id in ([direct] if direct else use_globs):
+                key = (_fn_id, import_id, symbol)
+                if key in pending_seen:
+                    continue
+                pending_seen.add(key)
+                edges.append({"source": _fn_id, "target": import_id,
+                              "relation": "calls", _PENDING_SYMBOL: symbol})
+
         for cm in _RUST_SELF_FIELD_CALL_RE.finditer(body):
-            add(lookup_method(fields.get(owner, {}).get(cm.group(1)), cm.group(2)))
+            declared = fields.get(owner, {}).get(cm.group(1))
+            base = type_node(declared) if declared else None
+            if base is not None:
+                add(lookup_method(base, cm.group(2)))
+            elif declared:
+                defer(declared, f"{declared}::{cm.group(2)}")
         for cm in _RUST_METHOD_CALL_RE.finditer(body):
-            receiver = cm.group(1)
-            base = owner if receiver == "self" else locals_.get(receiver)
-            add(lookup_method(base, cm.group(2)))
+            receiver, member = cm.group(1), cm.group(2)
+            declared = owner.rsplit(".", 1)[-1] if receiver == "self" and owner \
+                else local_names.get(receiver)
+            base = type_node(declared) if declared else None
+            if base is not None:
+                add(lookup_method(base, member))
+            elif declared:
+                defer(declared, f"{declared}::{member}")
         for cm in _RUST_PATH_CALL_RE.finditer(body):
-            base = owner if cm.group(1) == "Self" else type_node(cm.group(1))
-            add(lookup_method(base, cm.group(2)))
+            head, member = cm.group(1), cm.group(2)
+            base = owner if head == "Self" else type_node(head)
+            if base is not None:
+                add(lookup_method(base, member))
+            elif head != "Self":
+                defer(head, f"{head}::{member}")
         for cm in _RUST_BARE_CALL_RE.finditer(body):
             # A nested `fn helper()` declaration is not a call to itself.
             if body[:cm.start()].rstrip().endswith("fn"):
                 continue
+            name = cm.group(1)
             for scope in scope_chain:
-                candidate = f"{scope}.{cm.group(1)}"
+                candidate = f"{scope}.{name}"
                 if symbols.get(candidate) == "function":
                     add(candidate)
                     break
+            else:
+                defer(name, name)
 
     return edges
 
@@ -6052,6 +6247,233 @@ def _resolve_java_cross_file_calls(
     return resolved
 
 
+_RUST_ROOT_STEMS = ("lib", "main", "mod")
+
+
+def _rust_file_modules(nodes: list[dict]) -> dict[str, dict]:
+    """The module node that *is* each `.rs` file, keyed by source file.
+
+    A `mod helper;` declaration emits a module node of its own from the same
+    file, so picking any module node per file is a coin flip; the file's own
+    node is the one with the shortest id, since a declaration always adds a
+    segment underneath it.
+    """
+    best: dict[str, dict] = {}
+    for node in nodes:
+        source = str(node.get("source_file", ""))
+        if node.get("type") != "module" or not source.endswith(".rs"):
+            continue
+        current = best.get(source)
+        if current is None or len(node["id"]) < len(current["id"]):
+            best[source] = node
+    return best
+
+
+def _rust_module_paths(nodes: list[dict]) -> dict[str, str]:
+    """Map each Rust module path to the node id prefix that holds its symbols.
+
+    Rust node ids follow the *file* tree while `use` paths follow the *module*
+    tree, and the two differ in one place: `payments/mod.rs` is the module
+    `crate::payments`, not `crate::payments::mod`. Crate roots are found by
+    their file name, so a workspace with several crates keeps each `crate::`
+    pointing at its own root.
+
+    Args:
+        nodes: Every node in the project graph.
+
+    Returns:
+        Mapping of `crate::a::b` to the node id prefix of that module.
+    """
+    modules = list(_rust_file_modules(nodes).values())
+    # Directories holding a lib.rs or main.rs are crate roots.
+    roots: set[str] = set()
+    for node in modules:
+        path = PurePosixPath(str(node["source_file"]).replace("\\", "/"))
+        if path.stem in ("lib", "main"):
+            roots.add(str(path.parent))
+
+    paths: dict[str, str] = {}
+    for node in modules:
+        path = PurePosixPath(str(node["source_file"]).replace("\\", "/"))
+        directory = str(path.parent)
+        # The innermost crate root above this file wins.
+        root = max((r for r in roots if directory == r or directory.startswith(f"{r}/")),
+                   key=len, default=None)
+        if root is None:
+            continue
+        parts = list(PurePosixPath(directory).parts)
+        base = len(PurePosixPath(root).parts) if root != "." else 0
+        segments = parts[base:]
+        if path.stem not in _RUST_ROOT_STEMS:
+            segments = [*segments, path.stem]
+        key = "::".join(["crate", *segments])
+        paths.setdefault(key, node["id"])
+    return paths
+
+
+def _build_rust_symbol_index(nodes: list[dict]) -> dict[str, str]:
+    """Index Rust definitions by dotted suffix, when unambiguous.
+
+    Same shape as _build_global_symbol_index, restricted to nodes that came
+    from a `.rs` file so a Python symbol of the same name can never be the
+    answer. `payments.PaymentGateway.charge` is reachable as `charge`,
+    `PaymentGateway.charge` and by its full id; a suffix two definitions share
+    is dropped, so only the longer, unique form resolves it.
+
+    Args:
+        nodes: Every node in the project graph.
+
+    Returns:
+        Mapping of unambiguous suffix to node id.
+    """
+    rust_nodes = [
+        n for n in nodes if str(n.get("source_file", "")).endswith(".rs")
+    ]
+    return _build_global_symbol_index(
+        rust_nodes, types=("function", "struct", "enum", "trait", "module")
+    )
+
+
+def _resolve_rust_cross_file_calls(
+    nodes: list[dict], edges: list[dict], rust_symbol_index: dict[str, str]
+) -> list[dict]:
+    """Rewrite Rust calls routed through a `use` node to their real target.
+
+    A `use` path names the module tree, not the file tree, so it is resolved
+    against the module map rather than against ids directly. Only `crate::`,
+    `super::` and `self::` are followed: from the 2018 edition a bare
+    `use foo::bar` always means the external crate `foo`, so treating it as a
+    local module would invent edges that the compiler never makes.
+
+    Args:
+        nodes: Every node in the project graph.
+        edges: Every edge, including pending import-node calls.
+        rust_symbol_index: Output of _build_rust_symbol_index.
+
+    Returns:
+        The edge list with Rust pending calls resolved and unresolvable ones
+        dropped. Edges of other languages pass through untouched, pending key
+        included, for the resolver that owns them.
+    """
+    kinds = {n["id"]: n.get("type", "") for n in nodes}
+    module_paths = _rust_module_paths(nodes)
+    known_ids = set(kinds)
+
+    imports: dict[str, dict] = {
+        n["id"]: n for n in nodes
+        if n.get("type") == "import" and _RUST_IMPORT_SYMBOLS in n
+    }
+    # Module path of each file, so `super::` and `self::` can be anchored.
+    file_module: dict[str, str] = {}
+    for key, nid in module_paths.items():
+        file_module[nid] = key
+
+    def _absolute(path: str, importer: str) -> str | None:
+        """Rewrite a `use` path to a `crate::`-rooted one."""
+        own = file_module.get(importer)
+        if path.startswith("crate::") or path == "crate":
+            return path
+        if own is None:
+            return None
+        if path.startswith("self::"):
+            return f"{own}::{path[6:]}"
+        prefix = own
+        while path.startswith("super::"):
+            if "::" not in prefix:
+                return None
+            prefix = prefix.rsplit("::", 1)[0]
+            path = path[7:]
+            if not path.startswith("super::"):
+                return f"{prefix}::{path}" if path else prefix
+        return None
+
+    def _target_for(path: str, symbol: str) -> str | None:
+        """Node id for *symbol* reached through the `use` path *path*."""
+        module_id = module_paths.get(path)
+        if module_id is None:
+            # `crate::budget::Budget` -> module `crate::budget`, symbol trail.
+            head, _, tail = path.rpartition("::")
+            module_id = module_paths.get(head)
+            if module_id is None or not tail:
+                return None
+            symbol = f"{tail}::{symbol}" if symbol else tail
+        elif not symbol:
+            return None
+        candidate = f"{module_id}.{symbol.replace('::', '.')}"
+        if candidate in known_ids:
+            return candidate
+        # The module may re-export from a submodule; the suffix index knows.
+        return rust_symbol_index.get(symbol.replace("::", "."))
+
+    module_ids = {
+        source: node["id"] for source, node in _rust_file_modules(nodes).items()
+    }
+
+    def _candidates(node: dict, symbol: str) -> set[str]:
+        """Every definition the `use` line could mean for *symbol*."""
+        importer_id = module_ids.get(str(node.get("source_file", "")), "")
+        head, _, rest = symbol.partition("::")
+        found: set[str] = set()
+        for local, path in node[_RUST_IMPORT_SYMBOLS]:
+            absolute = _absolute(path, importer_id)
+            if absolute is None:
+                continue
+            if local == "*":
+                module = absolute[:-3]
+                target = (_target_for(f"{module}::{head}", rest) if rest
+                          else _target_for(module, head))
+            elif local == head:
+                target = _target_for(absolute, rest)
+            else:
+                continue
+            if target is not None and kinds.get(target) in (
+                    "function", "struct", "enum", "trait"):
+                found.add(target)
+        return found
+
+    # Candidates are pooled per (caller, symbol), not per import node: a name
+    # reachable through two globs arrives as two pending edges, and judging
+    # each on its own would resolve both instead of neither.
+    pooled: dict[tuple[str, str], set[str]] = {}
+    for edge in edges:
+        if edge.get("relation") != "calls" or edge.get("target") not in imports:
+            continue
+        symbol = edge.get(_PENDING_SYMBOL)
+        if symbol:
+            key = (edge["source"], symbol)
+            pooled.setdefault(key, set()).update(
+                _candidates(imports[edge["target"]], symbol))
+
+    resolved: list[dict] = []
+    seen_calls: set[tuple[str, str]] = set()
+    for edge in edges:
+        if edge.get("relation") == "calls" and edge.get("target") not in imports:
+            seen_calls.add((edge["source"], edge["target"]))
+
+    for edge in edges:
+        if edge.get("relation") != "calls" or edge.get("target") not in imports:
+            resolved.append(edge)
+            continue
+        symbol = edge.get(_PENDING_SYMBOL)
+        if not symbol:
+            continue
+        candidates = pooled.get((edge["source"], symbol), set())
+        if len(candidates) != 1:
+            continue
+        target = next(iter(candidates))
+        if target == edge["source"]:
+            continue
+        key = (edge["source"], target)
+        if key in seen_calls:
+            continue
+        seen_calls.add(key)
+        resolved.append(
+            {"source": edge["source"], "target": target, "relation": "calls"}
+        )
+
+    return resolved
+
+
 def _resolve_ts_cross_file_calls(
     nodes: list[dict], edges: list[dict], ts_symbol_index: dict[str, str]
 ) -> list[dict]:
@@ -6216,6 +6638,9 @@ def index_project(
     # unresolved pending edge, so a Java edge reaching it would be destroyed.
     filtered_edges = _resolve_java_cross_file_calls(
         unique_nodes, filtered_edges, _build_java_symbol_index(unique_nodes)
+    )
+    filtered_edges = _resolve_rust_cross_file_calls(
+        unique_nodes, filtered_edges, _build_rust_symbol_index(unique_nodes)
     )
     filtered_edges = _resolve_ts_cross_file_calls(
         unique_nodes, filtered_edges, _build_ts_symbol_index(unique_nodes)

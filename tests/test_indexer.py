@@ -4780,3 +4780,309 @@ class TestJavaCrossFileCallResolution:
         calls = self._calls(graph)
         assert ("main.run", "helpers.helper") in calls
         assert ("app.Gateway.Gateway.charge", "util.Hasher.Hasher.hash") in calls
+
+
+class TestRustCrossFileCallResolution:
+    """`calls` edges resolved across Rust modules by index_project."""
+
+    BOTH = pytest.mark.parametrize(
+        "tree_sitter", [True, False], ids=["treesitter", "regex"]
+    )
+
+    def _skip(self, tree_sitter):
+        if tree_sitter and not _RUST_TS_AVAILABLE:
+            pytest.skip("requires the 'rust' extra")
+
+    def _project(self, tmp_path: Path, files: dict[str, str], *,
+                 tree_sitter: bool, monkeypatch) -> dict:
+        monkeypatch.setattr(indexer_mod, "_RUST_TS_AVAILABLE", tree_sitter)
+        for name, source in files.items():
+            path = tmp_path / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(source, encoding="utf-8")
+        return index_project(tmp_path)
+
+    def _calls(self, graph: dict) -> set[tuple[str, str]]:
+        return {(e["source"], e["target"])
+                for e in graph["links"] if e["relation"] == "calls"}
+
+    # -- crate-rooted paths -----------------------------------------------
+
+    @BOTH
+    def test_crate_path_resolves_across_files(self, tmp_path, monkeypatch,
+                                              tree_sitter):
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "src/lib.rs": "pub mod util;\npub mod app;\n",
+            "src/util.rs": "pub fn hash_token(raw: &str) -> String { raw.to_string() }\n",
+            "src/app.rs": ("use crate::util::hash_token;\n\n"
+                           "pub fn run(c: &str) -> String { hash_token(c) }\n"),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert ("src.app.run", "src.util.hash_token") in self._calls(graph)
+
+    @BOTH
+    def test_brace_group_resolves_every_symbol(self, tmp_path, monkeypatch,
+                                               tree_sitter):
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "src/lib.rs": "pub mod util;\npub mod app;\n",
+            "src/util.rs": ("pub fn alpha() -> u64 { 1 }\n"
+                            "pub fn beta() -> u64 { 2 }\n"),
+            "src/app.rs": ("use crate::util::{alpha, beta};\n\n"
+                           "pub fn run() -> u64 { alpha() + beta() }\n"),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        calls = self._calls(graph)
+        assert ("src.app.run", "src.util.alpha") in calls
+        assert ("src.app.run", "src.util.beta") in calls
+
+    @BOTH
+    def test_nested_brace_group_resolves(self, tmp_path, monkeypatch, tree_sitter):
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "src/lib.rs": "pub mod a;\npub mod b;\npub mod app;\n",
+            "src/a.rs": "pub fn one() -> u64 { 1 }\n",
+            "src/b.rs": "pub fn two() -> u64 { 2 }\n",
+            "src/app.rs": ("use crate::{a::one, b::two};\n\n"
+                           "pub fn run() -> u64 { one() + two() }\n"),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        calls = self._calls(graph)
+        assert ("src.app.run", "src.a.one") in calls
+        assert ("src.app.run", "src.b.two") in calls
+
+    @BOTH
+    def test_imported_type_method_resolves(self, tmp_path, monkeypatch,
+                                           tree_sitter):
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "src/lib.rs": "pub mod types;\npub mod app;\n",
+            "src/types.rs": ("pub struct Engine { pub n: u64 }\n"
+                             "impl Engine {\n    pub fn run(&self) -> u64 { self.n }\n}\n"),
+            "src/app.rs": ("use crate::types::Engine;\n\n"
+                           "pub fn drive(e: Engine) -> u64 { e.run() }\n"),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert ("src.app.drive", "src.types.Engine.run") in self._calls(graph)
+
+    @BOTH
+    def test_imported_type_associated_function_resolves(self, tmp_path, monkeypatch,
+                                                        tree_sitter):
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "src/lib.rs": "pub mod types;\npub mod app;\n",
+            "src/types.rs": ("pub struct Engine { pub n: u64 }\n"
+                             "impl Engine {\n    pub fn new() -> Self { Engine { n: 0 } }\n}\n"),
+            "src/app.rs": ("use crate::types::Engine;\n\n"
+                           "pub fn build() -> u64 { Engine::new(); 0 }\n"),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert ("src.app.build", "src.types.Engine.new") in self._calls(graph)
+
+    # -- relative paths ---------------------------------------------------
+
+    @BOTH
+    def test_super_resolves_to_the_parent_module(self, tmp_path, monkeypatch,
+                                                 tree_sitter):
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "src/lib.rs": "pub mod payments;\n",
+            "src/payments/mod.rs": ("pub mod gateway;\n\n"
+                                    "pub fn checkout(n: u64) -> u64 { n }\n"),
+            "src/payments/gateway.rs": ("use super::checkout;\n\n"
+                                        "pub fn charge() -> u64 { checkout(1) }\n"),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert ("src.payments.gateway.charge", "src.payments.mod.checkout") \
+            in self._calls(graph)
+
+    @BOTH
+    def test_self_path_resolves_to_the_current_module(self, tmp_path, monkeypatch,
+                                                      tree_sitter):
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "src/lib.rs": "pub mod payments;\n",
+            "src/payments/mod.rs": ("pub mod helper;\n\n"
+                                    "use self::helper::assist;\n\n"
+                                    "pub fn run() -> u64 { assist() }\n"),
+            "src/payments/helper.rs": "pub fn assist() -> u64 { 1 }\n",
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert ("src.payments.mod.run", "src.payments.helper.assist") \
+            in self._calls(graph)
+
+    # -- globs ------------------------------------------------------------
+
+    @BOTH
+    def test_glob_with_a_single_candidate_resolves(self, tmp_path, monkeypatch,
+                                                   tree_sitter):
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "src/lib.rs": "pub mod util;\npub mod app;\n",
+            "src/util.rs": "pub fn only_one() -> u64 { 1 }\n",
+            "src/app.rs": ("use crate::util::*;\n\n"
+                           "pub fn run() -> u64 { only_one() }\n"),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert ("src.app.run", "src.util.only_one") in self._calls(graph)
+
+    @BOTH
+    def test_glob_with_two_candidates_is_ambiguous(self, tmp_path, monkeypatch,
+                                                   tree_sitter):
+        """`shared` reachable through two globs resolves to neither."""
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "src/lib.rs": "pub mod alpha;\npub mod beta;\npub mod app;\n",
+            "src/alpha.rs": "pub fn shared() -> u64 { 1 }\n",
+            "src/beta.rs": "pub fn shared() -> u64 { 2 }\n",
+            "src/app.rs": ("use crate::alpha::*;\nuse crate::beta::*;\n\n"
+                           "pub fn run() -> u64 { shared() }\n"),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert self._calls(graph) == set()
+
+    # -- what must stay silent --------------------------------------------
+
+    @BOTH
+    def test_external_crate_import_produces_no_edge(self, tmp_path, monkeypatch,
+                                                    tree_sitter):
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "src/lib.rs": "pub mod app;\n",
+            "src/app.rs": ("use std::collections::HashMap;\n\n"
+                           "pub fn run() {\n"
+                           "    let mut m: HashMap<String, u64> = HashMap::new();\n"
+                           "    m.insert(\"k\".to_string(), 1);\n}\n"),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert self._calls(graph) == set()
+
+    @BOTH
+    def test_bare_path_is_not_treated_as_a_local_module(self, tmp_path, monkeypatch,
+                                                        tree_sitter):
+        """From the 2018 edition `use util::x` names an external crate."""
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "src/lib.rs": "pub mod util;\npub mod app;\n",
+            "src/util.rs": "pub fn helper() -> u64 { 1 }\n",
+            "src/app.rs": ("use util::helper;\n\n"
+                           "pub fn run() -> u64 { helper() }\n"),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert self._calls(graph) == set()
+
+    @BOTH
+    def test_colliding_names_resolve_only_by_full_path(self, tmp_path, monkeypatch,
+                                                       tree_sitter):
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "src/lib.rs": "pub mod alpha;\npub mod beta;\npub mod app;\n",
+            "src/alpha.rs": "pub fn shared() -> u64 { 1 }\n",
+            "src/beta.rs": "pub fn shared() -> u64 { 2 }\n",
+            "src/app.rs": ("use crate::alpha::shared;\n\n"
+                           "pub fn run() -> u64 { shared() }\n"),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        calls = self._calls(graph)
+        assert ("src.app.run", "src.alpha.shared") in calls
+        assert ("src.app.run", "src.beta.shared") not in calls
+
+    @BOTH
+    def test_uncalled_import_produces_no_edge(self, tmp_path, monkeypatch,
+                                              tree_sitter):
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "src/lib.rs": "pub mod util;\npub mod app;\n",
+            "src/util.rs": "pub fn helper() -> u64 { 1 }\n",
+            "src/app.rs": "use crate::util::helper;\n\npub fn run() -> u64 { 0 }\n",
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert self._calls(graph) == set()
+
+    @BOTH
+    def test_unknown_symbol_in_a_project_module_produces_no_edge(
+            self, tmp_path, monkeypatch, tree_sitter):
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "src/lib.rs": "pub mod util;\npub mod app;\n",
+            "src/util.rs": "pub fn helper() -> u64 { 1 }\n",
+            "src/app.rs": ("use crate::util::missing;\n\n"
+                           "pub fn run() -> u64 { missing() }\n"),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert self._calls(graph) == set()
+
+    # -- graph hygiene ----------------------------------------------------
+
+    @BOTH
+    def test_edge_is_not_duplicated(self, tmp_path, monkeypatch, tree_sitter):
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "src/lib.rs": "pub mod util;\npub mod app;\n",
+            "src/util.rs": "pub fn helper() -> u64 { 1 }\n",
+            "src/app.rs": ("use crate::util::helper;\n\n"
+                           "pub fn run() -> u64 { helper() + helper() + helper() }\n"),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        pairs = [(e["source"], e["target"])
+                 for e in graph["links"] if e["relation"] == "calls"]
+        assert pairs.count(("src.app.run", "src.util.helper")) == 1
+
+    @BOTH
+    def test_no_call_edge_points_at_an_import_node(self, tmp_path, monkeypatch,
+                                                   tree_sitter):
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "src/lib.rs": "pub mod util;\npub mod app;\n",
+            "src/util.rs": "pub fn helper() -> u64 { 1 }\n",
+            "src/app.rs": ("use crate::util::helper;\nuse std::fmt::Debug;\n"
+                           "use crate::util::gone;\n\n"
+                           "pub fn run() -> u64 { helper() + gone() }\n"),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        imports = {n["id"] for n in graph["nodes"] if n["type"] == "import"}
+        for e in graph["links"]:
+            if e["relation"] == "calls":
+                assert e["target"] not in imports
+
+    @BOTH
+    def test_no_private_keys_survive_on_edges(self, tmp_path, monkeypatch,
+                                              tree_sitter):
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "src/lib.rs": "pub mod util;\npub mod app;\n",
+            "src/util.rs": "pub fn helper() -> u64 { 1 }\n",
+            "src/app.rs": ("use crate::util::helper;\n\n"
+                           "pub fn run() -> u64 { helper() }\n"),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        for e in graph["links"]:
+            assert not any(k.startswith("_") for k in e)
+
+    @BOTH
+    def test_intra_file_calls_still_resolve(self, tmp_path, monkeypatch,
+                                            tree_sitter):
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "src/lib.rs": "pub mod util;\npub mod app;\n",
+            "src/util.rs": "pub fn helper() -> u64 { 1 }\n",
+            "src/app.rs": ("use crate::util::helper;\n\n"
+                           "fn local() -> u64 { 2 }\n"
+                           "pub fn run() -> u64 { helper() + local() }\n"),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        calls = self._calls(graph)
+        assert ("src.app.run", "src.util.helper") in calls
+        assert ("src.app.run", "src.app.local") in calls
+
+    @BOTH
+    def test_other_languages_are_unaffected(self, tmp_path, monkeypatch,
+                                            tree_sitter):
+        """The Rust pass sits between Java and TypeScript and must not eat theirs."""
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "src/lib.rs": "pub mod util;\npub mod app;\n",
+            "src/util.rs": "pub fn helper() -> u64 { 1 }\n",
+            "src/app.rs": ("use crate::util::helper;\n\n"
+                           "pub fn run() -> u64 { helper() }\n"),
+            "helpers.py": "def helper():\n    return 1\n",
+            "main.py": "from helpers import helper\n\n\ndef run():\n    return helper()\n",
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        calls = self._calls(graph)
+        assert ("main.run", "helpers.helper") in calls
+        assert ("src.app.run", "src.util.helper") in calls
+
+    @BOTH
+    def test_function_local_use_resolves(self, tmp_path, monkeypatch, tree_sitter):
+        """A `use` inside a body is still an import of the file."""
+        self._skip(tree_sitter)
+        graph = self._project(tmp_path, {
+            "src/lib.rs": "pub mod util;\npub mod app;\n",
+            "src/util.rs": "pub fn helper() -> u64 { 1 }\n",
+            "src/app.rs": ("pub fn run() -> u64 {\n"
+                           "    use crate::util::helper;\n    helper()\n}\n"),
+        }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
+        assert ("src.app.run", "src.util.helper") in self._calls(graph)

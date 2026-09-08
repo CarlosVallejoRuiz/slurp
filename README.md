@@ -4,7 +4,7 @@
 
 # slurp
 
-![tests](https://img.shields.io/badge/tests-2069%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-2109%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 ![pypi](https://img.shields.io/badge/PyPI-slurp--graph-orange)
@@ -842,6 +842,8 @@ Next: slurp "your query" --graph /path/to/project/graphify-out/graph.json
 >   `type`-only imports ignored. `@/` aliases and barrel exports supported.
 > - **Java**: import statements resolved to their target class. Static imports and
 >   wildcard imports with unique candidates supported.
+> - **Rust**: `use crate::`, `use super::`, and `{A, B, C}` multi-symbol imports
+>   resolved. Glob imports with unique candidates supported.
 >
 > An import only resolves when its *module* is part of the project. That single rule is what
 > keeps `from pathlib import Path` from binding to a local class of the same name, and

@@ -253,6 +253,39 @@ uv sync --extra rust            # solo una
       del mismo paquete usada sin `import` no tiene dónde aparcar el edge).
     - Proyecto en capas de 16 ficheros estilo Spring: **5 → 30 calls (6×)**,
       25 de ellos cross-file. Las dos ramas dan 30.
+  - **Cross-file de Rust**: los node ids siguen el árbol de **ficheros**, los
+    `use` siguen el de **módulos**, y divergen en un punto:
+    `src/payments/mod.rs` es el módulo `crate::payments`, no
+    `crate::payments::mod`. `_rust_module_paths()` hace ese mapeo y detecta
+    las raíces de crate por nombre de fichero (`lib.rs`/`main.rs`), así que en
+    un workspace cada `crate::` apunta a la suya.
+    - `_rust_expand_use()` expande un `use` a pares `[nombre local, ruta]`:
+      grupos `{A, B}` anidados, alias `as`, `self` dentro de grupo, y `*`.
+    - **Solo se siguen `crate::`, `super::` y `self::`.** Desde la edición 2018
+      `use foo::bar` es *siempre* el crate externo `foo`, nunca un módulo
+      local. Python sí resuelve rutas desnudas porque ahí sí pueden ser
+      locales; aplicar esa regla en Rust inventaría edges que el compilador
+      nunca hace.
+    - La ambigüedad se agrupa por **(llamante, símbolo)**, no por nodo import:
+      un nombre alcanzable por dos globs llega como dos edges pendientes y
+      juzgar cada uno por separado resolvía los dos en vez de ninguno.
+    - `_rust_file_modules()`: `pub mod helper;` emite también un nodo `module`
+      desde el mismo fichero. El del propio fichero es el de **id más corto**,
+      porque una declaración siempre añade un segmento. Sin esa regla el mapa
+      se quedaba con el nodo equivocado y `self::`/`super::` fallaban en todo
+      `mod.rs`.
+    - Los `use` se anclan siempre al **fichero**, estén dentro de un `mod` o de
+      un cuerpo de función. `_visit_fn` no desciende, así que tree-sitter
+      perdía los `use` locales a función que el regex sí veía.
+    - `_lookup_function()` acepta `struct`: `Pattern(&bytes)` construye un
+      tuple struct, y llamar así a un struct no-tupla no compila, de modo que
+      un nombre llamado que además es struct solo puede ser el constructor.
+    - **Limitación**: el tipo de retorno de una función importada no se
+      propaga. `let e = Engine::new(3); e.run()` resuelve `Engine::new` pero no
+      `e.run()` — saberlo exige leer el fichero destino, una segunda ronda
+      cross-file. Con anotación, parámetro o campo sí resuelve.
+    - 14 crates reales de crates.io: 1930 → **2528 calls, 598 cross-file
+      (1,31×)**. Divergencia solo-regex 22 sobre 2528.
 
 ---
 
@@ -275,7 +308,7 @@ por debajo de la carpeta que abre el editor (`~/Desktop/Slurp/`). Todos los coma
 de este documento (`uv run pytest`, `ruff check`, `uv build`, `git`) se ejecutan
 desde `~/Desktop/Slurp/slurp/`, que es donde vive este CLAUDE.md.
 
-**Estado actual:** v0.9.7 · 2069 tests · `ruff check slurp/` limpio.
+**Estado actual:** v0.9.8 · 2109 tests · `ruff check slurp/` limpio.
 
 **⚠️ IMPORTANTE — `uv sync --extra X` desinstala los extras no mencionados.**
 Sincroniza al conjunto exacto de extras que le pases, así que añadir uno con
