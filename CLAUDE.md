@@ -286,6 +286,38 @@ uv sync --extra rust            # solo una
       cross-file. Con anotación, parámetro o campo sí resuelve.
     - 14 crates reales de crates.io: 1930 → **2528 calls, 598 cross-file
       (1,31×)**. Divergencia solo-regex 22 sobre 2528.
+  - **Cross-file de Go**: un paquete es un **directorio**, no un fichero.
+    `auth/auth.go` y `auth/handlers.go` son un paquete pero emiten dos nodos
+    módulo, así que `auth.Login()` busca en todos los ficheros del directorio.
+    Java y Rust no necesitaban esto.
+    - **Bug del parser de imports**: `_GO_IMPORT_PATH_RE` escaneaba solo lo
+      entrecomillado, así que el alias explícito, el `.` y el `_` se perdían —
+      y un `import _ "x"` con la misma ruta que otro import quedaba
+      deduplicado y borrado. Ahora `_GO_IMPORT_SPEC_RE` captura el nombre
+      previo y el nodo lleva `_go_import`, `_go_alias` y `_go_alias_explicit`.
+    - **El alias automático NO es el último segmento de la ruta**, es el
+      nombre **declarado** del paquete: el repo `toml-test` declara
+      `package tomltest`. El alias adivinado desde la ruta se marca como tal y
+      es el grafo quien confirma el nombre real al resolver.
+    - **`package main` no es importable** y se excluye del índice. Sin eso,
+      `cmd/toml-test/` (que declara `main`) secuestraba la clave `toml-test` y
+      dejaba fuera al paquete raíz, que era el destino verdadero.
+    - Se quita el sufijo de versión de módulo: `github.com/x/pkg/v2` vive en
+      el directorio `pkg`.
+    - **Solo los nombres exportados cruzan el límite de paquete.** Un símbolo
+      en minúscula nunca resuelve, que es lo que impide a un dot import
+      engancharse al helper privado de otro paquete.
+    - La ambigüedad se agrupa por **(llamante, símbolo)**, igual que en Rust:
+      dos dot imports que ofrecen el mismo nombre no resuelven a ninguno.
+    - El emparejamiento ruta↔directorio es **por sufijo**, así que un paquete
+      local llamado `redis` podría capturar un `import "github.com/go-redis/
+      redis"`. Es la misma exposición que ya tienen Python y Rust con el
+      sufijo, no una nueva.
+    - **Limitación**: el tipo de retorno sigue sin propagarse, también
+      cruzando paquetes. `srv := auth.NewServer()` resuelve `NewServer` pero
+      `srv.Start()` no genera edge.
+    - Proyecto Go real (toml-test, 13 ficheros): 78 → **83 calls, 5
+      cross-file**.
 
 ---
 
@@ -308,7 +340,7 @@ por debajo de la carpeta que abre el editor (`~/Desktop/Slurp/`). Todos los coma
 de este documento (`uv run pytest`, `ruff check`, `uv build`, `git`) se ejecutan
 desde `~/Desktop/Slurp/slurp/`, que es donde vive este CLAUDE.md.
 
-**Estado actual:** v0.9.8 · 2109 tests · `ruff check slurp/` limpio.
+**Estado actual:** v0.9.9 · 2132 tests · `ruff check slurp/` limpio.
 
 **⚠️ IMPORTANTE — `uv sync --extra X` desinstala los extras no mencionados.**
 Sincroniza al conjunto exacto de extras que le pases, así que añadir uno con

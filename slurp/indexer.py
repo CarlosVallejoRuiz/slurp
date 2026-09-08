@@ -1603,8 +1603,66 @@ _GO_FUNC_RE = re.compile(
 _GO_STRUCT_RE = re.compile(r"^type\s+(\w+)\s+struct\b", re.MULTILINE)
 _GO_INTERFACE_RE = re.compile(r"^type\s+(\w+)\s+interface\b", re.MULTILINE)
 _GO_IMPORT_BLOCK_RE = re.compile(r"import\s*\((.*?)\)", re.DOTALL)
-_GO_IMPORT_SINGLE_RE = re.compile(r'^import\s+"([^"]+)"', re.MULTILINE)
-_GO_IMPORT_PATH_RE = re.compile(r'"([^"]+)"')
+_GO_IMPORT_SINGLE_RE = re.compile(r'^import\s+((?:[.\w]+\s+)?"[^"]+")', re.MULTILINE)
+# The name before the quotes is the part that decides everything: an explicit
+# alias, `.` for a dot import, `_` for a side-effect one. Scanning only the
+# quoted path throws all three away.
+_GO_IMPORT_SPEC_RE = re.compile(r'(?:(\.|_|\w+)\s+)?"([^"]+)"')
+_GO_IMPORT_PATH = "_go_import"
+_GO_IMPORT_ALIAS = "_go_alias"
+_GO_IMPORT_EXPLICIT = "_go_alias_explicit"
+# Go's own rule: a path whose first segment carries no dot is the standard
+# library. The explicit list is the same set the spec calls out, kept as
+# documentation of intent.
+_GO_STDLIB_PACKAGES = frozenset({
+    "fmt", "os", "io", "strings", "strconv", "errors", "math", "sort", "sync",
+    "time", "context", "net", "http", "json", "bufio", "bytes", "log", "path",
+    "regexp", "unicode", "reflect", "runtime", "testing",
+})
+
+
+_GO_MAJOR_VERSION_RE = re.compile(r"/v[2-9]\d*$")
+
+
+def _go_strip_version(import_path: str) -> str:
+    """Drop the `/v2` module suffix, which is not part of the directory."""
+    return _GO_MAJOR_VERSION_RE.sub("", import_path.rstrip("/"))
+
+
+def _go_is_stdlib(import_path: str) -> bool:
+    """True when *import_path* names a standard-library package."""
+    head = import_path.split("/", 1)[0]
+    return "." not in head or head in _GO_STDLIB_PACKAGES
+
+
+def _go_import_alias(alias: str | None, import_path: str) -> str:
+    """Local name a package is addressed by: explicit alias, `.`, `_`, or the
+    last path segment Go derives automatically."""
+    return alias or import_path.rstrip("/").rsplit("/", 1)[-1]
+
+
+def _go_import_node(alias: str | None, import_path: str, file_id: str,
+                    rel_path: Path, lineno: int) -> dict:
+    """Build the graph node for one import spec."""
+    local = _go_import_alias(alias, import_path)
+    safe_path = import_path.replace("/", "_").replace("-", "_").replace(".", "_")
+    if local == ".":
+        segment = f"dot_{safe_path}"
+    elif local == "_":
+        segment = f"blank_{safe_path}"
+    else:
+        segment = local.replace("-", "_").replace(".", "_")
+    return {
+        "id": f"{file_id}.import_{segment}", "label": import_path, "type": "import",
+        "description": "", "source_file": str(rel_path),
+        "source_location": f"L{lineno}", "file_type": "code",
+        _GO_IMPORT_PATH: import_path, _GO_IMPORT_ALIAS: local,
+        # Without an explicit alias the name is the package's *declared* one,
+        # which need not match the directory: `github.com/x/toml-test` is
+        # imported as `tomltest`. Only the whole graph knows that, so the
+        # guess is marked as such and settled during resolution.
+        _GO_IMPORT_EXPLICIT: alias is not None,
+    }
 
 
 # Go call-graph extraction. Go is regex-primary, so both phases work on text:
@@ -1704,6 +1762,7 @@ def _go_call_edges(
     functions: list[tuple[str, str, str | None, int]],
     types: dict[str, str],
     symbols: dict[str, str],
+    imports: list[dict] | None = None,
 ) -> list[dict]:
     """Extract `calls` edges from one Go file.
 
@@ -1714,11 +1773,14 @@ def _go_call_edges(
             for every function and method in the file.
         types: Local type name -> node id, for structs and interfaces.
         symbols: node id -> type, for every definition in the file.
+        imports: Import nodes of this file, so `pkg.Func()` can be parked on
+            the import it routes through for the cross-file pass.
 
     Returns:
         Deduplicated `calls` edges. A call that cannot be resolved to a
-        definition in this file — an imported package, a builtin, a method on a
-        value of unknown type — produces nothing.
+        definition in this file and does not route through a project import —
+        a builtin, the standard library, a method on a value of unknown type —
+        produces nothing.
     """
     clean = _go_blank_noise(source)
 
@@ -1737,13 +1799,40 @@ def _go_call_edges(
         return best[1:] if best else None
 
     edges: list[dict] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
+
+    # Package alias -> import node id, and the dot imports, which pour their
+    # exported names straight into this file's scope. The standard library is
+    # dropped here: no project package can ever answer for it.
+    by_alias: dict[str, str] = {}
+    guessed: list[str] = []
+    dot_imports: list[str] = []
+    for record in imports or ():
+        if _go_is_stdlib(record[_GO_IMPORT_PATH]):
+            continue
+        alias = record[_GO_IMPORT_ALIAS]
+        if alias == "_":
+            continue          # side-effect only: it binds no name at all
+        if alias == ".":
+            dot_imports.append(record["id"])
+        elif record.get(_GO_IMPORT_EXPLICIT):
+            by_alias[alias] = record["id"]
+        else:
+            by_alias.setdefault(alias, record["id"])
+            guessed.append(record["id"])
 
     def _emit(caller: str, target: str) -> None:
-        if (caller, target) in seen:
+        if (caller, target, "") in seen:
             return
-        seen.add((caller, target))
+        seen.add((caller, target, ""))
         edges.append({"source": caller, "target": target, "relation": "calls"})
+
+    def _defer(caller: str, import_id: str, symbol: str) -> None:
+        if (caller, import_id, symbol) in seen:
+            return
+        seen.add((caller, import_id, symbol))
+        edges.append({"source": caller, "target": import_id, "relation": "calls",
+                      _PENDING_SYMBOL: symbol})
 
     # Local variables whose struct type is pinned by a composite literal or an
     # explicit `var` declaration, scoped to the function they appear in.
@@ -1765,6 +1854,10 @@ def _go_call_edges(
         target = f"{file_id}.{name}"
         if symbols.get(target) == "function":
             _emit(enclosing[0], target)
+            continue
+        # A dot import puts another package's exported names in this scope.
+        for import_id in dot_imports:
+            _defer(enclosing[0], import_id, name)
 
     for match in _GO_QUALIFIED_CALL_RE.finditer(clean):
         receiver, method = match.group(1), match.group(2)
@@ -1778,7 +1871,17 @@ def _go_call_edges(
         else:
             owner = local_types.get((caller, receiver))
         if owner is None:
-            # An imported package (fmt.Println) or a value of unknown type.
+            # `auth.Login()` — a package alias, if this file imports one by
+            # that name. Otherwise a value of unknown type, or the stdlib.
+            # The symbol keeps the receiver: an import whose alias was only
+            # guessed from the path needs the graph to confirm the package's
+            # real name, so every such import is offered the call and the
+            # resolver decides which one, if any, binds this receiver.
+            import_id = by_alias.get(receiver)
+            targets = [import_id] if import_id is not None else []
+            targets += [nid for nid in guessed if nid != import_id]
+            for target_id in targets:
+                _defer(caller, target_id, f"{receiver}.{method}")
             continue
         target = f"{owner}.{method}"
         if symbols.get(target) == "function":
@@ -1858,47 +1961,32 @@ def index_go(path: Path, root: Path | None = None) -> tuple[list[dict], list[dic
         functions.append((nid, recv_var or "", owner if recv_type else None, m.end()))
 
     seen_imports: set[str] = set()
+    imports: list[dict] = []
+
+    def _add_import(alias: str | None, imp_path: str, lineno: int) -> None:
+        record = _go_import_node(alias, imp_path, fid, rel, lineno)
+        if record["id"] in seen_imports:
+            return
+        seen_imports.add(record["id"])
+        nodes.append(record)
+        imports.append(record)
+        edges.append({"source": fid, "target": record["id"],
+                      "relation": "imports_from"})
 
     for block_m in _GO_IMPORT_BLOCK_RE.finditer(source):
         block_lineno = _lineno(source, block_m.start())
-        for path_m in _GO_IMPORT_PATH_RE.finditer(block_m.group(1)):
-            imp_path = path_m.group(1)
-            safe = imp_path.rsplit("/", 1)[-1].replace("-", "_").replace(".", "_")
-            nid = f"{fid}.import_{safe}"
-            if nid not in seen_imports:
-                seen_imports.add(nid)
-                nodes.append({
-                    "id": nid,
-                    "label": imp_path,
-                    "type": "import",
-                    "description": "",
-                    "source_file": str(rel),
-                    "source_location": f"L{block_lineno}",
-                    "file_type": "code",
-                })
-                edges.append({"source": fid, "target": nid, "relation": "imports_from"})
+        for spec in _GO_IMPORT_SPEC_RE.finditer(block_m.group(1)):
+            _add_import(spec.group(1), spec.group(2), block_lineno)
 
     for m in _GO_IMPORT_SINGLE_RE.finditer(source):
-        imp_path = m.group(1)
-        safe = imp_path.rsplit("/", 1)[-1].replace("-", "_").replace(".", "_")
-        nid = f"{fid}.import_{safe}"
-        if nid not in seen_imports:
-            seen_imports.add(nid)
-            nodes.append({
-                "id": nid,
-                "label": imp_path,
-                "type": "import",
-                "description": "",
-                "source_file": str(rel),
-                "source_location": f"L{_lineno(source, m.start())}",
-                "file_type": "code",
-            })
-            edges.append({"source": fid, "target": nid, "relation": "imports_from"})
+        spec = _GO_IMPORT_SPEC_RE.search(m.group(1))
+        if spec is not None:
+            _add_import(spec.group(1), spec.group(2), _lineno(source, m.start()))
 
     known = {n["id"] for n in nodes}
     symbols = {n["id"]: n["type"] for n in nodes}
     edges.extend(
-        e for e in _go_call_edges(source, fid, functions, types, symbols)
+        e for e in _go_call_edges(source, fid, functions, types, symbols, imports)
         if e["source"] in known and e["target"] in known
     )
 
@@ -6474,6 +6562,179 @@ def _resolve_rust_cross_file_calls(
     return resolved
 
 
+_GO_PACKAGE_MEMBER_TYPES = ("function", "class", "interface")
+
+
+def _build_go_package_index(nodes: list[dict]) -> dict[str, list[str]]:
+    """Group Go symbols by every name their package can be addressed with.
+
+    Go's unit of import is the package, and a package is a *directory*: two
+    files in `auth/` are one package, so `auth.auth.Login` and
+    `auth.handlers.Verify` both answer to `auth`. Symbols are therefore
+    grouped by directory and keyed by each path suffix of it, plus the
+    declared package name — a key two directories claim is dropped, so only
+    the longer, unique form resolves it.
+
+    Args:
+        nodes: Every node in the project graph.
+
+    Returns:
+        Mapping of package key to the node ids of its package-level symbols.
+    """
+    directories: dict[str, list[str]] = {}
+    labels: dict[str, set[str]] = {}
+    file_modules: dict[str, str] = {}
+    for node in nodes:
+        source = str(node.get("source_file", ""))
+        if not source.endswith(".go"):
+            continue
+        directory = str(PurePosixPath(source.replace("\\", "/")).parent)
+        if node.get("type") == "module":
+            file_modules[node["id"]] = directory
+            labels.setdefault(directory, set()).add(node.get("label", ""))
+
+    for node in nodes:
+        source = str(node.get("source_file", ""))
+        if not source.endswith(".go") or node.get("type") not in _GO_PACKAGE_MEMBER_TYPES:
+            continue
+        # Only package-level symbols: `auth.Login()` can never reach a method,
+        # whose parent is its receiver type rather than the file.
+        parent = node["id"].rsplit(".", 1)[0]
+        directory = file_modules.get(parent)
+        if directory is not None:
+            directories.setdefault(directory, []).append(node["id"])
+
+    claims: dict[str, set[str]] = {}
+    for directory in directories:
+        # `package main` is an entry point, never importable, so it must not
+        # claim a key: `cmd/toml-test` would otherwise answer for the
+        # `toml-test` repository whose real package lives at the root.
+        if labels.get(directory) == {"main"}:
+            continue
+        parts = PurePosixPath(directory).parts
+        keys = {"/".join(parts[i:]) for i in range(len(parts))}
+        keys |= {name for name in labels.get(directory, set()) if name}
+        for key in keys:
+            claims.setdefault(key, set()).add(directory)
+
+    return {
+        key: directories[next(iter(dirs))]
+        for key, dirs in claims.items() if len(dirs) == 1
+    }
+
+
+def _resolve_go_cross_file_calls(
+    nodes: list[dict], edges: list[dict], go_package_index: dict[str, list[str]]
+) -> list[dict]:
+    """Rewrite Go calls routed through an import node to their real target.
+
+    An import path is matched to a project package by its longest suffix, the
+    same rule the other resolvers use for module names: `github.com/x/auth`
+    finds the `auth/` directory without the module path ever being read from
+    go.mod, and a suffix two packages share resolves to neither.
+
+    Only exported names cross a package boundary in Go, so a lowercase symbol
+    never resolves — which is what keeps a dot import from binding to another
+    package's private helper.
+
+    Args:
+        nodes: Every node in the project graph.
+        edges: Every edge, including pending import-node calls.
+        go_package_index: Output of _build_go_package_index.
+
+    Returns:
+        The edge list with Go pending calls resolved and unresolvable ones
+        dropped. Edges of other languages pass through untouched.
+    """
+    labels = {n["id"]: n.get("label", "") for n in nodes}
+    parents = {n["id"]: n["id"].rsplit(".", 1)[0] for n in nodes}
+    imports = {
+        n["id"]: n for n in nodes
+        if n.get("type") == "import" and _GO_IMPORT_PATH in n
+    }
+
+    def _members(node: dict) -> list[str]:
+        """Package-level symbols of the project package this import names.
+
+        The path is tried first, longest suffix down. When it finds nothing,
+        the package's *declared name* is tried — the only remaining link when
+        a repository is named `toml-test` but declares `package tomltest`, and
+        the same one Go itself relies on. A root-level package has no
+        directory name in its paths at all, so without this it is unreachable.
+        """
+        path = _go_strip_version(node[_GO_IMPORT_PATH])
+        parts = path.split("/")
+        for i in range(len(parts)):
+            members = go_package_index.get("/".join(parts[i:]))
+            if members is not None:
+                return members
+        binding = node[_GO_IMPORT_ALIAS] if node.get(_GO_IMPORT_EXPLICIT) \
+            else parts[-1]
+        return go_package_index.get(binding, []) or go_package_index.get(
+            binding.replace("-", "").replace("_", ""), [])
+
+    def _binds(node: dict, receiver: str, members: list[str]) -> bool:
+        """Whether *receiver* is the name this import binds."""
+        if node.get(_GO_IMPORT_EXPLICIT):
+            return node[_GO_IMPORT_ALIAS] == receiver
+        if node[_GO_IMPORT_ALIAS] == receiver:
+            return True
+        # No explicit alias: the real name is the package's declared one,
+        # which the graph knows and the import path may not spell.
+        return any(labels.get(parents.get(nid, "")) == receiver for nid in members)
+
+    def _candidates(node: dict, symbol: str) -> set[str]:
+        if _go_is_stdlib(node[_GO_IMPORT_PATH]):
+            return set()
+        receiver, _, name = symbol.rpartition(".")
+        if not name[:1].isupper():
+            return set()
+        members = _members(node)
+        if receiver and not _binds(node, receiver, members):
+            return set()
+        return {nid for nid in members if labels.get(nid) == name}
+
+    # Pooled per (caller, symbol): a name offered by two dot imports arrives as
+    # two pending edges, and judging each alone would resolve both.
+    pooled: dict[tuple[str, str], set[str]] = {}
+    for edge in edges:
+        if edge.get("relation") != "calls" or edge.get("target") not in imports:
+            continue
+        symbol = edge.get(_PENDING_SYMBOL)
+        if symbol:
+            pooled.setdefault((edge["source"], symbol), set()).update(
+                _candidates(imports[edge["target"]], symbol))
+
+    resolved: list[dict] = []
+    seen_calls: set[tuple[str, str]] = set()
+    for edge in edges:
+        if edge.get("relation") == "calls" and edge.get("target") not in imports:
+            seen_calls.add((edge["source"], edge["target"]))
+
+    for edge in edges:
+        if edge.get("relation") != "calls" or edge.get("target") not in imports:
+            resolved.append(edge)
+            continue
+        symbol = edge.get(_PENDING_SYMBOL)
+        if not symbol:
+            continue
+        candidates = pooled.get((edge["source"], symbol), set())
+        if len(candidates) != 1:
+            continue
+        target = candidates.pop()
+        if target == edge["source"]:
+            continue
+        key = (edge["source"], target)
+        if key in seen_calls:
+            continue
+        seen_calls.add(key)
+        resolved.append(
+            {"source": edge["source"], "target": target, "relation": "calls"}
+        )
+
+    return resolved
+
+
 def _resolve_ts_cross_file_calls(
     nodes: list[dict], edges: list[dict], ts_symbol_index: dict[str, str]
 ) -> list[dict]:
@@ -6641,6 +6902,9 @@ def index_project(
     )
     filtered_edges = _resolve_rust_cross_file_calls(
         unique_nodes, filtered_edges, _build_rust_symbol_index(unique_nodes)
+    )
+    filtered_edges = _resolve_go_cross_file_calls(
+        unique_nodes, filtered_edges, _build_go_package_index(unique_nodes)
     )
     filtered_edges = _resolve_ts_cross_file_calls(
         unique_nodes, filtered_edges, _build_ts_symbol_index(unique_nodes)

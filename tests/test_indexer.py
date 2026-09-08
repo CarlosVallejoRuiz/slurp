@@ -5086,3 +5086,265 @@ class TestRustCrossFileCallResolution:
                            "    use crate::util::helper;\n    helper()\n}\n"),
         }, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
         assert ("src.app.run", "src.util.helper") in self._calls(graph)
+
+
+class TestGoCrossFileCallResolution:
+    """`calls` edges resolved across Go packages by index_project."""
+
+    def _project(self, tmp_path: Path, files: dict[str, str]) -> dict:
+        for name, source in files.items():
+            path = tmp_path / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(source, encoding="utf-8")
+        return index_project(tmp_path)
+
+    def _calls(self, graph: dict) -> set[tuple[str, str]]:
+        return {(e["source"], e["target"])
+                for e in graph["links"] if e["relation"] == "calls"}
+
+    AUTH = "package auth\n\nfunc Login(card string) bool { return true }\n"
+
+    # -- aliases ----------------------------------------------------------
+
+    def test_automatic_alias_resolves(self, tmp_path):
+        """`import \"x/auth\"` binds the name `auth`."""
+        graph = self._project(tmp_path, {
+            "auth/auth.go": self.AUTH,
+            "pay/pay.go": ('package pay\n\nimport "github.com/p/auth"\n\n'
+                           'func Charge(c string) bool { return auth.Login(c) }\n'),
+        })
+        assert ("pay.pay.Charge", "auth.auth.Login") in self._calls(graph)
+
+    def test_explicit_alias_resolves(self, tmp_path):
+        graph = self._project(tmp_path, {
+            "auth/auth.go": self.AUTH,
+            "pay/pay.go": ('package pay\n\nimport a "github.com/p/auth"\n\n'
+                           'func Charge(c string) bool { return a.Login(c) }\n'),
+        })
+        assert ("pay.pay.Charge", "auth.auth.Login") in self._calls(graph)
+
+    def test_package_name_differing_from_the_directory_resolves(self, tmp_path):
+        """A repo named `toml-test` may declare `package tomltest`."""
+        graph = self._project(tmp_path, {
+            "toml-test/runner.go": ("package tomltest\n\n"
+                                    "func NewRunner() int { return 1 }\n"),
+            "cmd/app/main.go": ('package main\n\n'
+                                'import tomltest "github.com/p/toml-test/v2"\n\n'
+                                'func Run() int { return tomltest.NewRunner() }\n'),
+        })
+        assert ("cmd.app.main.Run", "toml_test.runner.NewRunner") in self._calls(graph)
+
+    # -- dot and side-effect imports --------------------------------------
+
+    def test_dot_import_with_a_single_candidate_resolves(self, tmp_path):
+        graph = self._project(tmp_path, {
+            "legacy/legacy.go": "package legacy\n\nfunc OnlyHere() int { return 1 }\n",
+            "pay/pay.go": ('package pay\n\nimport . "github.com/p/legacy"\n\n'
+                           'func Charge() int { return OnlyHere() }\n'),
+        })
+        assert ("pay.pay.Charge", "legacy.legacy.OnlyHere") in self._calls(graph)
+
+    def test_dot_import_with_two_candidates_is_ambiguous(self, tmp_path):
+        graph = self._project(tmp_path, {
+            "alpha/alpha.go": "package alpha\n\nfunc Same() int { return 1 }\n",
+            "beta/beta.go": "package beta\n\nfunc Same() int { return 2 }\n",
+            "pay/pay.go": ('package pay\n\nimport (\n\t. "github.com/p/alpha"\n'
+                           '\t. "github.com/p/beta"\n)\n\n'
+                           'func Charge() int { return Same() }\n'),
+        })
+        assert self._calls(graph) == set()
+
+    def test_dot_import_does_not_reach_an_unexported_name(self, tmp_path):
+        """Only exported names cross a package boundary in Go."""
+        graph = self._project(tmp_path, {
+            "legacy/legacy.go": "package legacy\n\nfunc helper() int { return 1 }\n",
+            "pay/pay.go": ('package pay\n\nimport . "github.com/p/legacy"\n\n'
+                           'func Charge() int { return helper() }\n'),
+        })
+        assert self._calls(graph) == set()
+
+    def test_side_effect_import_produces_no_edge(self, tmp_path):
+        graph = self._project(tmp_path, {
+            "auth/auth.go": self.AUTH,
+            "pay/pay.go": ('package pay\n\nimport _ "github.com/p/auth"\n\n'
+                           'func Charge(c string) bool { return auth.Login(c) }\n'),
+        })
+        assert self._calls(graph) == set()
+
+    def test_side_effect_import_keeps_its_own_node(self, tmp_path):
+        """A blank import must not collide with a real one for the same path."""
+        graph = self._project(tmp_path, {
+            "auth/auth.go": self.AUTH,
+            "pay/pay.go": ('package pay\n\nimport (\n\ta "github.com/p/auth"\n'
+                           '\t_ "github.com/p/other"\n)\n\n'
+                           'func Charge(c string) bool { return a.Login(c) }\n'),
+        })
+        labels = sorted(n["label"] for n in graph["nodes"] if n["type"] == "import")
+        assert labels == ["github.com/p/auth", "github.com/p/other"]
+        assert ("pay.pay.Charge", "auth.auth.Login") in self._calls(graph)
+
+    # -- what must stay silent --------------------------------------------
+
+    def test_stdlib_call_produces_no_edge(self, tmp_path):
+        graph = self._project(tmp_path, {
+            "pay/pay.go": ('package pay\n\nimport (\n\t"fmt"\n\t"net/http"\n)\n\n'
+                           'func Charge() {\n\tfmt.Println("x")\n'
+                           '\thttp.Get("y")\n}\n'),
+        })
+        assert self._calls(graph) == set()
+
+    def test_stdlib_named_like_a_project_package_produces_no_edge(self, tmp_path):
+        """A local `json` package must not answer for `encoding/json`."""
+        graph = self._project(tmp_path, {
+            "json/json.go": "package json\n\nfunc Marshal(v int) int { return v }\n",
+            "pay/pay.go": ('package pay\n\nimport "encoding/json"\n\n'
+                           'func Charge() int { return json.Marshal(1) }\n'),
+        })
+        assert self._calls(graph) == set()
+
+    def test_unexported_symbol_across_packages_produces_no_edge(self, tmp_path):
+        graph = self._project(tmp_path, {
+            "auth/auth.go": "package auth\n\nfunc login() bool { return true }\n",
+            "pay/pay.go": ('package pay\n\nimport "github.com/p/auth"\n\n'
+                           'func Charge() bool { return auth.login() }\n'),
+        })
+        assert self._calls(graph) == set()
+
+    def test_unknown_symbol_in_a_project_package_produces_no_edge(self, tmp_path):
+        graph = self._project(tmp_path, {
+            "auth/auth.go": self.AUTH,
+            "pay/pay.go": ('package pay\n\nimport "github.com/p/auth"\n\n'
+                           'func Charge() bool { return auth.Missing() }\n'),
+        })
+        assert self._calls(graph) == set()
+
+    def test_main_package_is_not_importable(self, tmp_path):
+        graph = self._project(tmp_path, {
+            "cmd/tool/main.go": ("package main\n\nfunc Helper() int { return 1 }\n"),
+            "pay/pay.go": ('package pay\n\nimport "github.com/p/cmd/tool"\n\n'
+                           'func Charge() int { return tool.Helper() }\n'),
+        })
+        assert self._calls(graph) == set()
+
+    def test_uncalled_import_produces_no_edge(self, tmp_path):
+        graph = self._project(tmp_path, {
+            "auth/auth.go": self.AUTH,
+            "pay/pay.go": ('package pay\n\nimport "github.com/p/auth"\n\n'
+                           'func Charge() int { return 0 }\n'),
+        })
+        assert self._calls(graph) == set()
+
+    # -- collisions -------------------------------------------------------
+
+    def test_colliding_package_suffix_resolves_only_by_longer_path(self, tmp_path):
+        graph = self._project(tmp_path, {
+            "internal/auth/auth.go": "package auth\n\nfunc Shared() int { return 1 }\n",
+            "vendorish/auth/auth.go": "package auth\n\nfunc Shared() int { return 2 }\n",
+            "app/app.go": ('package app\n\nimport "github.com/p/internal/auth"\n\n'
+                           'func Run() int { return auth.Shared() }\n'),
+        })
+        calls = self._calls(graph)
+        assert ("app.app.Run", "internal.auth.auth.Shared") in calls
+        assert ("app.app.Run", "vendorish.auth.auth.Shared") not in calls
+
+    def test_same_symbol_in_two_packages_resolves_to_the_imported_one(self, tmp_path):
+        graph = self._project(tmp_path, {
+            "auth/auth.go": self.AUTH,
+            "util/util.go": "package util\n\nfunc Login(x string) bool { return false }\n",
+            "pay/pay.go": ('package pay\n\nimport "github.com/p/util"\n\n'
+                           'func Charge(c string) bool { return util.Login(c) }\n'),
+        })
+        calls = self._calls(graph)
+        assert ("pay.pay.Charge", "util.util.Login") in calls
+        assert ("pay.pay.Charge", "auth.auth.Login") not in calls
+
+    # -- packages span files ----------------------------------------------
+
+    def test_package_spread_over_two_files_resolves_from_both(self, tmp_path):
+        """A Go package is a directory, not a file."""
+        graph = self._project(tmp_path, {
+            "multi/one.go": "package multi\n\nfunc First() int { return 1 }\n",
+            "multi/two.go": "package multi\n\nfunc Second() int { return 2 }\n",
+            "app/app.go": ('package app\n\nimport "github.com/p/multi"\n\n'
+                           'func Run() int { return multi.First() + multi.Second() }\n'),
+        })
+        calls = self._calls(graph)
+        assert ("app.app.Run", "multi.one.First") in calls
+        assert ("app.app.Run", "multi.two.Second") in calls
+
+    # -- graph hygiene ----------------------------------------------------
+
+    def test_edge_is_not_duplicated(self, tmp_path):
+        graph = self._project(tmp_path, {
+            "auth/auth.go": self.AUTH,
+            "pay/pay.go": ('package pay\n\nimport "github.com/p/auth"\n\n'
+                           'func Charge(c string) bool {\n'
+                           '\tauth.Login(c)\n\tauth.Login(c)\n'
+                           '\treturn auth.Login(c)\n}\n'),
+        })
+        pairs = [(e["source"], e["target"])
+                 for e in graph["links"] if e["relation"] == "calls"]
+        assert pairs.count(("pay.pay.Charge", "auth.auth.Login")) == 1
+
+    def test_no_call_edge_points_at_an_import_node(self, tmp_path):
+        graph = self._project(tmp_path, {
+            "auth/auth.go": self.AUTH,
+            "pay/pay.go": ('package pay\n\nimport (\n\t"fmt"\n'
+                           '\t"github.com/p/auth"\n\t"github.com/p/absent"\n)\n\n'
+                           'func Charge(c string) bool {\n\tfmt.Println(c)\n'
+                           '\tabsent.Gone()\n\treturn auth.Login(c)\n}\n'),
+        })
+        imports = {n["id"] for n in graph["nodes"] if n["type"] == "import"}
+        for e in graph["links"]:
+            if e["relation"] == "calls":
+                assert e["target"] not in imports
+
+    def test_no_private_keys_survive_on_edges(self, tmp_path):
+        graph = self._project(tmp_path, {
+            "auth/auth.go": self.AUTH,
+            "pay/pay.go": ('package pay\n\nimport "github.com/p/auth"\n\n'
+                           'func Charge(c string) bool { return auth.Login(c) }\n'),
+        })
+        for e in graph["links"]:
+            assert not any(k.startswith("_") for k in e)
+
+    def test_intra_file_calls_still_resolve(self, tmp_path):
+        graph = self._project(tmp_path, {
+            "auth/auth.go": self.AUTH,
+            "pay/pay.go": ('package pay\n\nimport "github.com/p/auth"\n\n'
+                           'type Gateway struct{ n int }\n\n'
+                           'func (g *Gateway) Charge(c string) bool {\n'
+                           '\tif !auth.Login(c) {\n\t\treturn false\n\t}\n'
+                           '\treturn g.finish()\n}\n\n'
+                           'func (g *Gateway) finish() bool { return true }\n'),
+        })
+        calls = self._calls(graph)
+        assert ("pay.pay.Gateway.Charge", "auth.auth.Login") in calls
+        assert ("pay.pay.Gateway.Charge", "pay.pay.Gateway.finish") in calls
+
+    def test_a_local_variable_shadowing_a_package_name_wins(self, tmp_path):
+        """A receiver that is a local value is not the imported package."""
+        graph = self._project(tmp_path, {
+            "auth/auth.go": self.AUTH,
+            "pay/pay.go": ('package pay\n\nimport "github.com/p/auth"\n\n'
+                           'type Thing struct{ n int }\n\n'
+                           'func (t *Thing) Login(c string) bool { return true }\n\n'
+                           'func Charge(c string) bool {\n'
+                           '\tauth := &Thing{}\n\treturn auth.Login(c)\n}\n'),
+        })
+        calls = self._calls(graph)
+        assert ("pay.pay.Charge", "pay.pay.Thing.Login") in calls
+        assert ("pay.pay.Charge", "auth.auth.Login") not in calls
+
+    def test_other_languages_are_unaffected(self, tmp_path):
+        """The Go pass sits before TypeScript's sweeper and must not eat its edges."""
+        graph = self._project(tmp_path, {
+            "auth/auth.go": self.AUTH,
+            "pay/pay.go": ('package pay\n\nimport "github.com/p/auth"\n\n'
+                           'func Charge(c string) bool { return auth.Login(c) }\n'),
+            "helpers.py": "def helper():\n    return 1\n",
+            "main.py": "from helpers import helper\n\n\ndef run():\n    return helper()\n",
+        })
+        calls = self._calls(graph)
+        assert ("main.run", "helpers.helper") in calls
+        assert ("pay.pay.Charge", "auth.auth.Login") in calls
