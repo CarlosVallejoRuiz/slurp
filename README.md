@@ -811,9 +811,10 @@ Indexing /path/to/project ...
 Next: slurp "your query" --graph /path/to/project/graphify-out/graph.json
 ```
 
-> **Call graph (Python, TypeScript, JavaScript, Go, Java, Rust):** `slurp index` extracts
-> `calls` edges between functions, enabling accurate risk analysis in
-> [`slurp explain`](#slurp-explain) and impact propagation in [`slurp diff`](#slurp-diff).
+> **Call graph — five languages** (Python, TypeScript/JavaScript, Go, Java, Rust):
+> `slurp index` extracts `calls` edges between functions, within a file and across them,
+> enabling accurate risk analysis in [`slurp explain`](#slurp-explain) and impact
+> propagation in [`slurp diff`](#slurp-diff).
 >
 > | | Python | TypeScript / JavaScript | Go | Java | Rust |
 > |---|---|---|---|---|---|
@@ -825,6 +826,7 @@ Next: slurp "your query" --graph /path/to/project/graphify-out/graph.json
 > | Static calls | — | — | — | `ClassName.method()` | `Type::assoc()`, `Self::assoc()` |
 > | Fields | — | — | — | ✅ declared type, incl. `@Autowired` | ✅ declared type |
 > | Parameters | — | — | — | — | ✅ declared type |
+> | Cross-file | ✅ | ✅ | ✅ | ✅ | ✅ |
 > | Parser | stdlib `ast` | tree-sitter, with a regex fallback | regex | tree-sitter, with a regex fallback | tree-sitter, with a regex fallback |
 >
 > **Anything that cannot be resolved with certainty emits no edge** — stdlib and
@@ -833,9 +835,9 @@ Next: slurp "your query" --graph /path/to/project/graphify-out/graph.json
 > resolves to silence. Both endpoints of every `calls` edge are guaranteed to be nodes that
 > exist in the graph.
 >
-> **Cross-file calls resolved** — an imported symbol followed by a call now generates a
-> direct `calls` edge to the real definition, not a dead end at the import placeholder.
-> Resolution runs after every file is indexed, so it sees the whole project.
+> **Cross-file calls resolved in all five languages** — an imported symbol followed by a
+> call generates a direct `calls` edge to the real definition, not a dead end at the import
+> placeholder. Resolution runs after every file is indexed, so it sees the whole project.
 >
 > - **Python**: `from X import f` followed by `f()`, plus `import X as m` + `m.f()`.
 > - **TypeScript/JavaScript**: named, namespace, default and aliased imports resolved.
@@ -852,20 +854,21 @@ Next: slurp "your query" --graph /path/to/project/graphify-out/graph.json
 > keeps `from pathlib import Path` from binding to a local class of the same name, and
 > `import { useState } from 'react'` from binding to a local `react.ts`.
 >
-> Go resolves within a package but has no cross-file pass yet, and **does not propagate
-> function return types**: `srv := NewServer()` followed by `srv.Start()` emits no edge,
-> because the graph does not record that `NewServer` returns a `*Server`. Local variables
-> typed by a struct literal or a `var` declaration do resolve. Go methods are nested under
-> their receiver, so a method's node id is `pkg.Struct.Method`.
+> **Go** methods are nested under their receiver, so a method's node id is
+> `pkg.Struct.Method`. A package is a *directory*, not a file, so `auth.Login()` is
+> answered by every file in `auth/`, and `package main` is excluded from the index
+> because it is never importable. A local variable typed by a struct literal or a `var`
+> declaration resolves.
 >
-> Java resolves within a file and has no cross-file pass yet. Because Java declares every
-> variable and field type, nothing has to be inferred from an initialiser — a field resolves
-> whenever its declared type is a class in the same file, which is what makes dependency-
-> injected collaborators navigable. A field whose type lives elsewhere resolves to nothing.
+> **Java** declares every variable and field type, so nothing has to be inferred from an
+> initialiser — a field resolves whenever its declared type is a class this file can
+> name, which is what makes dependency-injected collaborators navigable. Method
+> parameters are not yet read, and inheritance does not cross files: a method inherited
+> from a base class in another file resolves to nothing.
 >
-> **Rust** resolves within a file, with no cross-file pass yet. Methods live in `impl`
-> blocks, not in the `struct`, so a method's node id is `module.Type.method` and every
-> `impl Type` block — including `impl Trait for Type` — contributes to the same type. The
+> **Rust** methods live in `impl` blocks, not in the `struct`, so a method's node id is
+> `module.Type.method` and every `impl Type` block — including `impl Trait for Type` —
+> contributes to the same type. The
 > `self` receiver (`self`, `&self`, `&mut self`) resolves to the enclosing `impl`, `Self::`
 > and `Type::` to an associated function, and a trait's default method resolves through
 > `impl Trait for Type` when the trait is declared in the same file. Types are *declared* in
@@ -880,12 +883,19 @@ Next: slurp "your query" --graph /path/to/project/graphify-out/graph.json
 > in the file. A bare `helper()` never resolves to a method either: Rust has no implicit
 > receiver, so inside `impl Gateway` a bare `submit()` is a free function, not `self.submit`.
 >
+> **Return types are not propagated** in Go or Rust: `srv := NewServer()` followed by
+> `srv.Start()` emits no edge, because the graph does not record that `NewServer` returns
+> a `*Server`. The call to `NewServer` itself resolves, across files included; only what
+> is called *on its result* is lost. An explicit type — a `var` declaration, a `let x: T`
+> annotation, a parameter or a field — resolves normally.
+>
 > Without the `ts` extra, TypeScript falls back to regex, which blanks comments and string
 > literals before scanning and resolves everything above **except** methods inherited from a
 > base class. Without the `java` extra, Java falls back to regex, which resolves everything
-> above **except** fields, since the regex parser emits no field nodes to read a type from.
-> Without the `rust` extra, Rust falls back to regex, which resolves everything above:
-> across 600 files from crates.io the two branches agree exactly on 589 of them.
+> above, including static imports across files. Without the `rust` extra, Rust falls back
+> to regex, which also resolves everything above: across 600 files from crates.io the two
+> branches agree exactly on 589 of them. Every regex fallback is anchored on declaration
+> lines, so two declarations sharing a single line leave the second one unseen.
 > The remaining 11 languages still emit `contains` and `imports_from` only.
 
 | Flag | Default | Description |
