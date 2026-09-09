@@ -8,6 +8,7 @@ graph.
 
 import json
 import subprocess
+import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -295,8 +296,12 @@ def _reindex_files(
             continue
         try:
             file_nodes, file_edges = indexer(path, root)  # type: ignore[operator]
-        except Exception:
-            # Matches index_project: an unparseable file is skipped, not fatal.
+        except Exception as exc:
+            # An unparseable file is skipped rather than fatal, exactly as in
+            # index_project() — and, as there, it is reported. A silent skip
+            # hands back a quietly incomplete graph, which is worse than a
+            # slow one: nothing downstream can tell the file was dropped.
+            print(f"  Warning: skipping {path}: {exc}", file=sys.stderr)
             continue
         nodes.extend(file_nodes)
         edges.extend(file_edges)

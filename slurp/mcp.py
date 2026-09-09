@@ -8,6 +8,7 @@ import json
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import TextIO
 
 from slurp import __version__
 from slurp.budget import clear_node_token_cache, select_subgraph
@@ -272,6 +273,9 @@ def read_session_log(log_dir: Path | None = None, last: int | None = None) -> li
         try:
             parsed = json.loads(line)
         except ValueError:
+            # INTENTIONAL: the session log is append-only JSONL written by a
+            # long-running server, so a truncated final line is expected after
+            # a crash. One unreadable line must not hide the rest of the log.
             continue
         if isinstance(parsed, dict):
             entries.append(parsed)
@@ -446,8 +450,8 @@ def _handle(msg: dict, G, out, session_log: bool = True, state: "GraphState | No
 
 def serve(
     graph_path: "Path | list[Path]",
-    inp=None,
-    out=None,
+    inp: TextIO | None = None,
+    out: TextIO | None = None,
     session_log: bool = True,
     labels: list[str] | None = None,
 ) -> None:

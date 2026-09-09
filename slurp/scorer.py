@@ -77,7 +77,10 @@ def _pagerank(
         try:
             _pagerank_cache[key] = (weakref.ref(G), rank)
         except TypeError:
-            pass  # graph type does not support weak references — skip caching
+            # INTENTIONAL: some graph types do not support weak references.
+            # The cache is an optimisation, so losing it costs time, never
+            # correctness — the computed rank is returned either way.
+            pass
 
     return rank
 

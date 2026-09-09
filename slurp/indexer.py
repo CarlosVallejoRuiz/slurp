@@ -6818,10 +6818,12 @@ def iter_source_files(root: Path) -> Iterator[Path]:
     for path in sorted(root.rglob("*")):
         if not path.is_file() or _should_skip(path):
             continue
-        # Guard against symlink traversal outside the project root
         try:
             path.resolve().relative_to(root_resolved)
         except ValueError:
+            # INTENTIONAL: a symlink resolving outside the project root is not
+            # part of this project. Skipping silently is the security
+            # behaviour — following it would index arbitrary files on disk.
             continue
         if path.suffix.lower() in _INDEXED_EXTENSIONS:
             yield path

@@ -8,6 +8,7 @@ entire graph — and an LLM judge scores both against a known ground truth.
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -280,7 +281,7 @@ def run_eval(
     budget: int = 4000,
     graph_path: Path | None = None,
     model: str = "cl100k_base",
-    on_question=None,
+    on_question: Callable[[EvalResult], None] | None = None,
 ) -> EvalSuite:
     """Answer every question twice and have a judge score both answers.
 

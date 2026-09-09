@@ -15,6 +15,10 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Topic :: Software Development :: Documentation",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+    "Environment :: Console",
 ]
 dependencies = [
     "anthropic>=0.106.0",
@@ -87,8 +91,10 @@ all-languages = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/CarlosVallejoRuiz/slurp"
+Homepage = "https://imjuank.dev/slurp-web"
 Repository = "https://github.com/CarlosVallejoRuiz/slurp"
+Documentation = "https://github.com/CarlosVallejoRuiz/slurp/blob/main/USAGE.md"
+Issues = "https://github.com/CarlosVallejoRuiz/slurp/issues"
 
 [project.scripts]
 slurp = "slurp.cli:cli"
