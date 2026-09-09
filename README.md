@@ -1134,6 +1134,24 @@ Pass a custom path with `--ignore-file path/to/.slurpignore`.
 - ✅ **v0.4.0** — `--backend openai|anthropic` (optional embeddings), `slurp benchmark`, GraphML + Neo4j CSV loader, `convert_graph()`
 - ✅ **v0.5.0** — `--inject-code`: extract real function bodies from source files and embed them in the context output
 - ✅ **v0.6.0** — `slurp index .`: standalone static indexer (Python ast, TypeScript/JS, Go) — graphify is now optional
+- ✅ **v0.6.1** — `slurp init`: guided one-command setup — language detection, indexing and MCP config in one step
+- ✅ **v0.6.2** — `slurp benchmark` cost estimation in USD per model, `--price-model`
+- ✅ **v0.6.3** — `--viz-output`: save the interactive HTML to a file without opening a browser
+- ✅ **v0.6.4** — MCP session log, `slurp session`, `--log` — every query the server answered, on the record
+- ✅ **v0.6.5** — `slurp diff` impact headline, "what to review" section, CLI summary panel
+- ✅ **v0.7.0** — MCP performance: 8.1× faster end-to-end, PageRank and token caches, deterministic greedy heap, auto-reload on a stale graph
+- ✅ **v0.8.0** — 16-language indexer (Java, Rust, C#, Ruby, PHP, Kotlin, Scala, Swift, C, C++, Lua, Elixir, PowerShell), `_BaseVisitor` refactor, broken-tree guard on every grammar
+- ✅ **v0.8.1** — premium `--viz` redesign: type colors, glow, smart label inference, quiet nodes, legend, project panel
+- ✅ **v0.9.0** — `slurp index --smart` (git-aware incremental, 21× faster), `slurp advisor`, multi-graph federation, sdist 98.7% smaller
+- ✅ **v0.9.1** — `slurp explain`: LLM node explanations across 4 providers with a structural fallback, `slurp config`
+- ✅ **v0.9.2** — Python call graph: `calls` edges between functions, real risk levels in `slurp explain`
+- ✅ **v0.9.3** — TypeScript/JavaScript call graph, tree-sitter with a regex fallback
+- ✅ **v0.9.4** — Python and TypeScript/JavaScript cross-file call resolution — imports followed to the real definition
+- ✅ **v0.9.5** — `slurp eval`: LLM-judge quality benchmark, 5× better quality per token
+- ✅ **v0.9.6** — Go call graph: receiver methods, struct initialisers, package-local resolution
+- ✅ **v0.9.7** — Java and Rust call graphs: DI fields and `super`/`this`/static for Java, `impl` blocks, `self` receiver and trait resolution for Rust
+- ✅ **v0.9.8** — Java and Rust cross-file call resolution: static and wildcard imports, `use crate::`/`super::`, multi-symbol and glob imports
+- ✅ **v0.9.9** — Go cross-file call resolution: package aliases, dot imports, `package main` excluded — all five call-graph languages now resolve across files
 
 ---
 
