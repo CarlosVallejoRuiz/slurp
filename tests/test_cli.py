@@ -243,13 +243,23 @@ class TestExplainFlag:
         assert result.exit_code == 0
         assert "Score Breakdown" not in result.output
 
-    def test_scores_not_embedded_in_markdown(self, sample_graph_json):
+    def test_markdown_embeds_the_final_score(self, sample_graph_json):
+        """Plain output carries each node's score; --explain adds the breakdown.
+
+        Until v1.0.0 the CLI withheld scores from the markdown entirely, a
+        v0.2.0 decision that `--explain` was meant to satisfy instead. It left
+        the default output both unscored and sorted alphabetically rather than
+        by relevance, and it disagreed with `slurp export` and the MCP server,
+        which had always sent scores to the model.
+        """
         result = _runner().invoke(
             cli, ["auth", "--graph", str(sample_graph_json), "--format", "markdown",
                   "--no-audit"]
         )
         assert result.exit_code == 0
-        assert "score:" not in result.output
+        assert "score:" in result.output
+        # The per-signal breakdown stays behind --explain.
+        assert "Score Breakdown" not in result.output
 
 
 # ---------------------------------------------------------------------------

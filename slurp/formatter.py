@@ -83,9 +83,12 @@ def _build_data(G: nx.DiGraph, stats: dict, scores: dict[str, float] | None) -> 
     for nid in _sorted_nodes(G, scores):
         attrs = G.nodes[nid]
         node: dict = {"id": nid}
-        for field in ("label", "type", "description", "importance", "file_path"):
+        for field in ("label", "type", "description", "importance"):
             if (val := attrs.get(field)) is not None:
                 node[field] = val
+        # One stable output key, whichever key the source graph used.
+        if fpath := (attrs.get("source_file") or attrs.get("file_path")):
+            node["file_path"] = fpath
         if scores and nid in scores:
             node["score"] = round(scores[nid], 4)
         nodes.append(node)
@@ -140,7 +143,10 @@ def _format_markdown(
         label = attrs.get("label", nid)
         ntype = attrs.get("type", "")
         desc = attrs.get("description", "")
-        fpath = attrs.get("file_path", "")
+        # graphify writes `file_path`, `slurp index` writes `source_file`.
+        # Reading only one of them drops the file from every graph built by
+        # the other — which since v0.6.0 is the common case.
+        fpath = attrs.get("source_file") or attrs.get("file_path") or ""
 
         heading = f"### {label}"
         if ntype:
@@ -155,8 +161,7 @@ def _format_markdown(
             lines.append(f"→ File: {fpath}")
         code_block = attrs.get("code_block", "")
         if code_block:
-            lang_path = fpath or attrs.get("source_file", "")
-            lang = _file_lang(lang_path)
+            lang = _file_lang(fpath)
             lines.append(f"```{lang}")
             lines.append(code_block)
             lines.append("```")

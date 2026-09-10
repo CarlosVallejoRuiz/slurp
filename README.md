@@ -137,55 +137,76 @@ slurp init
 Then query it:
 
 ```bash
-slurp "auth flow" --graph graph.json --budget 4000
+slurp "player stats" --graph graph.json --budget 4000
 ```
 
+Real output, on a 2,111-node graph of a Next.js codebase:
+
 ```
-╭─ Slurp — Subgraph for: "auth flow" (budget: 4,000 tokens) ──────────────╮
-│ Selected 5/2111 nodes · 847/4,000 tokens used (21.2%)                    │
-╰───────────────────────────────────────────────────────────────────────────╯
+╭─ Slurp — Subgraph for: "player stats" (budget: 4,000 tokens) ╮
+│ Selected 402/2111 nodes · 4,000/4,000 tokens used (19.0%)    │
+╰──────────────────────────────────────────────────────────────╯
 
 ## Relevant Nodes
 
-### authenticate_user (function) · score: 0.94
-Validates user credentials and returns JWT token.
-→ File: src/auth/service.py
+### recalcularPlayerStats() · score: 0.91
+→ File: lib/supabase/admin-actions.ts
 
-### JWTMiddleware (class) · score: 0.87
-Intercepts HTTP requests and validates Authorization header.
-→ File: src/middleware/jwt.py
+### getPlayerStatsAdmin() · score: 0.91
+→ File: lib/supabase/admin-actions.ts
 
-### hash_password (function) · score: 0.71
-Hashes password using bcrypt with a cost factor of 12.
-→ File: src/auth/utils.py
+### PlayerStats · score: 0.91
+→ File: types/database.ts
+
+### PlayerScatterPoint · score: 0.77
+→ File: lib/supabase/dashboard-actions.ts
+
+### PlayerScatter() · score: 0.76
+→ File: components/dashboard/player-scatter.tsx
 
 ## Key Relationships
-- JWTMiddleware → calls → authenticate_user
-- authenticate_user → calls → hash_password
+- contact_route → imports → supabase_admin_createadminclient
+- supabase_admin_actions_savematchlineup → calls → supabase_admin_actions_requireadmin
+- supabase_admin_actions_savematchlineup → calls → supabase_admin_createadminclient
 
 ---
-💡 2106 additional connected nodes available — increase --budget to include them
+💡 1709 additional connected nodes available — increase --budget to include them
 ```
+
+Nodes are ordered by relevance, and each carries the score that put it there.
+A node's one-line description appears under its heading when the graph has
+one — `slurp index` does not write descriptions, so the line is absent above.
 
 Add `--inject-code` to embed the actual function body next to each node:
 
 ```bash
-slurp "auth flow" --graph graph.json --budget 4000 --inject-code
+slurp "recalcularPlayerStats" --graph graph.json --budget 2000 --inject-code --min-score 0.8
 ```
 
 ````
-### authenticate_user (function) · score: 0.94
-Validates user credentials and returns JWT token.
-→ File: src/auth/service.py
+### recalcularPlayerStats() · score: 0.91
+→ File: lib/supabase/admin-actions.ts
 
-```python
-def authenticate_user(username: str, password: str) -> dict | None:
-    user = db.query(User).filter_by(username=username).first()
-    if not user or not bcrypt.checkpw(password.encode(), user.password_hash):
-        return None
-    return {"token": jwt.encode({"sub": user.id}, SECRET_KEY)}
+```typescript
+export async function recalcularPlayerStats(playerNombre: string, clubId: string, temporada: string) {
+    const adminClient = await createAdminClient();
+
+    // 1. Buscar jugador en players
+    const { data: player } = await adminClient
+        .from("players")
+        .select("id")
+        .eq("nombre", playerNombre)
+        .eq("club_id", clubId)
+        .eq("temporada", temporada)
+        .single();
+    ...
+}
 ```
 ````
+
+> The language tag is inferred from the file path, so the block is fenced as
+> `typescript` here without being told. Add `--project-root` when the graph does
+> not sit at the root of the source tree.
 
 Pipe the output directly into your LLM prompt, save it to a file, or use `slurp export` to format it as a ready-to-paste system prompt block.
 

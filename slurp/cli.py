@@ -380,7 +380,7 @@ def run(
             )
         subG = inject_code(subG, root)
 
-    result = format_subgraph(subG, stats, format=fmt, query=query)
+    result = format_subgraph(subG, stats, format=fmt, scores=scores, query=query)
     click.echo(result)
 
     if not no_audit:
@@ -503,7 +503,7 @@ def diff_cmd(
             scores = score_nodes(sub, query)
             subG, stats = select_subgraph(sub, scores, budget=budget)
             click.echo("\n## Token-Budgeted Affected Subgraph\n")
-            click.echo(format_subgraph(subG, stats, query=query))
+            click.echo(format_subgraph(subG, stats, scores=scores, query=query))
 
     if viz or viz_output:
         viz_G, viz_scores, viz_stats = build_diff_viz_graph(G_old, G_new, diff, hops)
