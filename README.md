@@ -1173,6 +1173,7 @@ Pass a custom path with `--ignore-file path/to/.slurpignore`.
 - ✅ **v0.9.7** — Java and Rust call graphs: DI fields and `super`/`this`/static for Java, `impl` blocks, `self` receiver and trait resolution for Rust
 - ✅ **v0.9.8** — Java and Rust cross-file call resolution: static and wildcard imports, `use crate::`/`super::`, multi-symbol and glob imports
 - ✅ **v0.9.9** — Go cross-file call resolution: package aliases, dot imports, `package main` excluded — all five call-graph languages now resolve across files
+- ✅ **v1.0.0** — Production release: complete call graph for Python, TypeScript/JS, Go, Java and Rust with cross-file resolution. `slurp explain`, `slurp eval`, `slurp advisor`, `slurp init`, federation, smart reindex, premium viz.
 
 ---
 

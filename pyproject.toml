@@ -1,6 +1,6 @@
 [project]
 name = "slurp-graph"
-version = "0.9.9"
+version = "1.0.0"
 description = "Token-budget-aware graph navigation for AI coding agents. Serve exactly the noodles your LLM needs."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -10,7 +10,7 @@ authors = [
 ]
 keywords = ["knowledge-graph", "llm", "token-optimization", "graphify", "ai-tools", "cli"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Topic :: Software Development :: Documentation",
