@@ -5348,3 +5348,207 @@ class TestGoCrossFileCallResolution:
         calls = self._calls(graph)
         assert ("main.run", "helpers.helper") in calls
         assert ("pay.pay.Charge", "auth.auth.Login") in calls
+
+
+class TestReturnTypeResolution:
+    """A variable typed by what a function returns, then called on."""
+
+    def _calls(self, tmp_path: Path, name: str, source: str,
+               indexer) -> set[tuple[str, str]]:
+        path = tmp_path / name
+        path.write_text(source, encoding="utf-8")
+        _, edges = indexer(path, tmp_path)
+        return {(e["source"], e["target"]) for e in edges if e["relation"] == "calls"}
+
+    def _nodes(self, tmp_path: Path, name: str, source: str, indexer) -> dict:
+        path = tmp_path / name
+        path.write_text(source, encoding="utf-8")
+        nodes, _ = indexer(path, tmp_path)
+        return {n["id"]: n for n in nodes}
+
+    # -- Go ---------------------------------------------------------------
+
+    def test_go_constructor_types_the_variable(self, tmp_path):
+        calls = self._calls(tmp_path, "a.go", (
+            "package srv\n"
+            "type Server struct{ n int }\n"
+            "func NewServer() *Server { return &Server{} }\n"
+            "func (s *Server) Start() int { return 1 }\n"
+            "func run() int { srv := NewServer(); return srv.Start() }\n"
+        ), index_go)
+        assert ("a.run", "a.Server.Start") in calls
+
+    def test_go_tuple_return_takes_the_non_error_type(self, tmp_path):
+        """`(*Server, error)` is destructured at the assignment, so it binds."""
+        calls = self._calls(tmp_path, "a.go", (
+            "package srv\n"
+            "type Server struct{ n int }\n"
+            "func Build() (*Server, error) { return nil, nil }\n"
+            "func (s *Server) Start() int { return 1 }\n"
+            "func run() int { srv, err := Build(); _ = err; return srv.Start() }\n"
+        ), index_go)
+        assert ("a.run", "a.Server.Start") in calls
+
+    def test_go_return_type_recorded_on_the_node(self, tmp_path):
+        nodes = self._nodes(tmp_path, "a.go", (
+            "package srv\n"
+            "type Server struct{ n int }\n"
+            "func NewServer() *Server { return &Server{} }\n"
+        ), index_go)
+        assert nodes["a.NewServer"]["return_type"] == "Server"
+
+    def test_go_error_only_return_binds_nothing(self, tmp_path):
+        calls = self._calls(tmp_path, "a.go", (
+            "package srv\n"
+            "type Server struct{ n int }\n"
+            "func check() error { return nil }\n"
+            "func (s *Server) Start() int { return 1 }\n"
+            "func run() { e := check(); e.Start() }\n"
+        ), index_go)
+        # The call to check() is still an edge; what must not appear is a
+        # method resolved through a return type that names no project struct.
+        assert ("a.run", "a.check") in calls
+        assert ("a.run", "a.Server.Start") not in calls
+
+    # -- Rust -------------------------------------------------------------
+
+    def test_rust_self_return_resolves_to_the_impl_type(self, tmp_path):
+        calls = self._calls(tmp_path, "a.rs", (
+            "pub struct Engine { pub n: u64 }\n"
+            "impl Engine {\n"
+            "    pub fn new() -> Self { Engine { n: 0 } }\n"
+            "    pub fn run(&self) -> u64 { self.n }\n}\n"
+            "pub fn drive() -> u64 { let e = Engine::new(); e.run() }\n"
+        ), index_rust)
+        assert ("a.drive", "a.Engine.run") in calls
+
+    def test_rust_free_function_returning_a_struct_resolves(self, tmp_path):
+        calls = self._calls(tmp_path, "a.rs", (
+            "pub struct Engine { pub n: u64 }\n"
+            "impl Engine {\n    pub fn run(&self) -> u64 { self.n }\n}\n"
+            "pub fn plain() -> Engine { Engine { n: 1 } }\n"
+            "pub fn drive() -> u64 { let e = plain(); e.run() }\n"
+        ), index_rust)
+        assert ("a.drive", "a.Engine.run") in calls
+
+    def test_rust_option_return_records_the_inner_type_but_binds_nothing(self, tmp_path):
+        """`Option<Engine>` is an Option: `e.run()` on it does not compile.
+
+        The inner name is kept as metadata, because that is what the value
+        ultimately carries, but binding through it would invent an edge the
+        compiler rejects — the one case where Go and Rust genuinely differ.
+        """
+        source = (
+            "pub struct Engine { pub n: u64 }\n"
+            "impl Engine {\n"
+            "    pub fn maybe() -> Option<Engine> { None }\n"
+            "    pub fn run(&self) -> u64 { self.n }\n}\n"
+            "pub fn drive() -> u64 { let e = Engine::maybe(); 0 }\n"
+        )
+        nodes = self._nodes(tmp_path, "a.rs", source, index_rust)
+        assert nodes["a.Engine.maybe"]["return_type"] == "Engine"
+        calls = self._calls(tmp_path, "a.rs", source, index_rust)
+        assert ("a.drive", "a.Engine.run") not in calls
+
+    # -- Java -------------------------------------------------------------
+
+    @pytest.mark.skipif(not _JAVA_TS_AVAILABLE, reason="requires the 'java' extra")
+    def test_java_declared_type_resolves(self, tmp_path):
+        calls = self._calls(tmp_path, "A.java", (
+            "public class Server { public int start() { return 1; } }\n"
+            "public class Factory {\n"
+            "    public Server newServer() { return new Server(); }\n"
+            "    public int go() { Server s = newServer(); return s.start(); }\n}\n"
+        ), index_java)
+        assert ("A.Factory.go", "A.Server.start") in calls
+
+    @pytest.mark.skipif(not _JAVA_TS_AVAILABLE, reason="requires the 'java' extra")
+    def test_java_var_inference_resolves(self, tmp_path):
+        calls = self._calls(tmp_path, "A.java", (
+            "public class Server { public int start() { return 1; } }\n"
+            "public class Factory {\n"
+            "    public Server newServer() { return new Server(); }\n"
+            "    public int go() { var s = newServer(); return s.start(); }\n}\n"
+        ), index_java)
+        assert ("A.Factory.go", "A.Server.start") in calls
+
+    @pytest.mark.skipif(not _JAVA_TS_AVAILABLE, reason="requires the 'java' extra")
+    def test_java_var_from_an_external_call_binds_nothing(self, tmp_path):
+        calls = self._calls(tmp_path, "A.java", (
+            "public class Server { public int start() { return 1; } }\n"
+            "public class Factory {\n"
+            "    public int go() { var s = External.make(); return s.start(); }\n}\n"
+        ), index_java)
+        assert not any(target.endswith(".start") for _, target in calls)
+
+    # -- TypeScript -------------------------------------------------------
+
+    @pytest.mark.skipif(not _TREE_SITTER_AVAILABLE, reason="requires the 'ts' extra")
+    def test_typescript_annotated_return_resolves(self, tmp_path):
+        calls = self._calls(tmp_path, "a.ts", (
+            "export class Client { query(): number { return 1; } }\n"
+            "export function createClient(): Client { return new Client(); }\n"
+            "export function run(): number { const c = createClient(); return c.query(); }\n"
+        ), index_typescript)
+        assert ("a.run", "a.Client.query") in calls
+
+    @pytest.mark.skipif(not _TREE_SITTER_AVAILABLE, reason="requires the 'ts' extra")
+    def test_typescript_promise_is_unwrapped(self, tmp_path):
+        calls = self._calls(tmp_path, "a.ts", (
+            "export class Client { query(): number { return 1; } }\n"
+            "export async function createClient(): Promise<Client> { return new Client(); }\n"
+            "export async function run(): Promise<number> {\n"
+            "  const c = await createClient();\n  return c.query();\n}\n"
+        ), index_typescript)
+        assert ("a.run", "a.Client.query") in calls
+
+    @pytest.mark.skipif(not _TREE_SITTER_AVAILABLE, reason="requires the 'ts' extra")
+    def test_typescript_unannotated_return_binds_nothing(self, tmp_path):
+        """TypeScript infers the type; a static index must not redo inference."""
+        calls = self._calls(tmp_path, "a.ts", (
+            "export class Client { query(): number { return 1; } }\n"
+            "export function createClient() { return new Client(); }\n"
+            "export function run(): number { const c = createClient(); return c.query(); }\n"
+        ), index_typescript)
+        assert ("a.run", "a.Client.query") not in calls
+
+    # -- what must stay silent --------------------------------------------
+
+    def test_external_return_type_binds_nothing(self, tmp_path):
+        calls = self._calls(tmp_path, "a.go", (
+            "package srv\n"
+            'import "database/sql"\n'
+            "func Open() *sql.DB { return nil }\n"
+            "func run() { db := Open(); db.Query() }\n"
+        ), index_go)
+        assert ("a.run", "a.Open") in calls
+        assert not any(target.endswith(".Query") for _, target in calls)
+
+    def test_go_reassigned_variable_binds_nothing(self, tmp_path):
+        """Two bindings that disagree leave the variable untyped."""
+        calls = self._calls(tmp_path, "a.go", (
+            "package srv\n"
+            "type Server struct{ n int }\n"
+            "type Other struct{ n int }\n"
+            "func NewServer() *Server { return &Server{} }\n"
+            "func NewOther() *Other { return &Other{} }\n"
+            "func (s *Server) Start() int { return 1 }\n"
+            "func (o *Other) Start() int { return 2 }\n"
+            "func run() int {\n"
+            "\tsrv := NewServer()\n"
+            "\tsrv = NewOther()\n"
+            "\treturn srv.Start()\n}\n"
+        ), index_go)
+        assert ("a.run", "a.Server.Start") not in calls
+        assert ("a.run", "a.Other.Start") not in calls
+
+    def test_existing_edges_are_unaffected(self, tmp_path):
+        calls = self._calls(tmp_path, "a.go", (
+            "package srv\n"
+            "type Server struct{ n int }\n"
+            "func NewServer() *Server { return &Server{} }\n"
+            "func (s *Server) Start() int { return 1 }\n"
+            "func run() int { srv := NewServer(); return srv.Start() }\n"
+        ), index_go)
+        assert ("a.run", "a.NewServer") in calls
+        assert ("a.NewServer", "a.Server") in calls

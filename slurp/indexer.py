@@ -919,6 +919,23 @@ _TS_SOURCE_MODULE = "_source_module"
 _TS_IMPORT_KIND = "_import_type"
 
 
+def _ts_return_name(declared: str) -> str:
+    """Bare class name a `: Type` return annotation names, or "".
+
+    One level of wrapper is unwrapped, since `Promise<Client>` awaited is a
+    `Client` and that is how such a function is always used.
+    """
+    declared = declared.strip().removeprefix(":").strip()
+    if not declared:
+        return ""
+    for wrapper in ("Promise<", "Array<", "Readonly<"):
+        if declared.startswith(wrapper):
+            declared = declared[len(wrapper):].rsplit(">", 1)[0]
+            break
+    declared = declared.split("|")[0].split("<")[0].strip()
+    return declared if declared.isidentifier() else ""
+
+
 class _TSVisitor(_BaseVisitor):
     """tree-sitter–based TypeScript/JavaScript visitor."""
 
@@ -945,7 +962,9 @@ class _TSVisitor(_BaseVisitor):
             self._recurse(node)
             return
         lineno = node.start_point[0] + 1
-        nid = self._emit(name, ntype, lineno)
+        nid = self._emit(name, ntype, lineno,
+                         return_type=_ts_return_name(
+                             self._text(node.child_by_field_name("return_type"))))
         self._descend(node, nid)
 
     visit_function_declaration = _visit_decl
@@ -1072,6 +1091,8 @@ class _TSCallVisitor(_BaseVisitor):
         self._class_stack: list[str] = []
         self._locals: list[dict[str, str]] = [{}]
         self._seen: set[tuple[str, str, str | None]] = set()
+        # Function name -> bare class it declares it returns.
+        self.returns: dict[str, str] = {}
 
     # -- scope ------------------------------------------------------------
 
@@ -1125,6 +1146,32 @@ class _TSCallVisitor(_BaseVisitor):
                 if target is not None and self.symbols.get(target) == "class":
                     return target
         return None
+
+    def _class_from_return(self, node) -> str | None:
+        """Class id a called function declares it returns, when it is local.
+
+        `const c = createClient()` where `createClient(): Client` binds `c` to
+        the local `Client`, so `c.query()` reaches the real method. An
+        un-annotated function yields nothing: TypeScript infers the type, and
+        inference is not something a static index can redo safely.
+        """
+        if node is None:
+            return None
+        if node.type == "await_expression":
+            node = node.child_by_field_name("argument") or (
+                node.children[-1] if node.children else None)
+            if node is None:
+                return None
+        if node.type != "call_expression":
+            return None
+        callee = node.child_by_field_name("function")
+        if callee is None or callee.type != "identifier":
+            return None
+        declared = self.returns.get(self._text(callee))
+        if not declared:
+            return None
+        target = self._lookup_name(declared)
+        return target if self.symbols.get(target or "") == "class" else None
 
     def _class_from_new(self, node) -> str | None:
         """Class id constructed by a `new X()` expression, when X is local."""
@@ -1210,6 +1257,7 @@ class _TSCallVisitor(_BaseVisitor):
         class_id = (
             self._class_from_annotation(node.child_by_field_name("type"))
             or self._class_from_new(value)
+            or self._class_from_return(value)
         )
         if class_id is not None:
             self._locals[-1][name] = class_id
@@ -1562,6 +1610,10 @@ def index_typescript(path: Path, root: Path | None = None) -> tuple[list[dict], 
                 if n.get("type") in ("function", "class")
             }
             calls = _TSCallVisitor(rel, fid, symbols, visitor.imports)
+            calls.returns = {
+                n["label"]: n["return_type"] for n in visitor.nodes
+                if n.get("return_type") and n.get("type") == "function"
+            }
             calls.visit(tree.root_node)
             known = {fid} | {n["id"] for n in visitor.nodes}
             call_edges = [
@@ -1601,6 +1653,51 @@ _GO_FUNC_RE = re.compile(
     re.MULTILINE,
 )
 _GO_STRUCT_RE = re.compile(r"^type\s+(\w+)\s+struct\b", re.MULTILINE)
+# `srv := NewServer()` and `srv, err := NewServer()` — the first name takes the
+# return value, which is the one a method is then called on.
+_GO_CALL_DECL_RE = re.compile(
+    r"\b(\w+)(?:\s*,\s*\w+)*\s*(?::=|=)\s*(?:&)?(\w+)\s*\("
+)
+_GO_ERRORY = frozenset({"error", "bool", "string", "int", "int64", "byte", "rune"})
+
+
+def _go_return_type(clean: str, after_name: str, start: int) -> str:
+    """Bare type name a Go function returns, or "" when it is not knowable.
+
+    Reads the clause between the parameter list and the body: `*Server` gives
+    `Server`, and `(*Server, error)` gives `Server` — Go's second return value
+    is conventionally an error, so the first non-error type is the one a
+    caller binds. A bare `error` or a builtin yields nothing, since no project
+    type can be behind it.
+    """
+    n = len(clean)
+    i = start
+    depth = 0
+    while i < n:                       # close the parameter parens first
+        if clean[i] == "(":
+            depth += 1
+        elif clean[i] == ")":
+            depth -= 1
+            if depth == 0:
+                i += 1
+                break
+        elif depth == 0 and clean[i] == "{":
+            return ""
+        i += 1
+    j = i
+    while j < n and clean[j] not in "{\n":
+        j += 1
+    clause = clean[i:j].strip()
+    if not clause:
+        return ""
+    if clause.startswith("("):
+        clause = clause[1:].split(")", 1)[0]
+    for part in clause.split(","):
+        bare = part.strip().lstrip("*&").split("[")[0].strip()
+        bare = bare.rsplit(".", 1)[-1]
+        if bare and bare not in _GO_ERRORY and bare.isidentifier():
+            return bare
+    return ""
 _GO_INTERFACE_RE = re.compile(r"^type\s+(\w+)\s+interface\b", re.MULTILINE)
 _GO_IMPORT_BLOCK_RE = re.compile(r"import\s*\((.*?)\)", re.DOTALL)
 _GO_IMPORT_SINGLE_RE = re.compile(r'^import\s+((?:[.\w]+\s+)?"[^"]+")', re.MULTILINE)
@@ -1763,6 +1860,7 @@ def _go_call_edges(
     types: dict[str, str],
     symbols: dict[str, str],
     imports: list[dict] | None = None,
+    returns: dict[str, str] | None = None,
 ) -> list[dict]:
     """Extract `calls` edges from one Go file.
 
@@ -1837,12 +1935,33 @@ def _go_call_edges(
     # Local variables whose struct type is pinned by a composite literal or an
     # explicit `var` declaration, scoped to the function they appear in.
     local_types: dict[tuple[str, str], str] = {}
+    conflicted: set[tuple[str, str]] = set()
+
+    def _bind(key: tuple[str, str], type_id: str) -> None:
+        """Bind a variable to a type, dropping it if two bindings disagree."""
+        previous = local_types.get(key)
+        if previous is not None and previous != type_id:
+            conflicted.add(key)          # reassigned to something else
+        local_types[key] = type_id
+
     for pattern in (_GO_SHORT_DECL_RE, _GO_VAR_DECL_RE):
         for match in pattern.finditer(clean):
             enclosing = _enclosing(match.start())
             type_id = types.get(match.group(2))
             if enclosing and type_id is not None:
-                local_types[(enclosing[0], match.group(1))] = type_id
+                _bind((enclosing[0], match.group(1)), type_id)
+
+    # `srv := NewServer()` — the variable takes the function's declared return
+    # type. Only a type defined in this file can be the answer.
+    for match in _GO_CALL_DECL_RE.finditer(clean):
+        enclosing = _enclosing(match.start())
+        declared = (returns or {}).get(match.group(2))
+        type_id = types.get(declared) if declared else None
+        if enclosing and type_id is not None:
+            _bind((enclosing[0], match.group(1)), type_id)
+
+    for key in conflicted:
+        local_types.pop(key, None)
 
     for match in _GO_BARE_CALL_RE.finditer(clean):
         name = match.group(1)
@@ -1929,9 +2048,9 @@ def index_go(path: Path, root: Path | None = None) -> tuple[list[dict], list[dic
         "file_type": "code",
     })
 
-    def _add(name: str, ntype: str, lineno: int, parent: str = fid) -> str:
+    def _add(name: str, ntype: str, lineno: int, parent: str = fid, **extra) -> str:
         nid = f"{parent}.{name}"
-        nodes.append({
+        node = {
             "id": nid,
             "label": name,
             "type": ntype,
@@ -1939,7 +2058,9 @@ def index_go(path: Path, root: Path | None = None) -> tuple[list[dict], list[dic
             "source_file": str(rel),
             "source_location": f"L{lineno}",
             "file_type": "code",
-        })
+        }
+        node.update({k: v for k, v in extra.items() if v})
+        nodes.append(node)
         edges.append({"source": parent, "target": nid, "relation": "contains"})
         return nid
 
@@ -1954,10 +2075,18 @@ def index_go(path: Path, root: Path | None = None) -> tuple[list[dict], list[dic
     # (function node id, receiver variable, receiver type node id) per definition,
     # handed to the call scanner below.
     functions: list[tuple[str, str, str | None, int]] = []
+    returns: dict[str, str] = {}
+    clean_source = _go_blank_noise(source)
     for m in _GO_FUNC_RE.finditer(source):
         recv_var, recv_type, name = m.group(1), m.group(2), m.group(3)
         owner = types.get(recv_type or "", fid)
-        nid = _add(name, "function", _lineno(source, m.start()), parent=owner)
+        declared = _go_return_type(clean_source, name, m.end() - 1)
+        nid = _add(name, "function", _lineno(source, m.start()), parent=owner,
+                   return_type=declared)
+        # Only package-level constructors matter: a method's result is bound
+        # the same way, but `pkg.Type.Method` is not what `x := f()` names.
+        if declared and recv_type is None:
+            returns[name] = declared
         functions.append((nid, recv_var or "", owner if recv_type else None, m.end()))
 
     seen_imports: set[str] = set()
@@ -1986,7 +2115,8 @@ def index_go(path: Path, root: Path | None = None) -> tuple[list[dict], list[dic
     known = {n["id"] for n in nodes}
     symbols = {n["id"]: n["type"] for n in nodes}
     edges.extend(
-        e for e in _go_call_edges(source, fid, functions, types, symbols, imports)
+        e for e in _go_call_edges(source, fid, functions, types, symbols, imports,
+                                  returns)
         if e["source"] in known and e["target"] in known
     )
 
@@ -2161,6 +2291,10 @@ _JAVA_NOT_MEMBERS = frozenset({
 # back to a class node in this file, and refusing to guess when it is not one.
 # ---------------------------------------------------------------------------
 
+_JAVA_PRIMITIVES = frozenset({
+    "void", "int", "long", "short", "byte", "char", "boolean", "float",
+    "double", "String", "Object", "var",
+})
 _JAVA_TYPE_DECLS = frozenset({
     "class_declaration", "interface_declaration", "enum_declaration",
     "record_declaration", "annotation_type_declaration",
@@ -2241,6 +2375,8 @@ class _JavaCallVisitor(_BaseVisitor):
         self._locals: list[dict[str, str]] = [{}]
         # Per-class: field name -> declared type name, bare.
         self._fields: dict[str, dict[str, str]] = {}
+        # Method node id -> bare type it returns, for `var x = make()`.
+        self.returns: dict[str, str] = {}
         self._seen: set[tuple[str, str]] = set()
         # Imports, for the calls this file cannot resolve on its own.
         self.imports: dict[str, str] = {}          # simple class name -> node id
@@ -2390,6 +2526,9 @@ class _JavaCallVisitor(_BaseVisitor):
         if not name:
             return
         nid = f"{self._parent}.{name}"
+        declared = _java_bare_type(self._text(node.child_by_field_name("type")))
+        if declared and declared not in _JAVA_PRIMITIVES:
+            self.returns[name] = declared
         self._scope.append(nid)
         self._locals.append({})
         self._recurse(node)
@@ -2403,6 +2542,9 @@ class _JavaCallVisitor(_BaseVisitor):
     def visit_local_variable_declaration(self, node) -> None:
         type_node = node.child_by_field_name("type")
         declared = _java_bare_type(self._text(type_node)) if type_node else ""
+        if declared == "var":
+            # Java 10 inference: the type is whatever the initialiser returns.
+            declared = self._var_initialiser_type(node)
         for child in node.children:
             if child.type != "variable_declarator":
                 continue
@@ -2413,6 +2555,21 @@ class _JavaCallVisitor(_BaseVisitor):
                 else:
                     self._locals[-1].pop(var_name, None)
         self._recurse(node)
+
+    def _var_initialiser_type(self, node) -> str:
+        """Return type of the call a `var` declaration is initialised from."""
+        for child in node.children:
+            if child.type != "variable_declarator":
+                continue
+            value = child.child_by_field_name("value")
+            if value is None:
+                continue
+            if value.type == "object_creation_expression":
+                return _java_bare_type(self._text(value.child_by_field_name("type")))
+            if value.type == "method_invocation":
+                name = self._text(value.child_by_field_name("name"))
+                return self.returns.get(name, "")
+        return ""
 
     def visit_method_invocation(self, node) -> None:
         self._resolve_invocation(node)
@@ -2937,10 +3094,13 @@ class _RustVisitor(_BaseVisitor):
         params = self._text(node.child_by_field_name("parameters"))
         generics = self._generics(node)
         signature = f"{name}{generics}{params}"
+        declared = self._text(node.child_by_field_name("return_type")).strip()
         self._emit(
             name, "function", node.start_point[0] + 1,
             visibility=self._visibility(node),
             signature=signature,
+            return_type=self._parent.rsplit(".", 1)[-1] if declared.strip() in
+            ("-> Self", "Self") else _rust_return_name(declared),
             # Lifetimes carry ownership semantics a reader needs at a glance.
             # dict.fromkeys de-duplicates while preserving declaration order.
             lifetimes=list(dict.fromkeys(re.findall(r"'(\w+)", signature))),
@@ -3085,6 +3245,23 @@ _RUST_TYPE_CONTAINERS = frozenset({
 })
 _RUST_REF_PREFIXES = ("&", "mut ", "dyn ", "impl ")
 _RUST_LIFETIME_RE = re.compile(r"^'\w+\s*")
+
+
+def _rust_return_name(declared: str) -> str:
+    """Bare name of a declared return type, unwrapping one level of wrapper.
+
+    Recorded as metadata only: `Option<Engine>` reports `Engine` because that
+    is what the value ultimately carries, but binding a variable through it
+    would be wrong — see _record_return.
+    """
+    declared = declared.strip().removeprefix("->").strip()
+    if not declared:
+        return ""
+    for wrapper in ("Option<", "Result<", "Box<", "Vec<", "Arc<", "Rc<"):
+        if declared.startswith(wrapper):
+            declared = declared[len(wrapper):].rsplit(">", 1)[0].split(",")[0]
+            break
+    return _rust_bare_type(declared)
 
 
 def _rust_bare_type(text: str) -> str:
@@ -3292,22 +3469,32 @@ class _RustCallVisitor(_BaseVisitor):
                 self.prescan(child, nested, nested)
             elif child.type in ("function_item", "function_signature_item"):
                 name = self._ts_name(child)
-                if name and impl_type:
+                if name:
                     self._record_return(f"{scope}.{name}", child, impl_type)
             else:
                 self.prescan(child, scope, impl_type)
 
-    def _record_return(self, fn_id: str, node, impl_type: str) -> None:
-        """Bind an associated function to the type it returns, when declared.
+    def _record_return(self, fn_id: str, node, impl_type: str | None) -> None:
+        """Bind a function to the type it returns, when that is a plain type.
 
-        Only an exact `Self` or the impl type itself counts. `Option<Self>` is
-        deliberately excluded: the value is an Option, not the type.
+        `Self` and the impl type itself both name the enclosing type, and a
+        free function returning a bare struct names it outright — all three
+        give a value a method can be called on.
+
+        A wrapper does not. `Option<Engine>` is an Option, and `e.run()` on it
+        does not compile, so unwrapping the parameter here would invent edges
+        the compiler rejects. Rust differs from Go in exactly this: Go's
+        `(*Server, error)` is a tuple destructured at the assignment, so its
+        first element really is a `*Server`.
         """
         declared = self._text(node.child_by_field_name("return_type")).strip()
-        if not declared:
+        if not declared or "<" in declared or "(" in declared:
             return
-        if declared == "Self" or declared == impl_type.rsplit(".", 1)[-1]:
+        bare = _rust_bare_type(declared)
+        if impl_type is not None and declared in ("Self", impl_type.rsplit(".", 1)[-1]):
             self.returns[fn_id] = impl_type.rsplit(".", 1)[-1]
+        elif bare and bare != "Self":
+            self.returns[fn_id] = bare
 
     def _collect_fields(self, node, type_id: str) -> None:
         """Map a struct's field names to the types they declare."""

@@ -4,7 +4,7 @@
 
 # slurp
 
-![tests](https://img.shields.io/badge/tests-2132%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-2148%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 ![pypi](https://img.shields.io/badge/PyPI-slurp--graph-orange)
@@ -849,6 +849,11 @@ Next: slurp "your query" --graph /path/to/project/graphify-out/graph.json
 > | Parameters | — | — | — | — | ✅ declared type |
 > | Cross-file | ✅ | ✅ | ✅ | ✅ | ✅ |
 > | Parser | stdlib `ast` | tree-sitter, with a regex fallback | regex | tree-sitter, with a regex fallback | tree-sitter, with a regex fallback |
+>
+> **Return type propagation**: `srv := NewServer()` followed by `srv.Start()` now
+> generates a call edge for Go, Rust, Java and TypeScript. The return type must be
+> declared and must name a type defined in the project — an inferred TypeScript
+> return, or one naming a third-party type, still emits nothing.
 >
 > **Anything that cannot be resolved with certainty emits no edge** — stdlib and
 > third-party calls, a method on an object of unknown type, a chained or computed callee.

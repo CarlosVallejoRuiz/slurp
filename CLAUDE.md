@@ -313,11 +313,34 @@ uv sync --extra rust            # solo una
       local llamado `redis` podría capturar un `import "github.com/go-redis/
       redis"`. Es la misma exposición que ya tienen Python y Rust con el
       sufijo, no una nueva.
-    - **Limitación**: el tipo de retorno sigue sin propagarse, también
-      cruzando paquetes. `srv := auth.NewServer()` resuelve `NewServer` pero
-      `srv.Start()` no genera edge.
+    - El tipo de retorno se propaga dentro del fichero (ver más abajo); si la
+      función constructora vive en otro paquete, aún no.
     - Proyecto Go real (toml-test, 13 ficheros): 78 → **83 calls, 5
       cross-file**.
+
+- **Propagación del tipo de retorno (Go, Rust, Java, TypeScript)** — todos los
+  nodos de función llevan `return_type` con el nombre limpio: `*Server` →
+  `Server`, `Self` → el struct del `impl`, `Promise<Client>` → `Client`. El
+  binding ocurre **dentro del fichero**, donde ya vive el mapa de locales, no en
+  un pase de proyecto: así no hay que tocar los cuatro resolutores cross-file ni
+  añadir claves privadas a los edges. La contrapartida es que una función
+  constructora en **otro fichero** no propaga su tipo.
+  - **Go desenvuelve `(T, error)`, Rust NO desenvuelve `Option<T>`.** No es una
+    incoherencia: la tupla de Go se desestructura en la asignación, así que
+    `srv` es realmente un `*Server`; el `Option<Engine>` de Rust es un valor
+    envoltorio y `e.run()` sobre él no compila. Desenvolverlo inventaría edges
+    que el compilador rechaza. El tipo interno sí se guarda como metadato.
+  - TypeScript exige la anotación `: Type`. Un retorno inferido no vincula nada:
+    rehacer la inferencia de TS estáticamente no es seguro.
+  - Si una variable se vincula a **dos tipos distintos** en la misma función, se
+    descarta en vez de quedarse con el último.
+  - **Medición honesta: cero edges nuevos en proyectos reales.** PrismaStats
+    488 → 488, toml-test 83 → 83. De las 114 funciones de PrismaStats con
+    retorno anotado solo 12 devuelven un tipo del proyecto, y son interfaces de
+    datos sobre las que nadie llama métodos. En 14 crates de Rust, 0 sitios
+    recuperables: el idioma es `Engine::new()`, que ya funcionaba. La
+    funcionalidad es correcta y está cubierta por 16 tests, pero su frecuencia
+    real es mucho menor de lo que sugería su protagonismo en la documentación.
 
 ---
 
@@ -340,7 +363,7 @@ por debajo de la carpeta que abre el editor (`~/Desktop/Slurp/`). Todos los coma
 de este documento (`uv run pytest`, `ruff check`, `uv build`, `git`) se ejecutan
 desde `~/Desktop/Slurp/slurp/`, que es donde vive este CLAUDE.md.
 
-**Estado actual:** v1.0.0 · 2132 tests · `ruff check slurp/` limpio.
+**Estado actual:** v1.0.1 · 2148 tests · `ruff check slurp/` limpio.
 
 **⚠️ IMPORTANTE — `uv sync --extra X` desinstala los extras no mencionados.**
 Sincroniza al conjunto exacto de extras que le pases, así que añadir uno con
