@@ -135,12 +135,13 @@ class TestToolsList:
     def test_result_has_tools_key(self):
         assert "tools" in self.resp["result"]
 
-    def test_three_tools_registered(self):
-        assert len(self.resp["result"]["tools"]) == 3
+    def test_four_tools_registered(self):
+        assert len(self.resp["result"]["tools"]) == 4
 
     def test_tool_names(self):
         names = [t["name"] for t in self.resp["result"]["tools"]]
-        assert names == ["slurp_query", "slurp_explain", "slurp_diff"]
+        assert names == ["slurp_query", "slurp_explain", "slurp_diff",
+                         "slurp_suggest"]
 
     def test_tool_has_nonempty_description(self):
         assert self.resp["result"]["tools"][0]["description"]
@@ -1022,8 +1023,64 @@ class TestNewToolsDoNotKillTheServer:
         assert "RuntimeError" in resp["result"]["content"][0]["text"]
         # The next call still works, so the handler did not poison the session.
         ok = _invoke(_req("tools/list", {}), G)
-        assert len(ok["result"]["tools"]) == 3
+        assert len(ok["result"]["tools"]) == 4
 
     def test_unknown_tool_still_rejected(self):
         resp = _invoke(_req("tools/call", {"name": "slurp_nope", "arguments": {}}))
         assert resp["error"]["code"] == -32602
+
+
+class TestSuggestTool:
+    @pytest.fixture(autouse=True)
+    def _load(self, sample_graph_json):
+        self.G = load_graph(sample_graph_json)
+
+    def _call(self, arguments: dict) -> dict:
+        return _invoke(
+            _req("tools/call", {"name": "slurp_suggest", "arguments": arguments}),
+            self.G,
+        )
+
+    def test_listed_among_the_tools(self):
+        resp = _invoke(_req("tools/list", {}))
+        names = [t["name"] for t in resp["result"]["tools"]]
+        assert "slurp_suggest" in names
+
+    def test_four_tools_registered(self):
+        resp = _invoke(_req("tools/list", {}))
+        assert len(resp["result"]["tools"]) == 4
+
+    def test_instructions_mention_it(self):
+        resp = _invoke(_req("initialize", {}))
+        assert "slurp_suggest" in resp["result"]["instructions"]
+
+    def test_returns_text(self):
+        resp = self._call({"query": "auth flow"})
+        assert "isError" not in resp["result"]
+        assert resp["result"]["content"][0]["type"] == "text"
+
+    def test_missing_query_is_an_invalid_params_error(self):
+        assert self._call({})["error"]["code"] == -32602
+
+    def test_non_positive_budget_is_rejected(self):
+        resp = self._call({"query": "auth flow", "budget": 0})
+        assert resp["error"]["code"] == -32602
+
+    def test_internal_failure_is_a_tool_error(self, monkeypatch):
+        import slurp.mcp as mcp_mod
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("simulated")
+
+        monkeypatch.setattr(mcp_mod, "suggest_queries", _boom)
+        resp = self._call({"query": "auth flow"})
+        assert resp["result"]["isError"] is True
+        assert "slurp_suggest failed" in resp["result"]["content"][0]["text"]
+
+    def test_graph_not_loaded_is_reported(self):
+        resp = _invoke(
+            _req("tools/call", {
+                "name": "slurp_suggest", "arguments": {"query": "x"}}),
+            None,
+        )
+        assert resp["error"]["code"] == -32603

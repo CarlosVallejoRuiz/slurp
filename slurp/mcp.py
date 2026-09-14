@@ -22,6 +22,7 @@ from slurp.explainer import (
     resolve_config,
 )
 from slurp.loader import SlurpLoadError, load_graph
+from slurp.suggester import format_suggestions, suggest_queries
 from slurp.scorer import clear_pagerank_cache, score_nodes
 
 _PROTOCOL_VERSION = "2024-11-05"
@@ -49,7 +50,11 @@ _INSTRUCTIONS = (
     "alone by default, with no API cost.\n\n"
     "slurp_diff — 'what does this change affect?'. Call it with two graph "
     "snapshots, typically before merging, to see which parts of the codebase "
-    "sit in the blast radius of what changed."
+    "sit in the blast radius of what changed.\n\n"
+    "slurp_suggest — 'what else should I look at?'. Call it after a "
+    "slurp_query whose answer felt incomplete. It reads the nodes that sat "
+    "just outside the budget and proposes the two or three queries that would "
+    "reach them."
 )
 
 _TOOL_DEFINITION = {
@@ -155,7 +160,39 @@ _DIFF_TOOL_DEFINITION = {
     },
 }
 
-_TOOLS = [_TOOL_DEFINITION, _EXPLAIN_TOOL_DEFINITION, _DIFF_TOOL_DEFINITION]
+_SUGGEST_TOOL_DEFINITION = {
+    "name": "slurp_suggest",
+    "description": (
+        "Suggests related queries to explore after a slurp_query call. Use "
+        "this when you want to understand the broader context around what you "
+        "just found."
+    ),
+    "annotations": {
+        "title": "Slurp follow-up queries",
+        "readOnlyHint": True,
+        "idempotentHint": True,
+        "destructiveHint": False,
+        "openWorldHint": False,
+    },
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "The query whose neighbourhood should be explored.",
+            },
+            "budget": {
+                "type": "integer",
+                "description": "Token budget the original query used.",
+                "default": 4000,
+            },
+        },
+        "required": ["query"],
+    },
+}
+
+_TOOLS = [_TOOL_DEFINITION, _EXPLAIN_TOOL_DEFINITION, _DIFF_TOOL_DEFINITION,
+          _SUGGEST_TOOL_DEFINITION]
 _TOOL_NAMES = frozenset(t["name"] for t in _TOOLS)
 
 
@@ -461,6 +498,35 @@ def _handle_explain(msg_id, args: dict, G, out) -> None:
     _write(_ok(msg_id, {"content": [{"type": "text", "text": text}]}), out)
 
 
+def _handle_suggest(msg_id, args: dict, G, out) -> None:
+    """Answer a slurp_suggest call by re-running the cut and reading its edge."""
+    query = args.get("query")
+    if not query or not isinstance(query, str):
+        _write(_err(msg_id, -32602, "Missing required argument: 'query'"), out)
+        return
+
+    budget = args.get("budget", 4000)
+    if isinstance(budget, float) and budget.is_integer():
+        budget = int(budget)
+    if not isinstance(budget, int) or budget <= 0:
+        _write(_err(msg_id, -32602, "'budget' must be a positive integer"), out)
+        return
+
+    try:
+        scores = score_nodes(G, query)
+        subG, _stats = select_subgraph(G, scores, budget=budget, min_score=_MIN_SCORE)
+        text = format_suggestions(suggest_queries(G, query, scores, subG))
+    except Exception as exc:
+        _write(_tool_err(
+            msg_id, f"slurp_suggest failed: {type(exc).__name__}: {exc}"), out)
+        return
+
+    if not text:
+        text = ("No follow-up suggested: the budget already covers this "
+                "neighbourhood.")
+    _write(_ok(msg_id, {"content": [{"type": "text", "text": text}]}), out)
+
+
 def _handle_diff(msg_id, args: dict, out) -> None:
     """Answer a slurp_diff call by comparing two graph files on disk."""
     old_path = args.get("old_graph")
@@ -569,6 +635,21 @@ def _handle(msg: dict, G, out, session_log: bool = True, state: "GraphState | No
 
         if name == "slurp_diff":
             _handle_diff(msg_id, args, out)
+            return
+
+        if name == "slurp_suggest":
+            if state is not None:
+                try:
+                    state.check_reload()
+                except Exception as exc:
+                    _write(_tool_err(msg_id, _RELOAD_FAILED.format(
+                        kind=type(exc).__name__, exc=exc)), out)
+                    return
+                G = state.graph
+            if G is None:
+                _write(_err(msg_id, -32603, "Graph not loaded"), out)
+                return
+            _handle_suggest(msg_id, args, G, out)
             return
 
         if name == "slurp_explain":

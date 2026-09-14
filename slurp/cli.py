@@ -268,6 +268,12 @@ def cli(ctx: click.Context) -> None:
               help="Print a score breakdown table after the formatted output.")
 @click.option("--no-audit", "no_audit", is_flag=True, default=False,
               help="Skip writing to audit log.")
+@click.option("--suggest", is_flag=True, default=False,
+              help="Suggest related queries worth exploring next.")
+# Two spellings: `--n` as specified, `--suggest-n` because a bare `--n` gives
+# no clue what it counts among two dozen other options.
+@click.option("--n", "--suggest-n", "suggest_n", default=3, show_default=True,
+              help="How many suggestions --suggest may show.")
 @click.option("--neighbor-decay", "neighbor_decay", default=0.7,
               show_default=True, help="Score decay factor for neighbor nodes.")
 @click.option("--min-score", "min_score", default=0.15, show_default=True,
@@ -295,6 +301,8 @@ def run(
     model: str,
     explain: bool,
     no_audit: bool,
+    suggest: bool,
+    suggest_n: int,
     neighbor_decay: float,
     min_score: float,
     viz: bool,
@@ -382,6 +390,16 @@ def run(
 
     result = format_subgraph(subG, stats, format=fmt, scores=scores, query=query)
     click.echo(result)
+
+    if suggest:
+        from slurp.suggester import format_suggestions, suggest_queries
+        # No --graph in the rendered commands: the reader just ran one, and an
+        # absolute path doubles the line length for nothing.
+        text = format_suggestions(
+            suggest_queries(G, query, scores, subG, n=suggest_n))
+        # Silence is the honest answer when the budget covered the neighbourhood.
+        click.echo(f"\n{text}" if text else "\nSUGGESTED QUERIES\n  (none — the "
+                   "budget already covers this neighbourhood)")
 
     if not no_audit:
         top = sorted(subG.nodes, key=lambda n: scores.get(n, 0.0), reverse=True)

@@ -362,6 +362,31 @@ uv sync --extra rust            # solo una
     del grafo cargado al inicio. Lleva `openWorldHint: false` porque solo toca
     disco local, no red — discutible, y marcado con un comentario.
 
+- **`suggester.py` — la frontera del subgrafo.** Un subgrafo es un corte: lo que
+  quedó justo fuera estaba lo bastante relacionado para ser vecino y no lo
+  bastante para entrar. Esa frontera es lo más informativo que slurp sabe tras
+  responder, y hasta v1.0.4 se descartaba.
+  - Tres tipos de sugerencia, cada una solo si el grafo la respalda: **drill
+    down** (el nodo más relevante tiene vecinos fuera), **sibling** (hay un
+    clúster temático en la frontera), **risk** (un vecino con ≥6 dependientes).
+  - **Cuatro defectos que solo aparecieron con grafos reales**, no con los de
+    juguete: los nodos `import` inundaban los tokens (llevan el nombre de lo
+    que importan → describen fontanería, no tema); `relevance_score` saturaba a
+    1.0 porque los divisores estaban calibrados para grafos pequeños — ahora es
+    la fracción de frontera cubierta; el drill-down casi nunca disparaba porque
+    a budget realista los vecinos del nodo principal ya están dentro (ahora
+    mira a 2 hops); y apuntaba a tests, que puntúan alto porque llevan el
+    nombre de lo que prueban — pierden todo empate contra producción.
+  - **El silencio es respuesta válida**: si el budget cubre la vecindad, la
+    lista sale vacía en vez de rellenarse.
+  - `slurp_suggest` re-ejecuta la query en lugar de recibir el subgrafo: MCP no
+    tiene estado entre llamadas, y reenviarlo sería peor que recalcularlo.
+  - **Acoplamiento a vigilar**: importa cuatro privados de `explainer.py`
+    (`_RISK_HIGH_MIN`, `_display`, `_is_test`, `_split_callers`) siguiendo el
+    precedente de `advisor.py` con `_tokenize`. Son ya cinco módulos
+    compartiendo internos; esos cinco nombres formarían un `_graphutils.py`
+    público sin romper nada.
+
 ---
 
 ## Principios de desarrollo
@@ -383,7 +408,7 @@ por debajo de la carpeta que abre el editor (`~/Desktop/Slurp/`). Todos los coma
 de este documento (`uv run pytest`, `ruff check`, `uv build`, `git`) se ejecutan
 desde `~/Desktop/Slurp/slurp/`, que es donde vive este CLAUDE.md.
 
-**Estado actual:** v1.0.3 · 2194 tests · `ruff check slurp/` limpio.
+**Estado actual:** v1.0.4 · 2227 tests · `ruff check slurp/` limpio.
 
 **⚠️ IMPORTANTE — `uv sync --extra X` desinstala los extras no mencionados.**
 Sincroniza al conjunto exacto de extras que le pases, así que añadir uno con
@@ -426,7 +451,8 @@ Señal de que ha pasado: la suite reporta tests *skipped* donde antes había 0, 
 │   ├── advisor.py         ← recomienda budget óptimo desde el historial de queries
 │   ├── federation.py      ← mergea varios grafos en uno (--graph repetido)
 │   ├── explainer.py       ← explica un nodo en lenguaje natural (LLM + fallback estructural)
-│   └── evaluator.py       ← benchmark de calidad con LLM judge (slurp eval)
+│   ├── evaluator.py       ← benchmark de calidad con LLM judge (slurp eval)
+│   └── suggester.py       ← propone queries de seguimiento desde la frontera del subgrafo
 └── tests/
     ├── __init__.py
     ├── conftest.py
@@ -447,7 +473,8 @@ Señal de que ha pasado: la suite reporta tests *skipped* donde antes había 0, 
     ├── test_advisor.py
     ├── test_federation.py
     ├── test_explainer.py
-    └── test_evaluator.py
+    ├── test_evaluator.py
+    └── test_suggester.py
 ```
 
 ---

@@ -4,7 +4,7 @@
 
 # slurp
 
-![tests](https://img.shields.io/badge/tests-2194%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-2227%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 ![pypi](https://img.shields.io/badge/PyPI-slurp--graph-orange)
@@ -731,8 +731,8 @@ All three formats include query, nodes selected/total, tokens used/budget, and c
 
 ### `slurp serve`
 
-Start an MCP stdio server (JSON-RPC 2.0) exposing three tools — `slurp_query`,
-`slurp_explain` and `slurp_diff`.
+Start an MCP stdio server (JSON-RPC 2.0) exposing four tools — `slurp_query`,
+`slurp_explain`, `slurp_diff` and `slurp_suggest`.
 
 ```bash
 slurp serve --graph graph.json
@@ -746,6 +746,48 @@ slurp serve --graph graph.json --no-log
 | `--log` / `--no-log` | `--log` | Append served queries to `.slurp/session.log` (only if `.slurp/` exists). |
 
 See [MCP Integration](#mcp-integration) for configuration.
+
+---
+
+### `slurp suggest`
+
+Suggests related queries to explore after a query — drill down, sibling exploration, and
+high-risk dependency detection. It reads the nodes that sat *just outside* the token
+budget: connected enough to be neighbours, not relevant enough to be selected, which is
+exactly the shape of something you have not looked at yet.
+
+```bash
+slurp "player stats" --graph graph.json --budget 4000 --suggest
+```
+
+```
+SUGGESTED QUERIES
+  slurp "props table skill"               — explore the connected area the budget left out
+  slurp explain 'GSAP Animation Library'  — high-risk dependency — 38 nodes depend on it
+```
+
+Three kinds of suggestion, each fired only when the graph supports it:
+
+| Kind | Fires when | Reads as |
+|---|---|---|
+| **Drill down** | the subgraph's most relevant node has neighbours that were left out | `drill down into what surrounds recalcularPlayerStats` |
+| **Sibling exploration** | a themed cluster sits on the frontier | `explore the connected area the budget left out` |
+| **Risk exploration** | a frontier node has six or more dependants | `high-risk dependency — 38 nodes depend on it` |
+
+| Flag | Default | Description |
+|---|---|---|
+| `--suggest` | off | Append suggestions to the normal output. |
+| `--n`, `--suggest-n` | `3` | How many suggestions to show. |
+
+Query text is built from the tokens that set the frontier apart from the rest of the
+graph, weighted by how rare each one is graph-wide — a term common inside the frontier and
+uncommon outside it wins. Import placeholders are excluded: they carry the name of what
+they import, so they describe wiring rather than subject matter. A suggestion that says
+nothing the original query did not is dropped, and when the budget already covers the
+neighbourhood the list is simply empty.
+
+> Also exposed over MCP as **`slurp_suggest(query, budget=4000)`**, so an agent can ask
+> what else is worth looking at without a second round trip through the terminal.
 
 ---
 
@@ -1150,7 +1192,7 @@ Run slurp as an MCP server so Claude Code (or any MCP-compatible agent) can quer
 
 > **Windows:** Use forward slashes or escaped backslashes in the graph path: `"C:/Users/you/project/graphify-out/graph.json"`. If `slurp` isn't found, replace `"command": "slurp"` with the full path — find it with `where slurp` (CMD) or `Get-Command slurp | Select-Object Source` (PowerShell).
 
-**Three tools exposed.** Claude Code calls them automatically, each answering a different
+**Four tools exposed.** Claude Code calls them automatically, each answering a different
 question. The server runs over stdio and returns formatted markdown — no HTTP, no ports.
 
 | Tool | Answers | Claude Code reaches for it when… |
@@ -1158,8 +1200,9 @@ question. The server runs over stdio and returns formatted markdown — no HTTP,
 | `slurp_query(query, budget=4000)` | *Where is the code that does X?* | it needs to orient itself in an unfamiliar codebase, or find the code behind a feature — before reading any files |
 | `slurp_explain(node_name, no_llm=true)` | *What is this, and what breaks if I change it?* | a query has pointed it at a function and it is about to modify it. Structural by default: no API key, no cost |
 | `slurp_diff(old_graph, new_graph, hops=2)` | *What does this change affect?* | it is reviewing a change or preparing a merge and needs the blast radius |
+| `slurp_suggest(query, budget=4000)` | *What else should I look at?* | an answer felt incomplete and it wants the queries that would reach what the budget left out |
 
-All three are declared `readOnlyHint` and `idempotentHint`, so clients can auto-approve
+All four are declared `readOnlyHint` and `idempotentHint`, so clients can auto-approve
 them. `slurp_explain` reads the same graph `slurp_query` serves, reload check included, so
 the two never answer from different snapshots in one session.
 
