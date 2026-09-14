@@ -1017,6 +1017,82 @@ def config_show(config_dir: str) -> None:
         )
 
 
+@cli.command("impact")
+@click.argument("file_path")
+@click.option("--graph", "-g", type=click.Path(), default=None,
+              help="Path to graph.json (auto-discovered if omitted).")
+@click.option("--hops", default=2, show_default=True,
+              help="How far to follow dependants outward.")
+@click.option("--output", "output_fmt", type=click.Choice(["text", "json"]),
+              default="text", show_default=True,
+              help="Output format; json is meant for CI gating.")
+@click.option("--viz", is_flag=True, default=False,
+              help="Open an interactive view of the affected nodes.")
+@click.option("--viz-output", "viz_output", type=click.Path(), default=None,
+              help="Write the visualisation to a file instead of opening it.")
+def impact_cmd(
+    file_path: str,
+    graph: str | None,
+    hops: int,
+    output_fmt: str,
+    viz: bool,
+    viz_output: str | None,
+) -> None:
+    """Show what could break if you edit FILE_PATH, before you edit it."""
+    import json as _json
+
+    from slurp.impact import (
+        affected_subgraph,
+        analyze_impact,
+        format_impact,
+        impact_to_dict,
+    )
+
+    if hops < 1:
+        raise click.ClickException("--hops must be at least 1")
+
+    graph_path = Path(graph) if graph else _find_graph()
+    if graph_path is None:
+        raise click.ClickException(
+            "No graph.json found. Pass --graph or run from a directory with graph.json."
+        )
+    try:
+        G = load_graph(graph_path)
+    except SlurpLoadError as exc:
+        raise click.ClickException(str(exc)) from None
+
+    result = analyze_impact(G, file_path, hops=hops)
+
+    if output_fmt == "json":
+        click.echo(_json.dumps(impact_to_dict(result), indent=2))
+    else:
+        click.echo(format_impact(result, G))
+
+    if viz or viz_output:
+        if not result.nodes_in_file:
+            raise click.ClickException(
+                f"Nothing to visualise: no nodes found for {file_path}."
+            )
+        from slurp.viz import build_html
+        sub = affected_subgraph(G, result)
+        # Nodes in the edited file lead; everything else is shaded by distance.
+        scores = {
+            n: 1.0 if n in set(result.nodes_in_file)
+            else 0.6 if n in set(result.direct_dependents) else 0.3
+            for n in sub.nodes
+        }
+        stats = {
+            "nodes_selected": sub.number_of_nodes(),
+            "nodes_total": G.number_of_nodes(),
+            "tokens_used": 0,
+            "tokens_budget": 0,
+            "coverage_pct": round(
+                sub.number_of_nodes() / (G.number_of_nodes() or 1) * 100, 1),
+        }
+        html = build_html(sub, stats, scores, f"impact: {file_path}")
+        _deliver_viz(html, viz, viz_output)
+
+
 @cli.command("advisor")
 @click.argument("query")
 @click.option("--graph", "-g", type=click.Path(), default=None,

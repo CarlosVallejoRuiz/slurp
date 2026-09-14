@@ -22,6 +22,7 @@ from slurp.explainer import (
     resolve_config,
 )
 from slurp.loader import SlurpLoadError, load_graph
+from slurp.impact import analyze_impact, format_impact
 from slurp.suggester import format_suggestions, suggest_queries
 from slurp.scorer import clear_pagerank_cache, score_nodes
 
@@ -54,7 +55,11 @@ _INSTRUCTIONS = (
     "slurp_suggest — 'what else should I look at?'. Call it after a "
     "slurp_query whose answer felt incomplete. It reads the nodes that sat "
     "just outside the budget and proposes the two or three queries that would "
-    "reach them."
+    "reach them.\n\n"
+    "slurp_impact — 'what breaks if I edit this file?'. Call it before "
+    "editing any file. Unlike slurp_diff it needs no second snapshot: it "
+    "reads the current graph and reports which definitions in that file carry "
+    "dependants, how far they reach, and which are free to touch."
 )
 
 _TOOL_DEFINITION = {
@@ -191,8 +196,39 @@ _SUGGEST_TOOL_DEFINITION = {
     },
 }
 
+_IMPACT_TOOL_DEFINITION = {
+    "name": "slurp_impact",
+    "description": (
+        "Analyzes the blast radius of editing a specific file before making "
+        "changes. Use this before editing any file to understand what might "
+        "break."
+    ),
+    "annotations": {
+        "title": "Slurp edit impact",
+        "readOnlyHint": True,
+        "idempotentHint": True,
+        "destructiveHint": False,
+        "openWorldHint": False,
+    },
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "file_path": {
+                "type": "string",
+                "description": "Relative path to the file about to be edited",
+            },
+            "hops": {
+                "type": "integer",
+                "default": 2,
+                "description": "How far to follow dependants outward.",
+            },
+        },
+        "required": ["file_path"],
+    },
+}
+
 _TOOLS = [_TOOL_DEFINITION, _EXPLAIN_TOOL_DEFINITION, _DIFF_TOOL_DEFINITION,
-          _SUGGEST_TOOL_DEFINITION]
+          _SUGGEST_TOOL_DEFINITION, _IMPACT_TOOL_DEFINITION]
 _TOOL_NAMES = frozenset(t["name"] for t in _TOOLS)
 
 
@@ -498,6 +534,31 @@ def _handle_explain(msg_id, args: dict, G, out) -> None:
     _write(_ok(msg_id, {"content": [{"type": "text", "text": text}]}), out)
 
 
+def _handle_impact(msg_id, args: dict, G, out) -> None:
+    """Answer a slurp_impact call against the graph already loaded."""
+    file_path = args.get("file_path")
+    if not file_path or not isinstance(file_path, str):
+        _write(_err(msg_id, -32602, "Missing required argument: 'file_path'"), out)
+        return
+
+    hops = args.get("hops", 2)
+    if isinstance(hops, float) and hops.is_integer():
+        hops = int(hops)
+    if not isinstance(hops, int) or hops < 1:
+        _write(_err(msg_id, -32602, "'hops' must be a positive integer"), out)
+        return
+
+    try:
+        result = analyze_impact(G, file_path, hops=hops)
+        text = format_impact(result, G)
+    except Exception as exc:
+        _write(_tool_err(
+            msg_id, f"slurp_impact failed: {type(exc).__name__}: {exc}"), out)
+        return
+
+    _write(_ok(msg_id, {"content": [{"type": "text", "text": text}]}), out)
+
+
 def _handle_suggest(msg_id, args: dict, G, out) -> None:
     """Answer a slurp_suggest call by re-running the cut and reading its edge."""
     query = args.get("query")
@@ -635,6 +696,21 @@ def _handle(msg: dict, G, out, session_log: bool = True, state: "GraphState | No
 
         if name == "slurp_diff":
             _handle_diff(msg_id, args, out)
+            return
+
+        if name == "slurp_impact":
+            if state is not None:
+                try:
+                    state.check_reload()
+                except Exception as exc:
+                    _write(_tool_err(msg_id, _RELOAD_FAILED.format(
+                        kind=type(exc).__name__, exc=exc)), out)
+                    return
+                G = state.graph
+            if G is None:
+                _write(_err(msg_id, -32603, "Graph not loaded"), out)
+                return
+            _handle_impact(msg_id, args, G, out)
             return
 
         if name == "slurp_suggest":

@@ -387,6 +387,27 @@ uv sync --extra rust            # solo una
     compartiendo internos; esos cinco nombres formarían un `_graphutils.py`
     público sin romper nada.
 
+- **`impact.py` — el radio *antes* de editar.** `slurp diff` responde a
+  posteriori comparando dos snapshots; `impact` responde antes, con el grafo
+  que ya hay. Umbrales de riesgo replicados de `explainer._risk_level` (6/2)
+  para que un fichero y sus nodos nunca discrepen sobre el mismo código.
+  - **El nodo-fichero no puede ser el de mayor riesgo.** Acumula las
+    importaciones del fichero, así que ganaba siempre — y nadie edita "el
+    fichero", edita funciones. Filtrar por `type` **no sirve**: el grafo de
+    graphify no trae `type` en absoluto (todos `None`). El rasgo que sí lo
+    distingue es que su **label es el nombre del fichero**.
+  - **Contenido ≠ seguro.** Un nodo llamado solo desde su propio fichero no
+    entra en el radio externo, pero tampoco es SAFE TO EDIT. Son dos preguntas
+    distintas y la primera versión las confundía: `recalcularPlayerStats()`
+    salía como segura teniendo 3 llamadores.
+  - Rutas por **sufijo normalizado**, con la coincidencia exacta ganando
+    siempre, para que un `vendor/lib/core.py` no secuestre la consulta.
+  - **Un fichero desconocido no es un error**: resultado vacío, exit 0 y un
+    mensaje que sugiere re-indexar. Solo `--viz` falla, porque no hay qué
+    dibujar.
+  - El fixture de tests usa `file_path` y los grafos reales `source_file`;
+    `_source_of` lee ambos. Un test que mire solo uno falla en silencio.
+
 ---
 
 ## Principios de desarrollo
@@ -408,7 +429,7 @@ por debajo de la carpeta que abre el editor (`~/Desktop/Slurp/`). Todos los coma
 de este documento (`uv run pytest`, `ruff check`, `uv build`, `git`) se ejecutan
 desde `~/Desktop/Slurp/slurp/`, que es donde vive este CLAUDE.md.
 
-**Estado actual:** v1.0.4 · 2227 tests · `ruff check slurp/` limpio.
+**Estado actual:** v1.0.5 · 2273 tests · `ruff check slurp/` limpio.
 
 **⚠️ IMPORTANTE — `uv sync --extra X` desinstala los extras no mencionados.**
 Sincroniza al conjunto exacto de extras que le pases, así que añadir uno con
@@ -452,7 +473,8 @@ Señal de que ha pasado: la suite reporta tests *skipped* donde antes había 0, 
 │   ├── federation.py      ← mergea varios grafos en uno (--graph repetido)
 │   ├── explainer.py       ← explica un nodo en lenguaje natural (LLM + fallback estructural)
 │   ├── evaluator.py       ← benchmark de calidad con LLM judge (slurp eval)
-│   └── suggester.py       ← propone queries de seguimiento desde la frontera del subgrafo
+│   ├── suggester.py       ← propone queries de seguimiento desde la frontera del subgrafo
+│   └── impact.py          ← radio de impacto de editar un fichero, sin segundo snapshot
 └── tests/
     ├── __init__.py
     ├── conftest.py
@@ -474,7 +496,8 @@ Señal de que ha pasado: la suite reporta tests *skipped* donde antes había 0, 
     ├── test_federation.py
     ├── test_explainer.py
     ├── test_evaluator.py
-    └── test_suggester.py
+    ├── test_suggester.py
+    └── test_impact.py
 ```
 
 ---

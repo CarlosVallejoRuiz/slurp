@@ -4,7 +4,7 @@
 
 # slurp
 
-![tests](https://img.shields.io/badge/tests-2227%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-2273%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 ![pypi](https://img.shields.io/badge/PyPI-slurp--graph-orange)
@@ -731,8 +731,8 @@ All three formats include query, nodes selected/total, tokens used/budget, and c
 
 ### `slurp serve`
 
-Start an MCP stdio server (JSON-RPC 2.0) exposing four tools — `slurp_query`,
-`slurp_explain`, `slurp_diff` and `slurp_suggest`.
+Start an MCP stdio server (JSON-RPC 2.0) exposing five tools — `slurp_query`,
+`slurp_explain`, `slurp_diff`, `slurp_suggest` and `slurp_impact`.
 
 ```bash
 slurp serve --graph graph.json
@@ -746,6 +746,59 @@ slurp serve --graph graph.json --no-log
 | `--log` / `--no-log` | `--log` | Append served queries to `.slurp/session.log` (only if `.slurp/` exists). |
 
 See [MCP Integration](#mcp-integration) for configuration.
+
+---
+
+### `slurp impact`
+
+Analyzes the blast radius of editing a file before making changes — no second snapshot
+needed. Where [`slurp diff`](#slurp-diff) answers this after the fact by comparing two
+graphs, `slurp impact` answers it beforehand from the graph you already have.
+
+```bash
+slurp impact lib/supabase/admin.ts --graph graph.json
+```
+
+```
+╭─ Impact Analysis — lib/supabase/admin.ts ─────╮
+│ 2 definitions · RISK: HIGH · affects 69 files │
+╰───────────────────────────────────────────────╯
+
+HIGHEST RISK NODE
+  createAdminClient() — 130 direct dependents (6.2% of codebase)
+
+AFFECTED FILES (top 10)
+  lib/supabase/admin-actions.ts       31 dependents
+  lib/supabase/cantera-actions.ts     14 dependents
+  lib/supabase/dashboard-actions.ts   11 dependents
+  lib/supabase/reports-actions.ts      7 dependents
+  app/api/mis-partidos/route.ts        6 dependents
+  … and 24 more files
+
+RECOMMENDATION
+  Add integration tests before editing. 130 nodes depend on functions in this file.
+
+─────────────────────────────────────────────────────────────────────
+Direct: 130 · Transitive: 48 · Impact score: 0.0843
+```
+
+A **SAFE TO EDIT** block lists the definitions in the file that nothing depends on at all —
+the other half of the question. A node called only from inside the same file is not listed
+there: contained is not the same as safe.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--hops` | `2` | How far to follow dependants outward. |
+| `--output` | `text` | `json` emits the full result for CI gating on `risk_level`. |
+| `--viz` / `--viz-output` | off | Interactive view of the affected nodes only. |
+
+The path is matched on a normalised suffix, so `slurp impact admin.ts` finds
+`lib/supabase/admin.ts` without you having to know how the indexer spelled its paths. An
+exact match always wins over a suffix. A file with no nodes in the graph is answered, not
+refused: it reports that nothing was found and suggests re-indexing if the file is new.
+
+> Also exposed over MCP as **`slurp_impact(file_path, hops=2)`** — the tool an agent should
+> reach for before editing anything.
 
 ---
 
@@ -1192,7 +1245,7 @@ Run slurp as an MCP server so Claude Code (or any MCP-compatible agent) can quer
 
 > **Windows:** Use forward slashes or escaped backslashes in the graph path: `"C:/Users/you/project/graphify-out/graph.json"`. If `slurp` isn't found, replace `"command": "slurp"` with the full path — find it with `where slurp` (CMD) or `Get-Command slurp | Select-Object Source` (PowerShell).
 
-**Four tools exposed.** Claude Code calls them automatically, each answering a different
+**Five tools exposed.** Claude Code calls them automatically, each answering a different
 question. The server runs over stdio and returns formatted markdown — no HTTP, no ports.
 
 | Tool | Answers | Claude Code reaches for it when… |
@@ -1201,8 +1254,9 @@ question. The server runs over stdio and returns formatted markdown — no HTTP,
 | `slurp_explain(node_name, no_llm=true)` | *What is this, and what breaks if I change it?* | a query has pointed it at a function and it is about to modify it. Structural by default: no API key, no cost |
 | `slurp_diff(old_graph, new_graph, hops=2)` | *What does this change affect?* | it is reviewing a change or preparing a merge and needs the blast radius |
 | `slurp_suggest(query, budget=4000)` | *What else should I look at?* | an answer felt incomplete and it wants the queries that would reach what the budget left out |
+| `slurp_impact(file_path, hops=2)` | *What breaks if I edit this file?* | it is about to edit a file and wants the blast radius first — no second snapshot required |
 
-All four are declared `readOnlyHint` and `idempotentHint`, so clients can auto-approve
+All five are declared `readOnlyHint` and `idempotentHint`, so clients can auto-approve
 them. `slurp_explain` reads the same graph `slurp_query` serves, reload check included, so
 the two never answer from different snapshots in one session.
 
