@@ -4,7 +4,7 @@
 
 # slurp
 
-![tests](https://img.shields.io/badge/tests-2173%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-2194%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 ![pypi](https://img.shields.io/badge/PyPI-slurp--graph-orange)
@@ -731,7 +731,8 @@ All three formats include query, nodes selected/total, tokens used/budget, and c
 
 ### `slurp serve`
 
-Start an MCP stdio server (JSON-RPC 2.0) that exposes the `slurp_query` tool.
+Start an MCP stdio server (JSON-RPC 2.0) exposing three tools — `slurp_query`,
+`slurp_explain` and `slurp_diff`.
 
 ```bash
 slurp serve --graph graph.json
@@ -1149,9 +1150,21 @@ Run slurp as an MCP server so Claude Code (or any MCP-compatible agent) can quer
 
 > **Windows:** Use forward slashes or escaped backslashes in the graph path: `"C:/Users/you/project/graphify-out/graph.json"`. If `slurp` isn't found, replace `"command": "slurp"` with the full path — find it with `where slurp` (CMD) or `Get-Command slurp | Select-Object Source` (PowerShell).
 
-**Tool exposed:** `slurp_query(query: str, budget: int = 4000) → str`
+**Three tools exposed.** Claude Code calls them automatically, each answering a different
+question. The server runs over stdio and returns formatted markdown — no HTTP, no ports.
 
-Claude Code calls this automatically when it needs codebase context. The server runs over stdio and returns the formatted markdown subgraph — no HTTP, no ports.
+| Tool | Answers | Claude Code reaches for it when… |
+|---|---|---|
+| `slurp_query(query, budget=4000)` | *Where is the code that does X?* | it needs to orient itself in an unfamiliar codebase, or find the code behind a feature — before reading any files |
+| `slurp_explain(node_name, no_llm=true)` | *What is this, and what breaks if I change it?* | a query has pointed it at a function and it is about to modify it. Structural by default: no API key, no cost |
+| `slurp_diff(old_graph, new_graph, hops=2)` | *What does this change affect?* | it is reviewing a change or preparing a merge and needs the blast radius |
+
+All three are declared `readOnlyHint` and `idempotentHint`, so clients can auto-approve
+them. `slurp_explain` reads the same graph `slurp_query` serves, reload check included, so
+the two never answer from different snapshots in one session.
+
+A failure inside a tool comes back as `isError: true` with a readable message; it never
+takes the server down, and the next call still works.
 
 ---
 

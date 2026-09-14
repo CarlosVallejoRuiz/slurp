@@ -342,6 +342,26 @@ uv sync --extra rust            # solo una
     funcionalidad es correcta y está cubierta por 16 tests, pero su frecuencia
     real es mucho menor de lo que sugería su protagonismo en la documentación.
 
+- **El servidor MCP expone tres herramientas** (`slurp_query`, `slurp_explain`,
+  `slurp_diff`), todas `readOnlyHint` + `idempotentHint` para que el cliente
+  pueda auto-aprobarlas.
+  - `slurp_explain` usa **el mismo grafo que `slurp_query`**, con la
+    comprobación de recarga incluida: las dos no pueden responder desde
+    snapshots distintos en la misma sesión.
+  - **El config del LLM se resuelve por llamada**, no al arrancar. Exportar una
+    API key a mitad de sesión da prosa sin reiniciar, y si la resolución falla
+    se cae al modo estructural en vez de dar error. Resolverlo al inicio habría
+    convertido `no_llm` en un flag de lanzamiento.
+  - Dos categorías de error, deliberadamente distintas: argumentos inválidos →
+    JSON-RPC `-32602`; fallo de ejecución → `isError: true` con texto legible.
+    Un fallo interno nunca mata el proceso.
+  - **`find_node()` no falla con un nodo inexistente**: cae a la puntuación por
+    relevancia y devuelve el mejor candidato. `slurp_explain` solo da `isError`
+    con el grafo vacío. Es comportamiento preexistente, no un defecto nuevo.
+  - `slurp_diff` es la única que lee ficheros nombrados por el llamante en vez
+    del grafo cargado al inicio. Lleva `openWorldHint: false` porque solo toca
+    disco local, no red — discutible, y marcado con un comentario.
+
 ---
 
 ## Principios de desarrollo
@@ -363,7 +383,7 @@ por debajo de la carpeta que abre el editor (`~/Desktop/Slurp/`). Todos los coma
 de este documento (`uv run pytest`, `ruff check`, `uv build`, `git`) se ejecutan
 desde `~/Desktop/Slurp/slurp/`, que es donde vive este CLAUDE.md.
 
-**Estado actual:** v1.0.2 · 2173 tests · `ruff check slurp/` limpio.
+**Estado actual:** v1.0.3 · 2194 tests · `ruff check slurp/` limpio.
 
 **⚠️ IMPORTANTE — `uv sync --extra X` desinstala los extras no mencionados.**
 Sincroniza al conjunto exacto de extras que le pases, así que añadir uno con

@@ -7,6 +7,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import networkx as nx
 import pytest
 
 from slurp import __version__
@@ -14,8 +15,11 @@ from slurp.loader import load_graph
 from slurp.mcp import (
     SESSION_LOG_FILE,
     GraphState,
+    _DIFF_TOOL_DEFINITION,
+    _EXPLAIN_TOOL_DEFINITION,
     _PROTOCOL_VERSION,
     _TOOL_DEFINITION,
+    _TOOLS,
     _handle,
     log_session,
     read_session_log,
@@ -131,11 +135,12 @@ class TestToolsList:
     def test_result_has_tools_key(self):
         assert "tools" in self.resp["result"]
 
-    def test_exactly_one_tool_registered(self):
-        assert len(self.resp["result"]["tools"]) == 1
+    def test_three_tools_registered(self):
+        assert len(self.resp["result"]["tools"]) == 3
 
-    def test_tool_name_is_slurp_query(self):
-        assert self.resp["result"]["tools"][0]["name"] == "slurp_query"
+    def test_tool_names(self):
+        names = [t["name"] for t in self.resp["result"]["tools"]]
+        assert names == ["slurp_query", "slurp_explain", "slurp_diff"]
 
     def test_tool_has_nonempty_description(self):
         assert self.resp["result"]["tools"][0]["description"]
@@ -854,3 +859,171 @@ class TestHandlerGraphReload:
         out = io.StringIO()
         _handle(msg, sample_graph, out, session_log=False)
         assert "graph_reloaded" not in json.loads(out.getvalue())["result"]
+
+
+# ---------------------------------------------------------------------------
+# slurp_explain and slurp_diff
+# ---------------------------------------------------------------------------
+
+
+class TestNewToolDefinitions:
+    def test_every_tool_is_read_only_and_idempotent(self):
+        for tool in _TOOLS:
+            assert tool["annotations"]["readOnlyHint"] is True, tool["name"]
+            assert tool["annotations"]["idempotentHint"] is True, tool["name"]
+
+    def test_every_tool_has_a_nonempty_description(self):
+        for tool in _TOOLS:
+            assert len(tool["description"]) > 40, tool["name"]
+
+    def test_explain_requires_node_name(self):
+        assert _EXPLAIN_TOOL_DEFINITION["inputSchema"]["required"] == ["node_name"]
+
+    def test_explain_defaults_to_no_llm(self):
+        props = _EXPLAIN_TOOL_DEFINITION["inputSchema"]["properties"]
+        assert props["no_llm"]["default"] is True
+
+    def test_diff_requires_both_graphs(self):
+        assert _DIFF_TOOL_DEFINITION["inputSchema"]["required"] == [
+            "old_graph", "new_graph"]
+
+    def test_diff_defaults_to_two_hops(self):
+        props = _DIFF_TOOL_DEFINITION["inputSchema"]["properties"]
+        assert props["hops"]["default"] == 2
+
+
+class TestInstructionsMentionEveryTool:
+    def test_initialize_names_all_three(self):
+        resp = _invoke(_req("initialize", {}))
+        instructions = resp["result"]["instructions"]
+        for name in ("slurp_query", "slurp_explain", "slurp_diff"):
+            assert name in instructions
+
+
+class TestExplainTool:
+    @pytest.fixture(autouse=True)
+    def _load(self, sample_graph_json):
+        self.G = load_graph(sample_graph_json)
+        self.node = next(iter(self.G.nodes))
+
+    def _call(self, arguments: dict) -> dict:
+        return _invoke(
+            _req("tools/call", {"name": "slurp_explain", "arguments": arguments}),
+            self.G,
+        )
+
+    def test_existing_node_returns_an_explanation(self):
+        resp = self._call({"node_name": self.node})
+        assert "isError" not in resp["result"]
+        assert "EXPLANATION" in resp["result"]["content"][0]["text"]
+
+    def test_explanation_includes_the_risk_section(self):
+        text = self._call({"node_name": self.node})["result"]["content"][0]["text"]
+        assert "RISK IF CHANGED" in text
+
+    def test_missing_node_name_is_an_invalid_params_error(self):
+        resp = self._call({})
+        assert resp["error"]["code"] == -32602
+
+    def test_non_boolean_no_llm_is_rejected(self):
+        resp = self._call({"node_name": self.node, "no_llm": "yes"})
+        assert resp["error"]["code"] == -32602
+
+    def test_unknown_node_is_a_tool_error_not_a_crash(self):
+        """find_node falls back to scoring, so an empty graph is the real miss."""
+        resp = _invoke(
+            _req("tools/call", {
+                "name": "slurp_explain",
+                "arguments": {"node_name": "nothing_like_this_exists"},
+            }),
+            nx.DiGraph(),
+        )
+        assert resp["result"]["isError"] is True
+        assert "slurp_explain failed" in resp["result"]["content"][0]["text"]
+
+    def test_graph_not_loaded_is_reported(self):
+        resp = _invoke(
+            _req("tools/call", {
+                "name": "slurp_explain", "arguments": {"node_name": "x"}}),
+            None,
+        )
+        assert resp["error"]["code"] == -32603
+
+
+class TestDiffTool:
+    def _call(self, arguments: dict) -> dict:
+        return _invoke(
+            _req("tools/call", {"name": "slurp_diff", "arguments": arguments}), None
+        )
+
+    def test_valid_paths_return_a_diff(self, sample_graph_json):
+        resp = self._call({
+            "old_graph": str(sample_graph_json),
+            "new_graph": str(sample_graph_json),
+        })
+        assert "isError" not in resp["result"]
+        assert resp["result"]["content"][0]["type"] == "text"
+
+    def test_missing_path_is_a_tool_error(self, sample_graph_json):
+        resp = self._call({
+            "old_graph": "/definitely/not/here.json",
+            "new_graph": str(sample_graph_json),
+        })
+        assert resp["result"]["isError"] is True
+        assert "slurp_diff could not" in resp["result"]["content"][0]["text"]
+
+    def test_malformed_graph_is_a_tool_error(self, tmp_path, sample_graph_json):
+        broken = tmp_path / "broken.json"
+        broken.write_text("{ not json", encoding="utf-8")
+        resp = self._call({
+            "old_graph": str(broken), "new_graph": str(sample_graph_json)})
+        assert resp["result"]["isError"] is True
+
+    def test_missing_argument_is_an_invalid_params_error(self, sample_graph_json):
+        resp = self._call({"old_graph": str(sample_graph_json)})
+        assert resp["error"]["code"] == -32602
+
+    def test_non_positive_hops_is_rejected(self, sample_graph_json):
+        resp = self._call({
+            "old_graph": str(sample_graph_json),
+            "new_graph": str(sample_graph_json),
+            "hops": 0,
+        })
+        assert resp["error"]["code"] == -32602
+
+    def test_float_hops_are_coerced(self, sample_graph_json):
+        resp = self._call({
+            "old_graph": str(sample_graph_json),
+            "new_graph": str(sample_graph_json),
+            "hops": 2.0,
+        })
+        assert "isError" not in resp["result"]
+
+
+class TestNewToolsDoNotKillTheServer:
+    def test_an_internal_failure_answers_and_survives(self, sample_graph_json,
+                                                      monkeypatch):
+        """A raising dependency becomes a tool error, and the loop goes on."""
+        import slurp.mcp as mcp_mod
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("simulated")
+
+        monkeypatch.setattr(mcp_mod, "explain_node", _boom)
+        G = load_graph(sample_graph_json)
+        resp = _invoke(
+            _req("tools/call", {
+                "name": "slurp_explain",
+                "arguments": {"node_name": next(iter(G.nodes))},
+            }),
+            G,
+        )
+        assert resp["result"]["isError"] is True
+        assert "RuntimeError" in resp["result"]["content"][0]["text"]
+        # The next call still works, so the handler did not poison the session.
+        ok = _invoke(_req("tools/list", {}), G)
+        assert len(ok["result"]["tools"]) == 3
+
+    def test_unknown_tool_still_rejected(self):
+        resp = _invoke(_req("tools/call", {"name": "slurp_nope", "arguments": {}}))
+        assert resp["error"]["code"] == -32602

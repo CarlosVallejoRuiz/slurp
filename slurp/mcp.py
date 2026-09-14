@@ -13,6 +13,14 @@ from typing import TextIO
 from slurp import __version__
 from slurp.budget import clear_node_token_cache, select_subgraph
 from slurp.formatter import format_subgraph
+from slurp.diff import diff_graphs, format_diff
+from slurp.explainer import (
+    SlurpExplainError,
+    explain_node,
+    find_node,
+    format_explanation,
+    resolve_config,
+)
 from slurp.loader import SlurpLoadError, load_graph
 from slurp.scorer import clear_pagerank_cache, score_nodes
 
@@ -24,16 +32,24 @@ _PROTOCOL_VERSION = "2024-11-05"
 _MIN_SCORE = 0.15
 
 _INSTRUCTIONS = (
-    "Slurp serves token-budget-aware slices of a codebase knowledge graph.\n\n"
-    "Call slurp_query before reading files when you need to orient yourself in "
-    "an unfamiliar codebase, locate the code responsible for a feature, or "
-    "understand how components relate. It returns only the most relevant nodes "
-    "that fit the token budget, so it is far cheaper than reading files "
-    "speculatively.\n\n"
-    "Pass a natural-language description of what you are looking for (for "
-    "example 'user authentication flow'), not a filename or a bare keyword. "
-    "Raise the budget when you need broader context; lower it when you only "
-    "need a pointer to the right area."
+    "Slurp serves token-budget-aware slices of a codebase knowledge graph. "
+    "Three tools, for three different questions.\n\n"
+    "slurp_query — 'where is the code that does X?'. Call it before reading "
+    "files when you need to orient yourself in an unfamiliar codebase, locate "
+    "the code responsible for a feature, or understand how components relate. "
+    "It returns only the most relevant nodes that fit the token budget, so it "
+    "is far cheaper than reading files speculatively. Pass a natural-language "
+    "description (for example 'user authentication flow'), not a filename or a "
+    "bare keyword. Raise the budget when you need broader context; lower it "
+    "when you only need a pointer to the right area.\n\n"
+    "slurp_explain — 'what is this one thing, and what breaks if I change "
+    "it?'. Call it once slurp_query has pointed you at a function, class or "
+    "module and you are about to modify it. It names the part that node plays, "
+    "who depends on it, and how risky a change is. Answers from the graph "
+    "alone by default, with no API cost.\n\n"
+    "slurp_diff — 'what does this change affect?'. Call it with two graph "
+    "snapshots, typically before merging, to see which parts of the codebase "
+    "sit in the blast radius of what changed."
 )
 
 _TOOL_DEFINITION = {
@@ -68,6 +84,79 @@ _TOOL_DEFINITION = {
         "required": ["query"],
     },
 }
+
+
+_EXPLAIN_TOOL_DEFINITION = {
+    "name": "slurp_explain",
+    "description": (
+        "Explains a specific function or node in natural language — what it "
+        "does, who calls it, and the risk of changing it. Use this when you "
+        "need to understand a specific part of the codebase before modifying "
+        "it."
+    ),
+    "annotations": {
+        "title": "Slurp node explanation",
+        "readOnlyHint": True,
+        "idempotentHint": True,
+        "destructiveHint": False,
+        "openWorldHint": False,
+    },
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "node_name": {
+                "type": "string",
+                "description": "Name of the function, class or module to explain",
+            },
+            "no_llm": {
+                "type": "boolean",
+                "default": True,
+                "description": "Use structural analysis only (faster, no API cost)",
+            },
+        },
+        "required": ["node_name"],
+    },
+}
+
+_DIFF_TOOL_DEFINITION = {
+    "name": "slurp_diff",
+    "description": (
+        "Shows the blast radius of changes between two graph snapshots. Use "
+        "this before merging a PR to see what parts of the codebase are "
+        "affected."
+    ),
+    # Reads two files named by the caller rather than the graph loaded at
+    # startup, so unlike the other two this one does reach outside the server.
+    "annotations": {
+        "title": "Slurp change impact",
+        "readOnlyHint": True,
+        "idempotentHint": True,
+        "destructiveHint": False,
+        "openWorldHint": False,
+    },
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "old_graph": {
+                "type": "string",
+                "description": "Path to the old graph.json",
+            },
+            "new_graph": {
+                "type": "string",
+                "description": "Path to the new graph.json",
+            },
+            "hops": {
+                "type": "integer",
+                "default": 2,
+                "description": "Depth of impact neighborhood",
+            },
+        },
+        "required": ["old_graph", "new_graph"],
+    },
+}
+
+_TOOLS = [_TOOL_DEFINITION, _EXPLAIN_TOOL_DEFINITION, _DIFF_TOOL_DEFINITION]
+_TOOL_NAMES = frozenset(t["name"] for t in _TOOLS)
 
 
 SESSION_LOG_FILE = "session.log"
@@ -317,6 +406,101 @@ def _write(obj: dict, out) -> None:
 # ---------------------------------------------------------------------------
 
 
+_RELOAD_FAILED = (
+    "graph.json changed on disk but could not be reloaded: {kind}: {exc}. "
+    "Still serving the previously loaded graph — fix the file and query again."
+)
+
+
+def _handle_explain(msg_id, args: dict, G, out) -> None:
+    """Answer a slurp_explain call against the graph already loaded.
+
+    Every failure past argument validation becomes a tool error rather than an
+    exception: a missing node or an unreachable provider is the caller's
+    problem to read, not a reason to take the session down.
+    """
+    node_name = args.get("node_name")
+    if not node_name or not isinstance(node_name, str):
+        _write(_err(msg_id, -32602, "Missing required argument: 'node_name'"), out)
+        return
+
+    no_llm = args.get("no_llm", True)
+    if not isinstance(no_llm, bool):
+        _write(_err(msg_id, -32602, "'no_llm' must be a boolean"), out)
+        return
+
+    try:
+        scores = score_nodes(G, node_name)
+        node_id = find_node(G, node_name, scores)
+    except SlurpExplainError as exc:
+        _write(_tool_err(msg_id, f"slurp_explain failed: {exc}"), out)
+        return
+    except Exception as exc:
+        _write(_tool_err(
+            msg_id, f"slurp_explain failed: {type(exc).__name__}: {exc}"), out)
+        return
+
+    # DECISION: the config is resolved per call rather than at startup. A user
+    # who exports an API key mid-session gets prose without restarting the
+    # server, and no_llm stays a per-call decision rather than a launch flag.
+    config = None
+    if not no_llm:
+        try:
+            config = resolve_config()
+        except Exception:
+            config = None      # fall through to the structural explanation
+
+    try:
+        result = explain_node(G, node_id, scores=scores, config=config)
+        text = format_explanation(result)
+    except Exception as exc:
+        _write(_tool_err(
+            msg_id, f"slurp_explain failed: {type(exc).__name__}: {exc}"), out)
+        return
+
+    _write(_ok(msg_id, {"content": [{"type": "text", "text": text}]}), out)
+
+
+def _handle_diff(msg_id, args: dict, out) -> None:
+    """Answer a slurp_diff call by comparing two graph files on disk."""
+    old_path = args.get("old_graph")
+    new_path = args.get("new_graph")
+    for label, value in (("old_graph", old_path), ("new_graph", new_path)):
+        if not value or not isinstance(value, str):
+            _write(_err(msg_id, -32602, f"Missing required argument: {label!r}"), out)
+            return
+
+    hops = args.get("hops", 2)
+    if isinstance(hops, float) and hops.is_integer():
+        hops = int(hops)
+    if not isinstance(hops, int) or hops < 1:
+        _write(_err(msg_id, -32602, "'hops' must be a positive integer"), out)
+        return
+
+    try:
+        old_graph = load_graph(Path(old_path))
+        new_graph = load_graph(Path(new_path))
+    except SlurpLoadError as exc:
+        _write(_tool_err(msg_id, f"slurp_diff could not load a graph: {exc}"), out)
+        return
+    except OSError as exc:
+        _write(_tool_err(msg_id, f"slurp_diff could not read a graph: {exc}"), out)
+        return
+    except Exception as exc:
+        _write(_tool_err(
+            msg_id, f"slurp_diff failed: {type(exc).__name__}: {exc}"), out)
+        return
+
+    try:
+        text = format_diff(diff_graphs(old_graph, new_graph), new_graph, hops=hops)
+    except Exception as exc:
+        _write(_tool_err(
+            msg_id, f"slurp_diff failed: {type(exc).__name__}: {exc}"), out)
+        return
+
+    _write(_ok(msg_id, {"content": [{"type": "text", "text": text}]}), out)
+
+
 def _handle(msg: dict, G, out, session_log: bool = True, state: "GraphState | None" = None) -> None:
     """Dispatch one JSON-RPC message and write the response to *out*.
 
@@ -360,7 +544,7 @@ def _handle(msg: dict, G, out, session_log: bool = True, state: "GraphState | No
         _write(_ok(msg_id, {}), out)
 
     elif method == "tools/list":
-        _write(_ok(msg_id, {"tools": [_TOOL_DEFINITION]}), out)
+        _write(_ok(msg_id, {"tools": _TOOLS}), out)
 
     # DECISION: slurp exposes no resources or prompts, so per spec these
     # methods could return -32601. Several clients probe them at startup
@@ -377,11 +561,32 @@ def _handle(msg: dict, G, out, session_log: bool = True, state: "GraphState | No
 
     elif method == "tools/call":
         name = params.get("name")
-        if name != "slurp_query":
+        if name not in _TOOL_NAMES:
             _write(_err(msg_id, -32602, f"Unknown tool: {name!r}"), out)
             return
 
         args: dict = params.get("arguments") or {}
+
+        if name == "slurp_diff":
+            _handle_diff(msg_id, args, out)
+            return
+
+        if name == "slurp_explain":
+            # The same graph slurp_query serves, reload check included.
+            if state is not None:
+                try:
+                    state.check_reload()
+                except Exception as exc:
+                    _write(_tool_err(msg_id, _RELOAD_FAILED.format(
+                        kind=type(exc).__name__, exc=exc)), out)
+                    return
+                G = state.graph
+            if G is None:
+                _write(_err(msg_id, -32603, "Graph not loaded"), out)
+                return
+            _handle_explain(msg_id, args, G, out)
+            return
+
         query = args.get("query")
         if not query or not isinstance(query, str):
             _write(_err(msg_id, -32602, "Missing required argument: 'query'"), out)
@@ -400,12 +605,8 @@ def _handle(msg: dict, G, out, session_log: bool = True, state: "GraphState | No
             try:
                 graph_reloaded = state.check_reload()
             except Exception as exc:
-                _write(_tool_err(
-                    msg_id,
-                    f"graph.json changed on disk but could not be reloaded: "
-                    f"{type(exc).__name__}: {exc}. Still serving the previously "
-                    f"loaded graph — fix the file and query again.",
-                ), out)
+                _write(_tool_err(msg_id, _RELOAD_FAILED.format(
+                    kind=type(exc).__name__, exc=exc)), out)
                 return
             G = state.graph
 
