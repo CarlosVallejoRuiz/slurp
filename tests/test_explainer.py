@@ -16,8 +16,11 @@ from slurp.explainer import (
     SlurpExplainError,
     _build_context,
     _call_llm,
+    _architectural_role,
     _explain_structural,
+    _explore_further,
     _risk_level,
+    _split_callers,
     detect_provider,
     explain_node,
     find_node,
@@ -155,14 +158,15 @@ class TestExplainStructural:
         assert "lib/admin.ts" in text
 
     def test_reports_dependents(self, graph, scores):
-        assert "referenced by 8 nodes" in _explain_structural(graph, "target", scores)
+        assert "called by 8 places in the project" in _explain_structural(graph, "target", scores)
 
     def test_high_risk_warns_about_propagation(self, graph, scores):
-        assert "propagate widely" in _explain_structural(graph, "target", scores)
+        assert "utility" in _explain_structural(graph, "target", scores)
 
     def test_low_risk_says_so(self, scores):
         G = _graph_with_dependents(0)
-        assert "little blast radius" in _explain_structural(G, "target", scores)
+        text = _explain_structural(G, "target", scores)
+        assert any(r in text for r in ("Leaf", "Entry point", "Isolated"))
 
     def test_orphan_node_is_described(self):
         G = nx.DiGraph()
@@ -495,17 +499,17 @@ class TestFormatExplanation:
         assert "← Calls: nothing" in out
 
     def test_dependent_count_line(self):
-        assert "2 nodes depend on this function directly." in format_explanation(
+        assert "2 nodes depend on this function" in format_explanation(
             self._result()
         )
 
     def test_singular_dependent_agrees(self):
         out = format_explanation(self._result(callers=["a()"]))
-        assert "1 node depends on this function directly." in out
+        assert "1 node depends on this function" in out
 
     def test_no_dependents_line(self):
         out = format_explanation(self._result(callers=[]))
-        assert "Nothing depends on this function directly." in out
+        assert "Nothing in the project depends on this function" in out
 
     def test_provider_footer(self):
         out = format_explanation(
@@ -561,7 +565,7 @@ class TestExplainCommand:
         assert "EXPLANATION" in res.output
         assert "ARCHITECTURE" in res.output
         assert "RISK IF CHANGED: HIGH" in res.output
-        assert "8 nodes depend on this function directly." in res.output
+        assert "8 nodes depend on this function" in res.output
 
     def test_panel_shows_type_and_file(self, graph_file, tmp_path):
         res = CliRunner().invoke(cli, [
@@ -661,3 +665,150 @@ class TestConfigCommand:
     def test_config_in_top_level_help(self):
         res = CliRunner().invoke(cli, ["--help"])
         assert "config" in res.output
+
+
+def _call_graph(callers: int = 0, callees: int = 0, *, ntype: str = "function",
+                tests: int = 0) -> nx.DiGraph:
+    """A graph whose `target` has the requested shape."""
+    G = nx.DiGraph()
+    G.add_node("target", label="target", type=ntype, source_file="lib/core.py")
+    G.add_node("mod", label="core", type="module", source_file="lib/core.py")
+    G.add_edge("mod", "target", relation="contains")
+    for i in range(callers):
+        G.add_node(f"caller{i}", label=f"caller{i}", type="function",
+                   source_file="lib/app.py")
+        G.add_edge(f"caller{i}", "target", relation="calls")
+    for i in range(tests):
+        G.add_node(f"test_t{i}", label=f"test_t{i}", type="function",
+                   source_file="tests/test_core.py")
+        G.add_edge(f"test_t{i}", "target", relation="calls")
+    for i in range(callees):
+        G.add_node(f"dep{i}", label=f"dep{i}", type="function",
+                   source_file="lib/dep.py")
+        G.add_edge("target", f"dep{i}", relation="calls")
+    return G
+
+
+class TestArchitecturalRole:
+    def test_many_callers_is_a_central_utility(self):
+        assert "Central utility" in _architectural_role(_call_graph(callers=12), "target")
+
+    def test_many_callers_and_callees_is_an_orchestrator(self):
+        role = _architectural_role(_call_graph(callers=6, callees=6), "target")
+        assert "Orchestrator" in role
+
+    def test_many_callers_few_callees_is_a_shared_utility(self):
+        """The shape the brief's rules left unnamed, and the commonest hub."""
+        role = _architectural_role(_call_graph(callers=6, callees=1), "target")
+        assert "Shared utility" in role
+
+    def test_no_callers_but_many_callees_is_an_entry_point(self):
+        assert "Entry point" in _architectural_role(_call_graph(callees=6), "target")
+
+    def test_few_of_each_is_a_leaf(self):
+        assert "Leaf" in _architectural_role(_call_graph(callers=1, callees=1), "target")
+
+    def test_nothing_either_way_is_isolated(self):
+        assert "Isolated" in _architectural_role(_call_graph(), "target")
+
+    def test_module_reports_what_it_holds(self):
+        G = _call_graph(callers=2)
+        role = _architectural_role(G, "mod")
+        assert "Core module" in role and "1 definition" in role
+
+    def test_test_callers_do_not_inflate_the_role(self):
+        """Sixty tests do not make a function a central utility."""
+        role = _architectural_role(_call_graph(callers=1, callees=1, tests=60), "target")
+        assert "Leaf" in role
+
+
+class TestCallerSplit:
+    def test_tests_are_separated_from_production(self):
+        production, tests = _split_callers(_call_graph(callers=3, tests=5), "target")
+        assert len(production) == 3
+        assert len(tests) == 5
+
+    def test_containing_module_is_not_a_caller(self):
+        """`contains` is ownership, not a dependency."""
+        production, _ = _split_callers(_call_graph(callers=2), "target")
+        assert "mod" not in production
+
+
+class TestExplainContextSection:
+    def _result(self, G, node="target"):
+        return explain_node(G, node, scores={node: 0.5})
+
+    def test_context_names_the_parent_module(self):
+        out = format_explanation(self._result(_call_graph(callers=2)))
+        assert "CONTEXT" in out
+        assert "Part of:" in out and "core" in out
+
+    def test_context_lists_top_callers_and_callees(self):
+        result = self._result(_call_graph(callers=4, callees=4))
+        out = format_explanation(result)
+        assert "Used by:" in out and "Depends on:" in out
+        assert len(result.used_by) == 3 and len(result.depends_on) == 3
+
+    def test_context_omitted_when_the_node_stands_alone(self):
+        G = nx.DiGraph()
+        G.add_node("lonely", label="lonely", type="function", source_file="a.py")
+        assert "CONTEXT" not in format_explanation(explain_node(G, "lonely"))
+
+
+class TestExploreFurther:
+    def test_suggests_the_surrounding_context(self):
+        commands = _explore_further(_call_graph(callers=2), "target", "MEDIUM")
+        assert any(c.startswith("slurp \"target core\"") for c in commands)
+
+    def test_suggests_the_most_connected_caller(self):
+        commands = _explore_further(_call_graph(callers=3), "target", "MEDIUM")
+        assert any("slurp explain" in c for c in commands)
+
+    def test_high_risk_suggests_diff(self):
+        commands = _explore_further(_call_graph(callers=8), "target", "HIGH")
+        assert any("slurp diff" in c for c in commands)
+
+    def test_never_more_than_three(self):
+        assert len(_explore_further(_call_graph(callers=8, callees=8), "target", "HIGH")) <= 3
+
+    def test_section_is_rendered(self):
+        out = format_explanation(explain_node(_call_graph(callers=8), "target"))
+        assert "EXPLORE FURTHER" in out
+
+
+class TestRiskSummary:
+    def test_reports_the_share_of_the_project(self):
+        out = format_explanation(explain_node(_call_graph(callers=8), "target"))
+        assert "% of the project" in out
+
+    def test_separates_test_callers_from_the_count(self):
+        result = explain_node(_call_graph(callers=2, tests=9), "target")
+        out = format_explanation(result)
+        assert result.production_callers == 2
+        assert "9 more in tests" in out
+
+    def test_high_risk_recommends_tests(self):
+        out = format_explanation(explain_node(_call_graph(callers=8), "target"))
+        assert "RISK IF CHANGED: HIGH" in out
+        assert "Add tests" in out
+
+    def test_low_risk_says_it_is_safe(self):
+        out = format_explanation(explain_node(_call_graph(callers=1), "target"))
+        assert "Safe to refactor" in out
+
+    def test_medium_risk_points_at_the_callers(self):
+        out = format_explanation(explain_node(_call_graph(callers=3), "target"))
+        assert "RISK IF CHANGED: MEDIUM" in out
+        assert "Check each caller" in out
+
+
+class TestStructuralOutputSize:
+    def test_stays_within_thirty_lines(self):
+        """A hub with eighty callers used to render ninety lines of names."""
+        out = format_explanation(explain_node(_call_graph(callers=40, callees=20,
+                                                          tests=40), "target"))
+        assert len(out.splitlines()) <= 30
+
+    def test_long_caller_list_is_truncated_with_a_count(self):
+        out = format_explanation(explain_node(_call_graph(callers=40), "target"))
+        assert "more" in out

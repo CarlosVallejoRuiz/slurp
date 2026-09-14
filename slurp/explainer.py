@@ -81,6 +81,16 @@ class ExplainResult:
     score: float = 0.0
     model_used: str = ""
     warning: str = ""
+    # Structural facts rendered from the graph, never written by a model.
+    role: str = ""
+    part_of: str = ""
+    used_by: list[str] = field(default_factory=list)
+    depends_on: list[str] = field(default_factory=list)
+    test_callers: int = 0
+    production_callers: int = 0
+    dependents_pct: float = 0.0
+    advice: str = ""
+    explore: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -299,6 +309,116 @@ def _callees(G: nx.DiGraph, node_id: str) -> list[str]:
     return sorted(G.successors(node_id)) if node_id in G else []
 
 
+_TEST_MARKERS = ("tests/", "test_", "_test.", ".test.", ".spec.", "spec/")
+_ROLE_HUB_CALLERS = 10
+_ROLE_ORCHESTRATOR_MIN = 5
+
+
+def _is_test(G: nx.DiGraph, node_id: str) -> bool:
+    """Whether a node lives in test code, judged by its file path."""
+    source = str(G.nodes.get(node_id, {}).get("source_file", "")).replace("\\", "/")
+    label = node_id.rsplit(".", 1)[-1]
+    return any(m in source for m in _TEST_MARKERS) or label.startswith("test_")
+
+
+def _split_callers(G: nx.DiGraph, node_id: str) -> tuple[list[str], list[str]]:
+    """Callers split into production and test, in that order.
+
+    A node called by sixty tests and six modules is not depended on by
+    sixty-six things in any sense a reader cares about, and reporting one
+    number overstates the blast radius by an order of magnitude.
+    """
+    callers = [
+        c for c in _callers(G, node_id)
+        if G.edges[c, node_id].get("relation") != "contains"
+    ]
+    tests = [c for c in callers if _is_test(G, c)]
+    return [c for c in callers if c not in set(tests)], tests
+
+
+def _by_importance(G: nx.DiGraph, nodes: list[str], limit: int = 3) -> list[str]:
+    """The *limit* most-depended-on nodes, most central first."""
+    return sorted(nodes, key=lambda n: (-G.in_degree(n), n))[:limit]
+
+
+def _parent_module(G: nx.DiGraph, node_id: str) -> str:
+    """Node that `contains` this one, if any."""
+    for pred in G.predecessors(node_id):
+        if G.edges[pred, node_id].get("relation") == "contains":
+            return pred
+    return ""
+
+
+def _architectural_role(G: nx.DiGraph, node_id: str) -> str:
+    """One phrase naming the part this node plays in the codebase.
+
+    Derived from its position rather than its name: how many things call it,
+    how many it calls, and whether it holds other definitions.
+    """
+    attrs = G.nodes[node_id]
+    ntype = attrs.get("type", "")
+    production, _tests = _split_callers(G, node_id)
+    callees = _callees(G, node_id)
+
+    if ntype == "module":
+        held = sum(1 for _, t in G.out_edges(node_id)
+                   if G.edges[node_id, t].get("relation") == "contains")
+        importers = sum(1 for sid, _ in G.in_edges(node_id)
+                        if G.edges[sid, node_id].get("relation") == "imports_from")
+        return (f"Core module — {held} definition{'s' if held != 1 else ''}, "
+                f"imported by {importers} file{'s' if importers != 1 else ''}")
+
+    if len(production) > _ROLE_HUB_CALLERS:
+        return "Central utility — called across the entire codebase"
+    if len(production) >= _ROLE_ORCHESTRATOR_MIN and len(callees) >= _ROLE_ORCHESTRATOR_MIN:
+        return "Orchestrator — coordinates several components"
+    if len(production) >= _ROLE_ORCHESTRATOR_MIN:
+        return "Shared utility — many callers, few dependencies of its own"
+    if not production and len(callees) >= _ROLE_ORCHESTRATOR_MIN:
+        return "Entry point — top-level, nothing in the project calls it"
+    if not production and not callees:
+        return "Isolated — nothing calls it and it calls nothing"
+    return "Leaf — focused, with a small surface"
+
+
+def _dependents_share(G: nx.DiGraph, node_id: str) -> float:
+    """Share of the project's nodes that depend on this one, as a percentage."""
+    total = G.number_of_nodes()
+    if not total:
+        return 0.0
+    production, _tests = _split_callers(G, node_id)
+    return round(len(production) / total * 100, 1)
+
+
+def _risk_advice(G: nx.DiGraph, node_id: str, risk: str) -> str:
+    """What to actually do about the risk, in one line."""
+    if risk == "HIGH":
+        return "Add tests covering the current behaviour before modifying."
+    if risk == "MEDIUM":
+        return "Check each caller before changing the signature."
+    return "Safe to refactor — little depends on it."
+
+
+def _explore_further(G: nx.DiGraph, node_id: str, risk: str) -> list[str]:
+    """Two or three commands that continue from here."""
+    label = _display(G, node_id).rstrip("()")
+    out: list[str] = []
+    parent = _parent_module(G, node_id)
+    if parent:
+        out.append(f'slurp "{label} {_display(G, parent).rstrip("()")}"'
+                   "  — the surrounding context")
+    production, _tests = _split_callers(G, node_id)
+    top = _by_importance(G, production, limit=1)
+    if top:
+        out.append(f"slurp explain '{_display(G, top[0]).rstrip('()')}'"
+                   "  — its most connected caller")
+    if risk == "HIGH":
+        out.append("slurp diff old.json new.json  — impact before you ship")
+    elif len(out) < 2:
+        out.append(f'slurp "{label}" --inject-code  — read the body')
+    return out[:3]
+
+
 def _risk_level(G: nx.DiGraph, node_id: str) -> str:
     """Rate how risky it is to change *node_id*, by direct dependent count.
 
@@ -306,10 +426,15 @@ def _risk_level(G: nx.DiGraph, node_id: str) -> str:
         G: The graph.
         node_id: Node to rate.
 
+    A containing module is not a dependant — it owns the node rather than
+    calling it — so every function used to start one dependant ahead of its
+    real count, pushing a single-caller helper up to MEDIUM.
+
     Returns:
         "HIGH" (6+ dependents), "MEDIUM" (2–5), or "LOW" (0–1).
     """
-    dependents = len(_callers(G, node_id))
+    production, tests = _split_callers(G, node_id)
+    dependents = len(production) + len(tests)
     if dependents >= _RISK_HIGH_MIN:
         return "HIGH"
     if dependents >= _RISK_MEDIUM_MIN:
@@ -466,7 +591,8 @@ def _explain_structural(
     attrs = G.nodes[node_id]
     name = _display(G, node_id)
     node_type = attrs.get("type") or attrs.get("file_type") or "node"
-    callers = _callers(G, node_id)
+    if node_type in ("code", "document", "markdown"):
+        node_type += " node"       # "is a code" does not read as English
     callees = _callees(G, node_id)
 
     sentences: list[str] = []
@@ -474,17 +600,29 @@ def _explain_structural(
     opening = f"{name} is a {node_type}"
     source = attrs.get("source_file") or attrs.get("file_path")
     if source:
+        location = str(attrs.get("source_location", "")).lstrip("L")
         opening += f" defined in {source}"
+        if location.isdigit():
+            opening += f":{location}"
     sentences.append(opening + ".")
+    sentences.append(_architectural_role(G, node_id) + ".")
 
     if attrs.get("description"):
         sentences.append(str(attrs["description"]).rstrip(".") + ".")
 
-    if callers:
+    production, tests = _split_callers(G, node_id)
+    if production:
+        shown = _by_importance(G, production, limit=3)
         sentences.append(
-            f"It is referenced by {len(callers)} "
-            f"{'node' if len(callers) == 1 else 'nodes'}, including "
-            f"{_join_display(G, callers)}."
+            f"It is called by {len(production)} "
+            f"{'place' if len(production) == 1 else 'places'} in the project"
+            + (f" and {len(tests)} in tests" if tests else "")
+            + f", chiefly {_join_display(G, shown)}."
+        )
+    elif tests:
+        sentences.append(
+            f"Only tests call it ({len(tests)}), so nothing in the shipped "
+            "code depends on it yet."
         )
     else:
         sentences.append(
@@ -494,19 +632,8 @@ def _explain_structural(
 
     if callees:
         sentences.append(
-            f"It depends on {_join_display(G, callees)}."
+            f"It depends on {_join_display(G, _by_importance(G, callees, limit=3))}."
         )
-
-    risk = _risk_level(G, node_id)
-    if risk == "HIGH":
-        sentences.append(
-            "Because so much depends on it, changes here propagate widely — "
-            "check every caller before altering its signature or behaviour."
-        )
-    elif risk == "MEDIUM":
-        sentences.append("A change here affects a handful of callers directly.")
-    else:
-        sentences.append("It can be changed with little blast radius.")
 
     if scores and node_id in scores:
         sentences.append(f"Relevance to your query: {scores[node_id]:.3f}.")
@@ -734,7 +861,8 @@ def explain_node(
         label=_display(G, node_id),
         explanation=_explain_structural(G, node_id, scores),
         risk_level=_risk_level(G, node_id),
-        callers=[_display(G, n) for n in _callers(G, node_id)],
+        callers=[],   # filled below, excluding the containing module
+
         callees=[_display(G, n) for n in _callees(G, node_id)],
         provider_used="structural",
         context_tokens=count_tokens(context),
@@ -742,6 +870,18 @@ def explain_node(
         source_file=attrs.get("source_file") or attrs.get("file_path") or "",
         score=round(scores.get(node_id, 0.0), 4),
     )
+    production, tests = _split_callers(G, node_id)
+    result.callers = [_display(G, n) for n in production + tests]
+    parent = _parent_module(G, node_id)
+    result.role = _architectural_role(G, node_id)
+    result.part_of = _display(G, parent) if parent else ""
+    result.used_by = [_display(G, n) for n in _by_importance(G, production)]
+    result.depends_on = [_display(G, n) for n in _by_importance(G, _callees(G, node_id))]
+    result.test_callers = len(tests)
+    result.production_callers = len(production)
+    result.dependents_pct = _dependents_share(G, node_id)
+    result.advice = _risk_advice(G, node_id, result.risk_level)
+    result.explore = _explore_further(G, node_id, result.risk_level)
 
     if config is None or config.provider in ("structural", ""):
         return result
@@ -794,6 +934,9 @@ def _wrap_list(items: list[str], prefix: str, width: int = 66) -> list[str]:
     return lines
 
 
+_ARCH_LIST_MAX = 6
+
+
 def format_explanation(result: ExplainResult, width: int = 69) -> str:
     """Render an ExplainResult as the plain-text body shown under the panel.
 
@@ -806,19 +949,49 @@ def format_explanation(result: ExplainResult, width: int = 69) -> str:
     """
     lines: list[str] = ["EXPLANATION", result.explanation, ""]
 
+    if result.part_of or result.used_by or result.depends_on:
+        lines.append("CONTEXT")
+        if result.part_of:
+            lines.append(f"Part of:     {result.part_of}")
+        if result.used_by:
+            lines.append(f"Used by:     {', '.join(result.used_by)}")
+        if result.depends_on:
+            lines.append(f"Depends on:  {', '.join(result.depends_on)}")
+        lines.append("")
+
+    # DECISION: the full caller list is capped. select_subgraph has eighty,
+    # and printing them turned a explanation into ninety lines of test names
+    # that buried every other section.
     lines.append("ARCHITECTURE")
-    lines.extend(_wrap_list(result.callers, "→ Called by: "))
-    lines.extend(_wrap_list(result.callees, "← Calls: "))
+    shown = result.callers[:_ARCH_LIST_MAX]
+    extra = len(result.callers) - len(shown)
+    lines.extend(_wrap_list(
+        shown + ([f"+{extra} more"] if extra > 0 else []), "→ Called by: "))
+    lines.extend(_wrap_list(result.callees[:_ARCH_LIST_MAX], "← Calls: "))
     lines.append("")
 
     noun = result.node_type or "node"
-    count = len(result.callers)
+    # Fall back to the caller list when the count was not populated, so a
+    # result built by hand still renders an accurate line.
+    count = result.production_callers or (len(result.callers) - result.test_callers)
     lines.append(f"RISK IF CHANGED: {result.risk_level}")
-    lines.append(
-        f"{count} node depends on this {noun} directly." if count == 1
-        else f"{count} nodes depend on this {noun} directly." if count
-        else f"Nothing depends on this {noun} directly."
+    summary = (
+        f"{count} node depends on this {noun}" if count == 1
+        else f"{count} nodes depend on this {noun}" if count
+        else f"Nothing in the project depends on this {noun}"
     )
+    if result.test_callers:
+        summary += f" ({result.test_callers} more in tests)"
+    if result.dependents_pct:
+        summary += f" — {result.dependents_pct}% of the project"
+    lines.append(summary + ".")
+    if result.advice:
+        lines.append(result.advice)
+
+    if result.explore:
+        lines.append("")
+        lines.append("EXPLORE FURTHER")
+        lines.extend(f"  {cmd}" for cmd in result.explore)
 
     lines.append("")
     lines.append("─" * width)

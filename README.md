@@ -4,7 +4,7 @@
 
 # slurp
 
-![tests](https://img.shields.io/badge/tests-2148%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-2173%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 ![pypi](https://img.shields.io/badge/PyPI-slurp--graph-orange)
@@ -432,7 +432,10 @@ pay for one outlier every time.
 ### `slurp explain`
 
 Explains any node in natural language — what it does, its architecture, and the risk of
-changing it.
+changing it. With `--no-llm`, or whenever no provider is configured, it answers from the
+graph alone: an architectural role inferred from the node's position, its immediate
+neighbourhood, the share of the project that depends on it, and two or three commands
+that continue the investigation. No API key, no network.
 
 ```bash
 slurp explain "recalcularPlayerStats" --graph graph.json
@@ -465,11 +468,54 @@ ARCHITECTURE
 ← Calls: createAdminClient()
 
 RISK IF CHANGED: HIGH
-8 nodes depend on this function directly.
+8 nodes depend on this function — 0.4% of the project.
+Add tests covering the current behaviour before modifying.
 
 ─────────────────────────────────────────────────────────────────────────
 Provider: anthropic (claude-sonnet-5) · Context: 198 tokens
 ```
+
+**Without an LLM** — the same node, answered from graph structure alone:
+
+```bash
+slurp explain "recalcularPlayerStats" --graph graph.json --no-llm
+```
+
+```
+EXPLANATION
+recalcularPlayerStats() is a code node defined in lib/supabase/admin-actions.ts:1140.
+Leaf — focused, with a small surface. It is called by 3 places in the project, chiefly
+deleteMatchEventAdmin(), insertMatchEventAdmin(), insertSubstitutionEventAdmin(). It
+depends on createAdminClient(). Relevance to your query: 0.910.
+
+CONTEXT
+Part of:     admin-actions.ts
+Used by:     deleteMatchEventAdmin(), insertMatchEventAdmin(), insertSubstitutionEventAdmin()
+Depends on:  createAdminClient()
+
+ARCHITECTURE
+→ Called by: deleteMatchEventAdmin(), insertMatchEventAdmin(),
+             insertSubstitutionEventAdmin()
+← Calls: createAdminClient()
+
+RISK IF CHANGED: MEDIUM
+3 nodes depend on this code — 0.1% of the project.
+Check each caller before changing the signature.
+
+EXPLORE FURTHER
+  slurp "recalcularPlayerStats admin-actions.ts"  — the surrounding context
+  slurp explain 'deleteMatchEventAdmin'  — its most connected caller
+
+─────────────────────────────────────────────────────────────────────
+Provider: structural · Context: 449 tokens
+```
+
+The role is read off the graph: more than ten callers make a **central utility**, many
+callers with few dependencies a **shared utility**, callers and callees both high an
+**orchestrator**, none of either **isolated**. Callers that live in test files are counted
+separately, so a helper exercised by sixty tests and two modules is not reported as having
+sixty-two dependants.
+
 
 | Flag | Default | Description |
 |---|---|---|
