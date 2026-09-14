@@ -503,7 +503,11 @@ def _build_context(
     if attrs.get("_project"):
         lines.append(f"  project: {attrs['_project']}")
 
-    callers = _callers(G, node_id)
+    # The same rule the rendered facts use: a containing module owns the node,
+    # it does not depend on it. Feeding the model the larger number had it
+    # writing "4 direct dependents" above a RISK line that said 3.
+    production, tests = _split_callers(G, node_id)
+    callers = production + tests
     lines.append("")
     lines.append(f"CALLED BY ({len(callers)}):")
     if callers:

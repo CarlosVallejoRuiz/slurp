@@ -443,50 +443,24 @@ slurp explain "recalcularPlayerStats" --graph graph.json
 
 ```
 ╭──────────────── slurp explain — recalcularPlayerStats() ────────────────╮
-│ function · lib/supabase/admin-actions.ts · score: 0.966                 │
+│ code · lib/supabase/admin-actions.ts · score: 0.910                     │
 ╰─────────────────────────────────────────────────────────────────────────╯
 
 EXPLANATION
-recalcularPlayerStats() is a core admin-side function that recomputes player
-statistics from scratch by aggregating raw match event data, likely to keep
-derived stats (goals, cards, appearances, etc.) consistent whenever underlying
-match data changes. It exists as a shared recalculation routine so that any
-operation touching match events — inserts, deletions, substitutions, imports,
-or scheduled jobs — can trigger a fresh, authoritative recompute rather than
-each caller maintaining its own incremental update logic.
+recalcularPlayerStats() is an internal admin-side helper in admin-actions.ts
+that likely recomputes aggregate player statistics after match events
+change, using an admin Supabase client (via createAdminClient()) to bypass
+row-level security and write updated stats directly. It exists to keep
+player stats consistent whenever match events are mutated, rather than
+requiring each mutation function to duplicate that recalculation logic. It's
+invoked by the three admin actions that alter match event data — deleting,
+inserting, and inserting substitution events — suggesting it acts as a
+shared consistency-repair step after any event-level change.
 
-Given its high blast radius, any change to this function's logic, signature, or
-side effects could silently break stats recalculation across eight distinct
-workflows, making regressions here likely to propagate broadly and be hard to
-detect until stats appear wrong.
-
-ARCHITECTURE
-→ Called by: adminBackfill(), deleteMatchEventAdmin(),
-             importMatchCsv(), insertMatchEventAdmin(),
-             insertSubstitutionEventAdmin(), nightlyStatsJob(),
-             recalcTeamTable(), refreshAllStats()
-← Calls: createAdminClient()
-
-RISK IF CHANGED: HIGH
-8 nodes depend on this function — 0.4% of the project.
-Add tests covering the current behaviour before modifying.
-
-─────────────────────────────────────────────────────────────────────────
-Provider: anthropic (claude-sonnet-5) · Context: 198 tokens
-```
-
-**Without an LLM** — the same node, answered from graph structure alone:
-
-```bash
-slurp explain "recalcularPlayerStats" --graph graph.json --no-llm
-```
-
-```
-EXPLANATION
-recalcularPlayerStats() is a code node defined in lib/supabase/admin-actions.ts:1140.
-Leaf — focused, with a small surface. It is called by 3 places in the project, chiefly
-deleteMatchEventAdmin(), insertMatchEventAdmin(), insertSubstitutionEventAdmin(). It
-depends on createAdminClient(). Relevance to your query: 0.910.
+If this function's behavior or signature changed, it would directly risk
+breaking deleteMatchEventAdmin(), insertMatchEventAdmin(), and
+insertSubstitutionEventAdmin(), since all three depend on it to keep player
+stats accurate after modifying match events.
 
 CONTEXT
 Part of:     admin-actions.ts
@@ -507,7 +481,27 @@ EXPLORE FURTHER
   slurp explain 'deleteMatchEventAdmin'  — its most connected caller
 
 ─────────────────────────────────────────────────────────────────────
-Provider: structural · Context: 449 tokens
+Provider: anthropic (claude-sonnet-5) · Context: 440 tokens
+```
+
+**Without an LLM** — the model writes the prose and nothing else, so every section below
+it is identical. Only EXPLANATION changes:
+
+```bash
+slurp explain "recalcularPlayerStats" --graph graph.json --no-llm
+```
+
+```
+EXPLANATION
+recalcularPlayerStats() is a code node defined in lib/supabase/admin-actions.ts:1140.
+Leaf — focused, with a small surface. It is called by 3 places in the project, chiefly
+deleteMatchEventAdmin(), insertMatchEventAdmin(), insertSubstitutionEventAdmin(). It
+depends on createAdminClient(). Relevance to your query: 0.910.
+
+... CONTEXT, ARCHITECTURE, RISK and EXPLORE FURTHER exactly as above ...
+
+─────────────────────────────────────────────────────────────────────
+Provider: structural · Context: 440 tokens
 ```
 
 The role is read off the graph: more than ten callers make a **central utility**, many
