@@ -365,6 +365,29 @@ slurp audit --top-nodes 20
 slurp audit --audit-dir /custom/.slurp
 ```
 
+```
+                           Query History (last 5 of 5)
+┏━━━━━━┳━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━┳━━━━━━━━┳━━━━━━━━━┓
+┃ #    ┃ Timestamp           ┃ Query                 ┃ Nodes ┃ Tokens ┃ Savings ┃
+┡━━━━━━╇━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━╇━━━━━━━━╇━━━━━━━━━┩
+│ 1    │ 2026-09-15T09:01:07 │ budget selection      │   131 │   2999 │     98% │
+│ 2    │ 2026-09-15T09:01:07 │ graph loader          │   139 │   2999 │     98% │
+│ 3    │ 2026-09-15T09:01:07 │ mcp server            │   130 │   3000 │     98% │
+│ 4    │ 2026-09-15T09:01:08 │ token counting        │   135 │   3000 │     98% │
+│ 5    │ 2026-09-15T09:01:08 │ call graph extraction │   143 │   2995 │     98% │
+└──────┴─────────────────────┴───────────────────────┴───────┴────────┴─────────┘
+                        Top 10 Most Selected Nodes
+┏━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┓
+┃ Rank  ┃ Node                                    ┃ Times Selected ┃
+┡━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━┩
+│ 1     │ tests.test_cli._runner                  │              5 │
+│ 2     │ tests.test_cli.TestAutoDiscovery.test…  │              5 │
+│ 3     │ tests.test_cli.TestExportCommand.test…  │              4 │
+│ 9     │ slurp.formatter.format_subgraph         │              3 │
+│ 10    │ slurp.indexer._BaseVisitor._recurse     │              3 │
+└───────┴─────────────────────────────────────────┴────────────────┘
+```
+
 Every query is appended as a JSON line (unless `--no-audit` is passed). Useful for tracking which parts of your codebase an AI agent visits most.
 
 ---
@@ -380,6 +403,27 @@ the new one and reads the budget off what they actually used.
 
 ```bash
 slurp advisor "auth flow" --graph graph.json
+```
+
+```
+╭────────────── Budget Advisor — "budget selection" ───────────────╮
+│ Based on 5 similar past queries                                  │
+╰──────────────────────────────────────────────────────────────────╯
+
+Recommended budget:  3,999 tokens
+Expected coverage:   93.3% of similar queries' selections
+Estimated cost:      $0.0120  (claude-sonnet-5)
+Confidence:          MEDIUM  (5 similar queries)
+
+Similar past queries:
+  "budget selection"      → 2,999 tokens · 98.4% savings
+  "budget selection heap" → 1,497 tokens · 99.2% savings
+  "budget selection heap" → 2,498 tokens · 98.7% savings
+  "budget selection heap" → 3,999 tokens · 97.9% savings
+  "budget selection heap" → 6,000 tokens · 96.9% savings
+
+Run with recommended budget:
+  slurp "budget selection" --graph graph.json --budget 3999
 ```
 
 ```
@@ -629,67 +673,67 @@ a review checklist, or your AI assistant:
 # Slurp Diff — Impact Analysis
 
 ## Summary
-- **⚠️ High impact change**
-- **Impact score:** 0.7412 (🔴 high)
-- 3 nodes added · 1 removed · 2 modified
-- 5 edges added · 2 removed
-- 9 nodes in risk neighborhood
+- **✅ Low impact change**
+- **Impact score:** 0.0048 (🟢 low)
+- 1 nodes added · 2 removed · 0 modified
+- 2 edges added · 13 removed
+- 2 nodes in risk neighborhood
 
-## Added Nodes (3)
+## Added Nodes (1)
 
-### refresh_token (function)
-Issues a new JWT from a valid refresh token.
-→ File: src/auth/tokens.py
+### choose_subgraph (function)
+→ File: slurp/budget.py
 
-## Removed Nodes (1)
+## Removed Nodes (2)
 
-### legacy_session_check
+### slurp.budget.select_subgraph
 
-## Modified Nodes (2)
-
-### authenticate_user (function)
-### JWTMiddleware (class)
+### slurp.formatter._format_yaml
 
 ## Affected Edges
 
-**Added (5):**
-- login_handler → calls → refresh_token
-- JWTMiddleware → calls → refresh_token
+**Added (2):**
+- slurp.budget → contains → slurp.budget.choose_subgraph
+- slurp.budget.choose_subgraph → calls → slurp.budget._node_token_cost
 
-**Removed (2):**
-- login_handler → legacy_session_check
-
-## Nodes at Risk
-Direct neighbors of changed nodes:
-
-- login_handler (function) · centrality: 0.0841
-- UserModel (class) · centrality: 0.0663
-- api_router (module) · centrality: 0.0512
+**Removed (13):**
+- slurp.benchmark.run_benchmark → slurp.budget.select_subgraph
+- slurp.budget → slurp.budget.select_subgraph
+- slurp.budget.select_subgraph → slurp.budget._node_token_cost
+- slurp.cli.diff_cmd → slurp.budget.select_subgraph
+- slurp.cli.export_cmd → slurp.budget.select_subgraph
+- slurp.cli.run → slurp.budget.select_subgraph
+- slurp.evaluator.build_slurp_context → slurp.budget.select_subgraph
 
 ## What to review
 Most connected nodes in the blast radius — review these first:
 
-1. login_handler (function) · centrality: 0.0841 · src/api/login.py
-2. UserModel (class) · centrality: 0.0663 · src/models.py
-3. api_router (module) · centrality: 0.0512 · src/api/router.py
-4. JWTMiddleware (class) · centrality: 0.0447 · src/middleware/jwt.py
-5. authenticate_user (function) · centrality: 0.0391 · src/auth/service.py
+1. cli (module) · centrality: 0.0326 · slurp/cli.py
+2. mcp (module) · centrality: 0.0203 · slurp/mcp.py
+3. run (function) · centrality: 0.0155 · slurp/cli.py
+4. evaluator (module) · centrality: 0.0128 · slurp/evaluator.py
+5. suggester (module) · centrality: 0.0128 · slurp/suggester.py
 ```
+
+> The change above is a rename of `select_subgraph`: one node added, two removed, and
+> **thirteen edges gone** — every caller of the old name. The impact *score* stays low
+> because it is a share of the whole graph, not a severity verdict; the thirteen removed
+> edges are the number that matters.
 
 The run finishes with a colour-coded summary panel and, if you did not pass
 `--viz`, the exact command to see the full picture:
 
 ```
-╭─────────────── Impact Summary ───────────────╮
-│                                              │
-│  ⚠️ High impact change  (impact score 0.7412) │
-│                                              │
-│  +3 added  -1 removed  ~2 modified           │
-│                                              │
-│  See the full blast radius:                  │
-│    slurp diff main.json feature.json --viz   │
-│                                              │
-╰──────────────────────────────────────────────╯
+╭─────────────────────────── Impact Summary ───────────────────────────╮
+│                                                                      │
+│  ✅ Low impact change  (impact score 0.0048)                         │
+│                                                                      │
+│  +1 added  -2 removed  ~0 modified                                   │
+│                                                                      │
+│  See the full blast radius:                                          │
+│    slurp diff old.json new.json --viz                                │
+│                                                                      │
+╰──────────────────────────────────────────────────────────────────────╯
 ```
 
 #### Flags
@@ -889,6 +933,30 @@ slurp benchmark \
   --budget 2000 --budget 4000 --budget 8000
 # Windows CMD: remove the backslashes and write on one line
 ```
+
+```
+        Benchmark Results — pricing: default ($3/MTok input)
+┏━━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┓
+┃ Query           ┃ Budget ┃ Tokens used ┃ Full graph ┃ Savings ┃ Cost (slurp) ┃ Cost (full) ┃
+┡━━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━━┩
+│ select subgraph │  2,000 │       1,998 │    271,093 │   99.3% │      $0.0060 │     $0.8133 │
+└─────────────────┴────────┴─────────────┴────────────┴─────────┴──────────────┴─────────────┘
+                            Summary
+┏━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Metric             ┃                                   Value ┃
+┡━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ Mean savings       │                                   99.3% │
+│ p50 savings        │                                   99.3% │
+│ Mean precision     │                                   2.22% │
+│ Best case          │ 99.3% ('select subgraph', budget 2,000) │
+│ Cost with slurp    │                                 $0.0060 │
+│ Cost without slurp │                                 $0.8133 │
+│ Money saved        │                         $0.8073 (99.3%) │
+└────────────────────┴─────────────────────────────────────────┘
+```
+
+> One query at one budget, run against slurp's own graph. The real table also carries
+> `Nodes sel.`, `Nodes total`, `Coverage` and `Precision`, elided here for width.
 
 Outputs a per-run table and aggregate stats: mean savings, p50/p90/p95, best/worst case, and precision (fraction of relevant nodes captured).
 
