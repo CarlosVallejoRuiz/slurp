@@ -122,6 +122,8 @@ pip install slurp-graph
 
 > PyPI package: `slurp-graph` — CLI command: `slurp`
 
+Check what you have with `slurp --version`.
+
 📖 **Full usage guide (automatic MCP mode + manual CLI):** [USAGE.md](USAGE.md)
 
 ---
@@ -348,7 +350,7 @@ slurp stats --graph graph.json
 ```
 Graph: graph.json
 Nodes: 2111
-Edges: 4823
+Edges: 3421
 ```
 
 ---
@@ -519,6 +521,7 @@ sixty-two dependants.
 | `--endpoint` | — | Base URL for the `openai-compatible` provider. |
 | `--no-llm` | off | Skip the LLM and show the structural analysis only. |
 | `--hops` | `2` | Neighbourhood radius used to build the explanation context. |
+| `--config-dir` | `.slurp` | Directory holding `config.json`. |
 
 **Providers.** With no `--provider`, slurp auto-detects in this order:
 
@@ -802,7 +805,7 @@ refused: it reports that nothing was found and suggests re-indexing if the file 
 
 ---
 
-### `slurp suggest`
+### `--suggest`
 
 Suggests related queries to explore after a query — drill down, sibling exploration, and
 high-risk dependency detection. It reads the nodes that sat *just outside* the token
@@ -963,6 +966,7 @@ slurp index . --smart                     # only re-index what changed
 ```
 Indexing /path/to/project ...
 ✓ 312 nodes · 487 edges · 41 files
+  Parsers: Python (ast), TypeScript (tree-sitter), Go (regex)
   Saved: /path/to/project/graphify-out/graph.json
 
 Next: slurp "your query" --graph /path/to/project/graphify-out/graph.json
@@ -1045,11 +1049,14 @@ Next: slurp "your query" --graph /path/to/project/graphify-out/graph.json
 > in the file. A bare `helper()` never resolves to a method either: Rust has no implicit
 > receiver, so inside `impl Gateway` a bare `submit()` is a free function, not `self.submit`.
 >
-> **Return types are not propagated** in Go or Rust: `srv := NewServer()` followed by
-> `srv.Start()` emits no edge, because the graph does not record that `NewServer` returns
-> a `*Server`. The call to `NewServer` itself resolves, across files included; only what
-> is called *on its result* is lost. An explicit type — a `var` declaration, a `let x: T`
-> annotation, a parameter or a field — resolves normally.
+> **A return type only propagates within one file.** `srv := NewServer()` resolves when
+> `NewServer` is declared in the same file as the call. A constructor imported from
+> elsewhere does not carry its type across, so `srv.Start()` emits nothing there. An
+> explicit type — a `var` declaration, a `let x: T` annotation, a parameter or a field —
+> always resolves, cross-file included. Rust is the one place a wrapper is deliberately
+> not unwrapped: `Option<Engine>` is an Option, and `e.run()` on it does not compile, so
+> binding through it would invent an edge the compiler rejects. Go's `(T, error)` *is*
+> destructured at the assignment, so it binds.
 >
 > Without the `ts` extra, TypeScript falls back to regex, which blanks comments and string
 > literals before scanning and resolves everything above **except** methods inherited from a
@@ -1329,6 +1336,11 @@ Pass a custom path with `--ignore-file path/to/.slurpignore`.
 - ✅ **v0.9.8** — Java and Rust cross-file call resolution: static and wildcard imports, `use crate::`/`super::`, multi-symbol and glob imports
 - ✅ **v0.9.9** — Go cross-file call resolution: package aliases, dot imports, `package main` excluded — all five call-graph languages now resolve across files
 - ✅ **v1.0.0** — Production release: complete call graph for Python, TypeScript/JS, Go, Java and Rust with cross-file resolution. `slurp explain`, `slurp eval`, `slurp advisor`, `slurp init`, federation, smart reindex, premium viz.
+- ✅ **v1.0.1** — Return type propagation: `srv := NewServer()` followed by `srv.Start()` resolves for Go, Rust, Java and TypeScript, within a file
+- ✅ **v1.0.2** — Structural `slurp explain`: architectural role, neighbourhood context, risk as a share of the project, and follow-up commands — 90 lines down to 28
+- ✅ **v1.0.3** — MCP gains `slurp_explain` and `slurp_diff`
+- ✅ **v1.0.4** — `--suggest`: follow-up queries read off the subgraph's frontier, plus the `slurp_suggest` MCP tool
+- ✅ **v1.0.5** — `slurp impact`: blast radius of editing a file before you edit it, no second snapshot needed, plus the `slurp_impact` MCP tool
 
 ---
 
