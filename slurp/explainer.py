@@ -652,14 +652,16 @@ def _explain_structural(
 # DECISION: the model writes prose only. Callers, callees and blast radius are
 # facts already in the graph and are rendered from it — asking the model to
 # restate them would invite it to get them subtly wrong.
-_PROMPT = """\
+# DECISION: the instructions are a separate constant from the context so the
+# Anthropic provider can mark them as a cacheable prefix. Caching is a prefix
+# match — the stable half has to come first and on its own. The other three
+# providers still receive one concatenated string, which _PROMPT rebuilds.
+_SYSTEM_PROMPT = """\
 You are explaining one node of a codebase knowledge graph to a developer who \
 is about to work on it.
 
-Below is structured data about the node: its type, source file, what depends on \
-it, and what it depends on.
-
-{context}
+The user message contains structured data about the node: its type, source \
+file, what depends on it, and what it depends on.
 
 Write 2-4 sentences explaining what this node does and why it exists, inferring \
 from its name, type, description and relationships. Then write one more sentence \
@@ -671,6 +673,26 @@ Rules:
 - Do not invent function bodies, file contents, parameters, or behaviour the \
 data above does not support. Say "likely" when you are inferring.\
 """
+
+_PROMPT = _SYSTEM_PROMPT + "\n\n{context}"
+
+
+# Last call's cache counters, so a caller can verify caching actually happened
+# rather than assume it. Zero reads across repeated calls means the prefix is
+# below the model's minimum or something is invalidating it.
+_LAST_CACHE_USAGE: dict[str, int] = {}
+
+
+def _record_cache_usage(usage) -> None:
+    """Record the cache counters the API reported for the last call."""
+    _LAST_CACHE_USAGE.clear()
+    if usage is None:
+        return
+    for counter in ("cache_creation_input_tokens", "cache_read_input_tokens",
+                    "input_tokens", "output_tokens"):
+        value = getattr(usage, counter, None)
+        if isinstance(value, int):
+            _LAST_CACHE_USAGE[counter] = value
 
 
 def _require(condition: bool, message: str) -> None:
@@ -696,11 +718,28 @@ def _call_anthropic(prompt: str, config: LLMConfig) -> str:
     # 4.8/4.7, Fable 5) removed the sampling parameters and reject the request
     # with a 400 if one is sent. `temperature` still applies to the other
     # providers, which is why it stays on LLMConfig.
+    #
+    # DECISION: the instructions go in `system` with a cache breakpoint and the
+    # node context goes in the user message. Caching is a prefix match, so the
+    # stable half must come first; marking the whole prompt would cache a
+    # prefix that changes with every node and never hit.
+    #
+    # No beta header: prompt caching is GA. Sending the retired
+    # `prompt-caching-2024-07-15` header is the same class of mistake that the
+    # sampling parameters above already cost us — a 400 on a request that used
+    # to work.
+    context = prompt.removeprefix(_SYSTEM_PROMPT).lstrip("\n")
     message = client.messages.create(
         model=config.model,
         max_tokens=_MAX_TOKENS_OUT,
-        messages=[{"role": "user", "content": prompt}],
+        system=[{
+            "type": "text",
+            "text": _SYSTEM_PROMPT,
+            "cache_control": {"type": "ephemeral"},
+        }],
+        messages=[{"role": "user", "content": context}],
     )
+    _record_cache_usage(getattr(message, "usage", None))
     return "".join(
         block.text for block in message.content if getattr(block, "type", "") == "text"
     ).strip()
