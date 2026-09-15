@@ -13,7 +13,7 @@ from pathlib import Path
 
 from slurp.audit import read_audit
 from slurp.benchmark import _cost_usd, _percentile, price_per_mtok
-from slurp.scorer import _tokenize
+from slurp._graphutils import _tokenize
 
 DEFAULT_BUDGET = 4000
 

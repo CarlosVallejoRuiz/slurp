@@ -17,6 +17,14 @@ from pathlib import Path
 import networkx as nx
 
 from slurp.budget import count_tokens
+from slurp._graphutils import (
+    _RISK_HIGH_MIN,
+    _RISK_MEDIUM_MIN,
+    _callees,
+    _display,
+    _label,
+    _split_callers,
+)
 
 CONFIG_DIR = ".slurp"
 CONFIG_FILE = "config.json"
@@ -32,9 +40,6 @@ DEFAULT_MODELS: dict[str, str] = {
     "openai-compatible": "local-model",
 }
 
-# Risk is measured in direct dependents: nodes that would have to change with it.
-_RISK_HIGH_MIN = 6
-_RISK_MEDIUM_MIN = 2
 
 _MAX_LISTED_NEIGHBORS = 12
 _LLM_TIMEOUT_S = 60
@@ -246,17 +251,6 @@ def resolve_config(
 # Graph reading
 # ---------------------------------------------------------------------------
 
-def _label(G: nx.DiGraph, node_id: str) -> str:
-    return G.nodes[node_id].get("label", node_id) if node_id in G else node_id
-
-
-def _display(G: nx.DiGraph, node_id: str) -> str:
-    """Render a node as `name()` for functions/methods, plain otherwise."""
-    label = _label(G, node_id)
-    node_type = G.nodes[node_id].get("type", "") if node_id in G else ""
-    return f"{label}()" if node_type in {"function", "method"} else label
-
-
 def find_node(G: nx.DiGraph, query: str, scores: dict[str, float] | None = None) -> str:
     """Resolve a query to the node it most likely names.
 
@@ -301,39 +295,8 @@ def find_node(G: nx.DiGraph, query: str, scores: dict[str, float] | None = None)
     )
 
 
-def _callers(G: nx.DiGraph, node_id: str) -> list[str]:
-    return sorted(G.predecessors(node_id)) if node_id in G else []
-
-
-def _callees(G: nx.DiGraph, node_id: str) -> list[str]:
-    return sorted(G.successors(node_id)) if node_id in G else []
-
-
-_TEST_MARKERS = ("tests/", "test_", "_test.", ".test.", ".spec.", "spec/")
 _ROLE_HUB_CALLERS = 10
 _ROLE_ORCHESTRATOR_MIN = 5
-
-
-def _is_test(G: nx.DiGraph, node_id: str) -> bool:
-    """Whether a node lives in test code, judged by its file path."""
-    source = str(G.nodes.get(node_id, {}).get("source_file", "")).replace("\\", "/")
-    label = node_id.rsplit(".", 1)[-1]
-    return any(m in source for m in _TEST_MARKERS) or label.startswith("test_")
-
-
-def _split_callers(G: nx.DiGraph, node_id: str) -> tuple[list[str], list[str]]:
-    """Callers split into production and test, in that order.
-
-    A node called by sixty tests and six modules is not depended on by
-    sixty-six things in any sense a reader cares about, and reporting one
-    number overstates the blast radius by an order of magnitude.
-    """
-    callers = [
-        c for c in _callers(G, node_id)
-        if G.edges[c, node_id].get("relation") != "contains"
-    ]
-    tests = [c for c in callers if _is_test(G, c)]
-    return [c for c in callers if c not in set(tests)], tests
 
 
 def _by_importance(G: nx.DiGraph, nodes: list[str], limit: int = 3) -> list[str]:

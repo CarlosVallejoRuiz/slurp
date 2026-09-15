@@ -12,12 +12,14 @@ from dataclasses import dataclass, field
 
 import networkx as nx
 
-from slurp.explainer import _display, _split_callers
+from slurp._graphutils import (
+    _RISK_HIGH_MIN,
+    _RISK_MEDIUM_MIN,
+    _box,
+    _display,
+    _split_callers,
+)
 
-# Thresholds mirror explainer._risk_level so a file and its nodes never
-# disagree about how dangerous the same code is.
-_RISK_HIGH_MIN = 6
-_RISK_MEDIUM_MIN = 2
 _TOP_FILES = 10
 _SAFE_LISTED = 6
 
@@ -198,8 +200,6 @@ def _truncate(path: str, width: int = 34) -> str:
 
 def format_impact(result: ImpactResult, G: nx.DiGraph, width: int = 69) -> str:
     """Render an ImpactResult as the report shown in the terminal."""
-    from slurp.formatter import _box
-
     if not result.nodes_in_file:
         return (f"No nodes found for {result.file_path}.\n"
                 "Check the path, or re-index if the file is new.")

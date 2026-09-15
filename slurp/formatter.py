@@ -4,6 +4,8 @@ import json as _json
 
 import networkx as nx
 
+from slurp._graphutils import _box
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -26,27 +28,6 @@ def _yaml_scalar(v: object) -> str:
     )
     # JSON string literals are valid YAML scalars.
     return _json.dumps(s) if needs_quote else s
-
-
-def _box(title: str, subtitle: str) -> str:
-    """Renders a Unicode border box with a title line and a subtitle line.
-
-    Example:
-        ╭─ Slurp — (budget: 100 tokens) ─╮
-        │ Selected 3/7 nodes · 58/100 ... │
-        ╰──────────────────────────────────╯
-    """
-    # total_w must accommodate both content lines with their border decoration.
-    #   title line:    "╭─ " + title + " " + "─" * fill + "╮"  = len(title) + 5 + fill
-    #   subtitle line: "│ " + subtitle + spaces + " │"          = len(subtitle) + 4 + spaces
-    total_w = max(len(title) + 5, len(subtitle) + 4)
-    title_fill = total_w - len(title) - 5
-    sub_spaces = total_w - len(subtitle) - 4
-
-    top = f"╭─ {title} {'─' * title_fill}╮"
-    mid = f"│ {subtitle}{' ' * sub_spaces} │"
-    bot = "╰" + "─" * (total_w - 2) + "╯"
-    return "\n".join([top, mid, bot])
 
 
 _LANG_MAP: dict[str, str] = {

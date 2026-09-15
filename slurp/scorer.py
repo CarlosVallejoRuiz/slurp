@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import math
-import re
 import weakref
 from collections import Counter
 
 import networkx as nx
+
+from slurp._graphutils import _tokenize
 
 
 # DECISION: PageRank depends only on G, never on the query, so it is cached for
@@ -83,34 +84,6 @@ def _pagerank(
             pass
 
     return rank
-
-
-def _tokenize(text: str) -> list[str]:
-    """Splits text into tokens handling snake_case, camelCase, and PascalCase.
-
-    Pipeline:
-    1. Insert spaces at camelCase/PascalCase boundaries (before lowercasing so
-       boundary info is preserved): "recalcularPlayerStats" → "recalcular Player Stats".
-    2. Lowercase and split on every non-alphanumeric character (covers snake_case,
-       hyphens, dots, spaces, etc.).
-    3. Append any original (pre-split) tokens that are not already in the result,
-       so full compound identifiers remain searchable alongside their parts.
-    """
-    # Step 1: split camelCase/PascalCase before losing case info.
-    #   "XMLParser"         → "XML Parser"    (uppercase run before capitalized word)
-    #   "recalcularPlayer"  → "recalcular Player"  (lowercase-to-uppercase boundary)
-    split = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", text)
-    split = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", split)
-
-    # Step 2: lowercase + extract alphanumeric runs (covers _ . - spaces …).
-    primary = re.findall(r"[a-z0-9]+", split.lower())
-
-    # Step 3: also extract original tokens so compound identifiers are searchable.
-    original = re.findall(r"[a-z0-9]+", text.lower())
-    seen = set(primary)
-    extras = [t for t in original if t not in seen]
-
-    return primary + extras
 
 
 def _tfidf_scores(G: nx.DiGraph, query: str) -> dict[str, float]:

@@ -408,6 +408,25 @@ uv sync --extra rust            # solo una
   - El fixture de tests usa `file_path` y los grafos reales `source_file`;
     `_source_of` lee ambos. Un test que mire solo uno falla en silencio.
 
+- **`_graphutils.py` — el hogar de lo compartido.** Cada uno de estos nombres
+  fue un privado del módulo que lo necesitó primero, importado con underscore
+  desde los demás según aparecían. A seis módulos de profundidad eso deja de
+  ser un atajo. Viven aquí: `_tokenize`, `_display`, `_is_test`,
+  `_split_callers`, `_box`, `_RISK_HIGH_MIN`/`_RISK_MEDIUM_MIN`, más
+  `_label`, `_callers`, `_callees` y `_TEST_MARKERS`.
+  - **Los tres últimos no estaban en la lista original pero tuvieron que
+    moverse**: `_display` depende de `_label`, y `_split_callers` de
+    `_callers` y `_TEST_MARKERS`. Dejarlos en `explainer` habría creado un
+    import circular.
+  - **`impact.py` duplicaba `_RISK_HIGH_MIN`** con un comentario que decía
+    «mirrors explainer» — exactamente el tipo de copia que diverge en
+    silencio. Ahora hay un solo 6.
+  - Conservan el underscore: siguen siendo internos de slurp, solo que con un
+    hogar en vez de prestados desde donde tocara.
+  - Los módulos origen los reimportan, así que `from slurp.scorer import
+    _tokenize` y `from slurp.explainer import _split_callers` siguen
+    funcionando — los tests no hizo falta tocarlos.
+
 ---
 
 ## Principios de desarrollo
@@ -474,7 +493,8 @@ Señal de que ha pasado: la suite reporta tests *skipped* donde antes había 0, 
 │   ├── explainer.py       ← explica un nodo en lenguaje natural (LLM + fallback estructural)
 │   ├── evaluator.py       ← benchmark de calidad con LLM judge (slurp eval)
 │   ├── suggester.py       ← propone queries de seguimiento desde la frontera del subgrafo
-│   └── impact.py          ← radio de impacto de editar un fichero, sin segundo snapshot
+│   ├── impact.py          ← radio de impacto de editar un fichero, sin segundo snapshot
+│   └── _graphutils.py     ← utilidades compartidas entre módulos que leen el grafo
 └── tests/
     ├── __init__.py
     ├── conftest.py

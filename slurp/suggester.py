@@ -13,8 +13,13 @@ from dataclasses import dataclass, field
 
 import networkx as nx
 
-from slurp.explainer import _RISK_HIGH_MIN, _display, _is_test, _split_callers
-from slurp.scorer import _tokenize
+from slurp._graphutils import (
+    _RISK_HIGH_MIN,
+    _display,
+    _is_test,
+    _split_callers,
+    _tokenize,
+)
 
 # Tokens that describe how code is organised rather than what it is about, so
 # a suggestion built from them reads as noise: "slurp 'index utils helper'".
