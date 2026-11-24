@@ -7055,6 +7055,29 @@ def index_project(
         all_nodes.extend(nodes)
         all_edges.extend(edges)
 
+    return _assemble_graph(all_nodes, all_edges, ignore)
+
+
+def _assemble_graph(
+    all_nodes: list[dict],
+    all_edges: list[dict],
+    ignore: SlurpIgnore | None = None,
+) -> dict:
+    """Turn raw per-file indexer output into the finished project graph.
+
+    Deduplicates nodes, applies ignore rules, drops dangling edges and runs the
+    five cross-file resolvers. Edges that are already resolved pass through the
+    resolvers untouched, which is what lets `slurp index --smart` feed in the
+    kept graph plus freshly parsed files and get the graph a full index builds.
+
+    Args:
+        all_nodes: Nodes from every file, in file order (first id wins).
+        all_edges: Edges from every file, pending cross-file calls included.
+        ignore: Optional SlurpIgnore rules to apply.
+
+    Returns:
+        dict with 'nodes', 'links', 'built_at_commit' keys (graphify-compatible).
+    """
     # Deduplicate nodes by id (first occurrence wins)
     seen_ids: set[str] = set()
     unique_nodes: list[dict] = []

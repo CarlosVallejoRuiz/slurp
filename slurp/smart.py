@@ -1,26 +1,37 @@
-"""Incremental re-indexing driven by git — the engine behind `slurp index --smart`.
+"""Incremental re-indexing — the engine behind `slurp index --smart`.
 
 A full index re-parses every source file in the project. Most edits touch a
-handful of files, so this module asks git what actually changed, widens that set
-to the files that depend on them, and rewrites only the affected slice of the
-graph.
+handful of files, so this module finds what changed since the graph was built,
+re-parses only those files and rewrites their slice of the graph.
+
+Invariant: the result is the graph a full index would build. Cross-file call
+resolution reads symbols from every file, so an edit that adds, removes or
+renames a file or a symbol can change how *other* files resolve. Those edits
+fall back to a full index; edits that keep every symbol of the edited files
+intact — the common case, a change inside function bodies — stay incremental.
 """
 
 import json
+import os
 import subprocess
 import sys
-from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
 
 from slurp.ignore import SlurpIgnore
-from slurp.indexer import _INDEXED_EXTENSIONS, _should_skip, iter_source_files
-
-# Edge relations that mean "the source node depends on the target node".
-_DEPENDENCY_RELATIONS: frozenset[str] = frozenset({"imports_from", "contains"})
+from slurp.indexer import (
+    _INDEXED_EXTENSIONS,
+    _assemble_graph,
+    _should_skip,
+    iter_source_files,
+)
 
 _GIT_TIMEOUT_S = 30
+
+# Node attributes that may differ while the symbol itself is unchanged. An edit
+# inside a function moves every later definition to a new line.
+_POSITIONAL_ATTRS = frozenset({"source_location"})
 
 
 @dataclass
@@ -28,12 +39,12 @@ class SmartIndexResult:
     """Outcome of one incremental re-index.
 
     Attributes:
-        changed_files: Files git reported as modified, staged, or untracked.
-        expanded_files: changed_files plus their dependents — the set actually
-            re-parsed. Deleted files appear in changed_files but not here.
+        changed_files: Files that differ from the graph: edited since it was
+            built (per git or mtime), added, or deleted.
+        expanded_files: The files actually re-parsed — the changed files that
+            still exist. Kept under this name for the CLI report.
         updated_nodes: Nodes written into the graph for the re-parsed files.
-        removed_nodes: Nodes dropped because they belonged to a re-parsed or
-            deleted file. A node that is removed and rewritten counts in both.
+        removed_nodes: Nodes dropped because they belonged to a re-parsed file.
         elapsed_ms: Wall-clock duration of the whole incremental pass.
         full_index_ms_estimate: Extrapolated cost of a full index, from the
             measured per-file parse cost times the project's file count.
@@ -42,6 +53,9 @@ class SmartIndexResult:
             case nothing was re-indexed and the caller must fall back.
         graph_found: False when no existing graph was present to update, which
             likewise forces a full index.
+        fallback_reason: Non-empty when the change could alter cross-file
+            resolution, or the graph records no usable build commit: nothing
+            was written and the caller must run a full index.
         dry_run: True when the graph was left untouched on disk.
     """
 
@@ -54,17 +68,22 @@ class SmartIndexResult:
     updated_edges: int = 0
     is_git_repo: bool = True
     graph_found: bool = True
+    fallback_reason: str = ""
     dry_run: bool = False
 
     @property
     def needs_full_index(self) -> bool:
-        """True when the incremental path could not run at all."""
-        return not self.is_git_repo or not self.graph_found
+        """True when the incremental path could not or must not run."""
+        return not self.is_git_repo or not self.graph_found or bool(self.fallback_reason)
 
     @property
     def dependents_added(self) -> int:
-        """How many files dependency expansion contributed beyond the changed set."""
-        return max(0, len(self.expanded_files) - len(self._changed_and_present()))
+        """Always 0: re-parsing is limited to the changed files themselves.
+
+        Dependents can only resolve differently when a symbol changes, and that
+        case runs a full index instead.
+        """
+        return 0
 
     @property
     def speedup(self) -> float:
@@ -72,9 +91,6 @@ class SmartIndexResult:
         if self.elapsed_ms <= 0 or self.full_index_ms_estimate <= 0:
             return 0.0
         return self.full_index_ms_estimate / self.elapsed_ms
-
-    def _changed_and_present(self) -> list[Path]:
-        return [p for p in self.changed_files if p in set(self.expanded_files)]
 
 
 # ---------------------------------------------------------------------------
@@ -108,15 +124,32 @@ def is_git_repo(root: Path) -> bool:
     return out is not None and out.strip() == "true"
 
 
-def get_changed_files(root: Path) -> list[Path]:
-    """List indexable source files that differ from the last commit.
+def head_commit(root: Path) -> str | None:
+    """The commit HEAD points at, or None outside a repo or before a first commit.
 
-    Combines unstaged edits, staged edits, and untracked files. Untracked files
-    are included because a newly created file is the most common thing to want
-    indexed, and `git diff` alone never reports one.
+    `slurp index` stores it as the graph's `built_at_commit`, so --smart can
+    later ask git what changed since the graph was built rather than since the
+    latest commit.
+    """
+    out = _git(root, "rev-parse", "--verify", "--quiet", "HEAD")
+    return out.strip() if out else None
+
+
+def _commit_exists(root: Path, commit: str) -> bool:
+    return _git(root, "cat-file", "-e", f"{commit}^{{commit}}") is not None
+
+
+def get_changed_files(root: Path, base: str = "HEAD") -> list[Path]:
+    """List indexable source files that differ from *base*.
+
+    Combines the working tree and the index compared with *base*, plus
+    untracked files. Untracked files are included because a newly created file
+    is the most common thing to want indexed, and `git diff` never reports one.
 
     Args:
         root: Project root, inside a git work tree.
+        base: Commit to compare against. --smart passes the graph's
+            built_at_commit, so edits committed since the build still count.
 
     Returns:
         Absolute paths, sorted and deduplicated, restricted to extensions slurp
@@ -124,8 +157,8 @@ def get_changed_files(root: Path) -> list[Path]:
     """
     seen: set[Path] = set()
     for args in (
-        ("diff", "--name-only", "--relative", "HEAD"),
-        ("diff", "--name-only", "--relative", "--cached"),
+        ("diff", "--name-only", "--relative", base),
+        ("diff", "--name-only", "--relative", "--cached", base),
         ("ls-files", "--others", "--exclude-standard"),
     ):
         out = _git(root, *args)
@@ -139,143 +172,6 @@ def get_changed_files(root: Path) -> list[Path]:
             if path.suffix.lower() in _INDEXED_EXTENSIONS and not _should_skip(path):
                 seen.add(path)
     return sorted(seen)
-
-
-# ---------------------------------------------------------------------------
-# dependency expansion
-# ---------------------------------------------------------------------------
-
-def _module_id_for_label(label: str, module_files: dict[str, str]) -> str | None:
-    """Resolve an import label to the module node it refers to, if any.
-
-    ``slurp.ignore.load_ignore`` resolves to the module ``slurp.ignore``. The
-    longest matching prefix wins, so a nested package beats its parent.
-
-    Args:
-        label: The import node's label.
-        module_files: Mapping of module node id to its source file.
-
-    Returns:
-        The matching module node id, or None.
-    """
-    parts = str(label).split(".")
-    for cut in range(len(parts), 0, -1):
-        candidate = ".".join(parts[:cut])
-        if candidate in module_files:
-            return candidate
-    return None
-
-
-def _build_referrer_index(graph: dict) -> dict[str, set[str]]:
-    """Map each source file to the set of files that reference it.
-
-    Two mechanisms feed this, because they cover different graph shapes:
-
-    1. Graph edges in _DEPENDENCY_RELATIONS, read in reverse.
-    2. Import nodes whose label resolves to another file's module node.
-
-    Mechanism 2 exists because slurp's own indexers emit file-local import
-    nodes (``a.import_b``) rather than edges that cross files — on a graph built
-    by `slurp index`, mechanism 1 alone finds nothing.
-
-    Args:
-        graph: Graph dict with 'nodes' and 'links'.
-
-    Returns:
-        Mapping of source file (as stored in the graph) to referencing files.
-    """
-    nodes = graph.get("nodes") or []
-    links = graph.get("links") or []
-
-    file_of_node: dict[str, str] = {}
-    module_files: dict[str, str] = {}
-    for n in nodes:
-        source_file = n.get("source_file")
-        if not source_file:
-            continue
-        file_of_node[n["id"]] = source_file
-        if n.get("type") == "module":
-            module_files[n["id"]] = source_file
-
-    referrers: dict[str, set[str]] = defaultdict(set)
-
-    for e in links:
-        if e.get("relation") not in _DEPENDENCY_RELATIONS:
-            continue
-        src_file = file_of_node.get(e.get("source", ""))
-        tgt_file = file_of_node.get(e.get("target", ""))
-        if src_file and tgt_file and src_file != tgt_file:
-            referrers[tgt_file].add(src_file)
-
-    for n in nodes:
-        if n.get("type") != "import":
-            continue
-        src_file = n.get("source_file")
-        if not src_file:
-            continue
-        module_id = _module_id_for_label(n.get("label", ""), module_files)
-        if module_id is None:
-            continue
-        target_file = module_files[module_id]
-        if target_file != src_file:
-            referrers[target_file].add(src_file)
-
-    return referrers
-
-
-def expand_dependencies(
-    changed: list[Path],
-    graph: dict,
-    root: Path,
-    hops: int = 2,
-) -> list[Path]:
-    """Widen a changed-file set to include the files that depend on it.
-
-    Args:
-        changed: Absolute paths of changed files.
-        graph: The existing graph dict being updated.
-        root: Project root, used to relate absolute paths to graph entries.
-        hops: Maximum expansion depth. Bounded so that a change to a widely
-            imported module does not drag in the whole project.
-
-    Returns:
-        Absolute paths of files to re-index — the changed files that still
-        exist, plus their dependents — sorted and deduplicated.
-    """
-    present = {p for p in changed if p.is_file()}
-    if not present or hops <= 0:
-        return sorted(present)
-
-    referrers = _build_referrer_index(graph)
-    if not referrers:
-        return sorted(present)
-
-    def _rel_key(path: Path) -> str:
-        try:
-            return path.resolve().relative_to(root.resolve()).as_posix()
-        except ValueError:
-            return path.as_posix()
-
-    by_key = {_rel_key(p): p for p in present}
-    frontier = set(by_key)
-    collected = set(by_key)
-
-    for _ in range(hops):
-        nxt: set[str] = set()
-        for key in frontier:
-            nxt |= referrers.get(key, set())
-        nxt -= collected
-        if not nxt:
-            break
-        collected |= nxt
-        frontier = nxt
-
-    result = set(present)
-    for key in collected - set(by_key):
-        candidate = (root / key).resolve()
-        if candidate.is_file() and candidate.suffix.lower() in _INDEXED_EXTENSIONS:
-            result.add(candidate)
-    return sorted(result)
 
 
 # ---------------------------------------------------------------------------
@@ -308,11 +204,19 @@ def _reindex_files(
     return nodes, edges, (perf_counter() - start) * 1000
 
 
+def _symbols(nodes: list[dict]) -> list[str]:
+    """Every node, minus positional attributes, in a comparable form."""
+    return sorted(
+        json.dumps({k: v for k, v in n.items() if k not in _POSITIONAL_ATTRS},
+                   sort_keys=True, default=str)
+        for n in nodes
+    )
+
+
 def smart_reindex(
     root: Path,
     graph_path: Path,
     ignore: SlurpIgnore | None = None,
-    hops: int = 2,
     dry_run: bool = False,
 ) -> SmartIndexResult:
     """Update an existing graph in place, re-parsing only what changed.
@@ -321,13 +225,12 @@ def smart_reindex(
         root: Project root to index.
         graph_path: Path of the graph to read and rewrite.
         ignore: Optional SlurpIgnore rules applied to newly produced nodes.
-        hops: Dependency expansion depth.
         dry_run: Compute everything but leave the graph on disk untouched.
 
     Returns:
         A SmartIndexResult. Check `needs_full_index` first: when there is no git
-        repo or no existing graph, no work was done and the caller should run a
-        full index instead.
+        repo, no existing graph, or a change that could alter cross-file
+        resolution, nothing was written and the caller should run a full index.
     """
     start = perf_counter()
 
@@ -338,23 +241,25 @@ def smart_reindex(
         return SmartIndexResult(graph_found=False, dry_run=dry_run)
     try:
         graph = json.loads(graph_path.read_text(encoding="utf-8"))
+        graph_mtime = graph_path.stat().st_mtime_ns
     except (OSError, ValueError):
         return SmartIndexResult(graph_found=False, dry_run=dry_run)
 
-    changed = get_changed_files(root)
-    if not changed:
+    # DECISION: changes are measured against the commit the graph was built
+    # from, not against HEAD. Comparing with HEAD made a commit between the
+    # build and the re-index invisible: --smart answered "up to date" over a
+    # stale graph. A graph without a recorded commit (written before v1.0.7)
+    # gives no base to compare with, so it is rebuilt once.
+    base = graph.get("built_at_commit")
+    if not base:
         return SmartIndexResult(
-            elapsed_ms=(perf_counter() - start) * 1000, dry_run=dry_run,
-        )
+            dry_run=dry_run,
+            fallback_reason="the graph records no build commit (written before v1.0.7)")
+    if not _commit_exists(root, base):
+        return SmartIndexResult(
+            dry_run=dry_run,
+            fallback_reason=f"its build commit {str(base)[:12]} is not in this repository")
 
-    expanded = expand_dependencies(changed, graph, root, hops=hops)
-
-    new_nodes, new_edges, parse_ms = _reindex_files(expanded, root)
-    if ignore is not None:
-        new_nodes = [n for n in new_nodes if not ignore.should_ignore(n, n["id"])]
-
-    # A file is "touched" if it was re-parsed or deleted; either way its old
-    # nodes must go. Keys match the graph's stored relative-POSIX form.
     root_resolved = root.resolve()
 
     def _rel_key(path: Path) -> str:
@@ -363,64 +268,71 @@ def smart_reindex(
         except ValueError:
             return path.as_posix()
 
-    touched = {_rel_key(p) for p in expanded} | {
-        _rel_key(p) for p in changed if not p.is_file()
-    }
-
+    on_disk = {_rel_key(p): p for p in iter_source_files(root)}
     old_nodes = graph.get("nodes") or []
+    in_graph = {n.get("source_file") for n in old_nodes if n.get("source_file")}
+
+    # Git sees committed, staged and unstaged edits relative to the build
+    # commit. mtime catches what git cannot: a file that was dirty at build
+    # time and has since been reverted, or an indexed file git ignores.
+    changed = {_rel_key(p) for p in get_changed_files(root, base)}
+    changed |= {key for key, path in on_disk.items()
+                if os.stat(path).st_mtime_ns >= graph_mtime}
+    added = sorted(set(on_disk) - in_graph)
+    deleted = sorted(in_graph - set(on_disk))
+    changed |= set(added) | set(deleted)
+    changed &= set(on_disk) | in_graph
+    changed_paths = sorted(root / key for key in changed)
+
+    if not changed:
+        return SmartIndexResult(
+            elapsed_ms=(perf_counter() - start) * 1000, dry_run=dry_run,
+        )
+
+    if added or deleted:
+        return SmartIndexResult(
+            changed_files=changed_paths, dry_run=dry_run,
+            fallback_reason=f"{len(added)} added and {len(deleted)} removed or renamed "
+                            "files change what other files can call")
+
+    modified = sorted(changed)
+    new_nodes, new_edges, parse_ms = _reindex_files([on_disk[k] for k in modified], root)
+    if ignore is not None:
+        new_nodes = [n for n in new_nodes if not ignore.should_ignore(n, n["id"])]
+
+    touched = set(modified)
+    previous = [n for n in old_nodes if n.get("source_file") in touched]
+    if _symbols(previous) != _symbols(new_nodes):
+        return SmartIndexResult(
+            changed_files=changed_paths, dry_run=dry_run,
+            fallback_reason="definitions or imports changed, which can change how "
+                            "other files resolve their calls")
+
+    # Same symbols, so every symbol index is unchanged and no other file can
+    # resolve differently: keep their nodes and edges, replace the edited files'
+    # slice, and let the shared assembly resolve the new pending calls exactly
+    # as a full index would.
+    removed_ids = {n["id"] for n in previous}
     kept_nodes = [n for n in old_nodes if n.get("source_file") not in touched]
-    removed_ids = {
-        n["id"] for n in old_nodes if n.get("source_file") in touched
-    }
-    removed_nodes = len(old_nodes) - len(kept_nodes)
-
-    # Deduplicate incoming nodes, first occurrence wins (as index_project does).
-    merged_nodes = list(kept_nodes)
-    seen_ids = {n["id"] for n in kept_nodes}
-    for n in new_nodes:
-        if n["id"] not in seen_ids:
-            seen_ids.add(n["id"])
-            merged_nodes.append(n)
-
-    # DECISION: drop only edges *originating* from a removed node. Those get
-    # regenerated by the re-parse. An incoming cross-file edge whose target id
-    # survives the rewrite is still valid, and dropping it would silently erode
-    # the graph one incremental run at a time.
-    kept_edges = [
-        e for e in (graph.get("links") or [])
-        if e.get("source") not in removed_ids
-    ]
-
-    merged_edges: list[dict] = []
-    seen_edges: set[tuple[str, str]] = set()
-    for e in [*kept_edges, *new_edges]:
-        src, tgt = e.get("source", ""), e.get("target", "")
-        if src not in seen_ids or tgt not in seen_ids:
-            continue
-        key = (src, tgt)
-        if key in seen_edges:
-            continue
-        seen_edges.add(key)
-        merged_edges.append(e)
-
-    graph["nodes"] = merged_nodes
-    graph["links"] = merged_edges
+    kept_edges = [e for e in (graph.get("links") or []) if e.get("source") not in removed_ids]
+    rebuilt = _assemble_graph(kept_nodes + new_nodes, kept_edges + new_edges, ignore)
+    rebuilt["built_at_commit"] = head_commit(root)
 
     if not dry_run:
         graph_path.parent.mkdir(parents=True, exist_ok=True)
-        graph_path.write_text(json.dumps(graph, indent=2), encoding="utf-8")
+        graph_path.write_text(json.dumps(rebuilt, indent=2), encoding="utf-8")
 
     elapsed_ms = (perf_counter() - start) * 1000
-    total_files = sum(1 for _ in iter_source_files(root))
-    per_file_ms = parse_ms / len(expanded) if expanded else 0.0
+    per_file_ms = parse_ms / len(modified) if modified else 0.0
+    new_ids = {n["id"] for n in new_nodes}
 
     return SmartIndexResult(
-        changed_files=changed,
-        expanded_files=expanded,
+        changed_files=changed_paths,
+        expanded_files=[on_disk[k] for k in modified],
         updated_nodes=len(new_nodes),
-        removed_nodes=removed_nodes,
+        removed_nodes=len(previous),
         elapsed_ms=elapsed_ms,
-        full_index_ms_estimate=per_file_ms * total_files,
-        updated_edges=len(new_edges),
+        full_index_ms_estimate=per_file_ms * len(on_disk),
+        updated_edges=sum(1 for e in rebuilt["links"] if e.get("source") in new_ids),
         dry_run=dry_run,
     )

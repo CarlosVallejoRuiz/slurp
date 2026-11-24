@@ -1146,26 +1146,37 @@ Next: slurp "your query" --graph /path/to/project/graphify-out/graph.json
 |---|---|---|
 | `--output`, `-o` | `<path>/graphify-out/graph.json` | Output path for graph.json. |
 | `--watch` | off | Re-index on file changes (requires watchdog, installed by default). |
-| `--smart` | off | Git-aware incremental re-index — only re-indexes changed files and their dependents. |
+| `--smart` | off | Incremental re-index — re-parses only the files changed since the graph was built; runs a full index when a file or symbol is added, removed or renamed. |
 | `--dry-run` | off | Show what `--smart` would re-index without making changes. |
 | `--ignore-file` | `.slurpignore` | Path to .slurpignore rules. |
 | `--force` | off | Overwrite the output even if another tool (e.g. graphify) wrote it. With `--smart`, a foreign graph is replaced by a full index, never merged into. |
 
 #### Incremental re-indexing with `--smart`
 
-Re-parsing every file after a two-line edit is wasted work. `--smart` asks git which
-files changed since the last commit — unstaged, staged, and untracked — widens that
-set to the files that import them (2 hops), and rewrites only that slice of the graph.
+Re-parsing every file after a two-line edit is wasted work. `slurp index` records the
+commit each graph was built from (`built_at_commit`); `--smart` asks git what changed
+since that commit — committed, staged, unstaged and untracked — adds any file modified
+after the graph was written, and re-parses only those files.
 
 ```bash
 slurp index . --smart
-# → Detected 1 changed file (git diff)
-# ✓ Updated 47 nodes · 46 edges in 0.1s
-#   Full index would take: ~2.2s (21× faster)
+# → Detected 1 changed file since the graph was built
+# ✓ Updated 11 nodes · 14 edges in 0.1s
 ```
 
-The resulting graph is identical to a full index — nodes from re-parsed files are
-replaced, nodes from deleted files are dropped, and no dangling edges are left behind.
+**The result is always the graph a full index would build.** Cross-file call
+resolution reads symbols from every file, so an edit that adds, removes or renames a
+file or a definition — or changes a file's imports — can change how *other* files
+resolve their calls. Those edits run a full index instead, and say why:
+
+```bash
+# → Detected 1 changed file since the graph was built
+#   Full index needed: definitions or imports changed, which can change how other files resolve their calls
+```
+
+Edits inside function bodies — the common case — stay incremental. On slurp itself,
+editing `budget.py` takes 0.29s against 0.62s for a full index; a graph written before
+v1.0.7 has no recorded commit and is rebuilt once.
 
 `--dry-run` lists the files it would touch and exits without writing:
 
@@ -1173,9 +1184,8 @@ replaced, nodes from deleted files are dropped, and no dangling edges are left b
 slurp index . --smart --dry-run
 ```
 
-It falls back to a full index, with a message, when there is no git repository or no
-existing graph to update. Speedup depends on what you touched: editing a leaf module
-is near-instant, while editing something the whole project imports pulls in most of it.
+It also falls back to a full index when there is no git repository or no existing
+graph to update.
 
 #### Supported languages
 

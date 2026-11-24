@@ -10,9 +10,8 @@ from click.testing import CliRunner
 from slurp.cli import cli
 from slurp.indexer import index_project
 from slurp.smart import (
-    _module_id_for_label,
-    expand_dependencies,
     get_changed_files,
+    head_commit,
     is_git_repo,
     smart_reindex,
 )
@@ -63,7 +62,10 @@ def graph_path(project: Path) -> Path:
     """A freshly built graph for the fixture project."""
     path = project / "graphify-out" / "graph.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(index_project(project), indent=2), encoding="utf-8")
+    graph = index_project(project)
+    # What `slurp index` records since v1.0.7: the commit the graph reflects.
+    graph["built_at_commit"] = head_commit(project)
+    path.write_text(json.dumps(graph, indent=2), encoding="utf-8")
     return path
 
 
@@ -73,6 +75,13 @@ def _load(path: Path) -> dict:
 
 def _node_ids(path: Path) -> set[str]:
     return {n["id"] for n in _load(path)["nodes"]}
+
+
+def _smart(project: Path, graph_path: Path):
+    """Run `slurp index --smart` the way a user does, full-index fallback included."""
+    res = CliRunner().invoke(cli, ["index", str(project), "--smart", "-o", str(graph_path)])
+    assert res.exit_code == 0, res.output
+    return res
 
 
 def _files_in(path: Path) -> set[str]:
@@ -121,7 +130,7 @@ class TestNoChanges:
             cli, ["index", str(project), "--smart", "-o", str(graph_path)]
         )
         assert res.exit_code == 0, res.output
-        assert "No changes detected since last commit — index is up to date" in res.output
+        assert "No changes since the graph was built — index is up to date" in res.output
 
     @requires_git
     def test_graph_untouched(self, project, graph_path):
@@ -166,74 +175,56 @@ class TestChangeDetection:
         assert (project / "unrelated.py").resolve() in get_changed_files(project)
 
 
-class TestExpandDependencies:
+class TestReparseScope:
+    """Which files --smart re-parses, and when it hands over to a full index."""
+
     @requires_git
-    def test_importer_is_pulled_in(self, project, graph_path):
-        """app.py imports helpers.py, so editing helpers must re-index app."""
+    def test_body_edit_reparses_only_that_file(self, project, graph_path):
+        # app.py imports helpers.py, but an edit inside helper() keeps every
+        # symbol, so app.py cannot resolve differently and is not re-parsed.
+        (project / "helpers.py").write_text("def helper():\n    return 2\n", encoding="utf-8")
+        result = smart_reindex(project, graph_path)
+        assert not result.fallback_reason
+        assert result.expanded_files == [project / "helpers.py"]
+
+    @requires_git
+    def test_new_symbol_falls_back_with_a_reason(self, project, graph_path):
+        before = graph_path.read_bytes()
+        (project / "helpers.py").write_text(
+            "def helper():\n    return 1\n\n\ndef extra():\n    return 2\n", encoding="utf-8")
+        result = smart_reindex(project, graph_path)
+        assert result.needs_full_index
+        assert "definitions" in result.fallback_reason
+        assert graph_path.read_bytes() == before  # nothing written
+
+    @requires_git
+    def test_added_file_falls_back(self, project, graph_path):
+        (project / "brand_new.py").write_text("def fresh():\n    pass\n", encoding="utf-8")
+        assert "added" in smart_reindex(project, graph_path).fallback_reason
+
+    @requires_git
+    def test_deleted_file_falls_back(self, project, graph_path):
+        (project / "unrelated.py").unlink()
+        assert "removed" in smart_reindex(project, graph_path).fallback_reason
+
+    @requires_git
+    def test_unknown_build_commit_falls_back(self, project, graph_path):
         graph = _load(graph_path)
-        changed = [project / "helpers.py"]
-        expanded = expand_dependencies(changed, graph, project)
-        assert (project / "app.py").resolve() in expanded
+        graph["built_at_commit"] = "0" * 40
+        graph_path.write_text(json.dumps(graph), encoding="utf-8")
+        assert "not in this repository" in smart_reindex(project, graph_path).fallback_reason
 
     @requires_git
-    def test_unrelated_file_not_pulled_in(self, project, graph_path):
-        graph = _load(graph_path)
-        expanded = expand_dependencies([project / "helpers.py"], graph, project)
-        assert (project / "unrelated.py").resolve() not in expanded
-
-    @requires_git
-    def test_changed_file_always_included(self, project, graph_path):
-        graph = _load(graph_path)
-        expanded = expand_dependencies([project / "unrelated.py"], graph, project)
-        assert (project / "unrelated.py").resolve() in expanded
-
-    @requires_git
-    def test_zero_hops_returns_changed_only(self, project, graph_path):
-        graph = _load(graph_path)
-        expanded = expand_dependencies([project / "helpers.py"], graph, project, hops=0)
-        assert expanded == [(project / "helpers.py").resolve()]
-
-    @requires_git
-    def test_hop_limit_is_respected(self, tmp_path):
-        """A → B → C: one hop from C reaches B but not A."""
-        root = tmp_path / "chain"
-        root.mkdir()
-        (root / "c.py").write_text("def c():\n    pass\n", encoding="utf-8")
-        (root / "b.py").write_text("from c import c\n", encoding="utf-8")
-        (root / "a.py").write_text("from b import c\n", encoding="utf-8")
-        graph = index_project(root)
-        one = expand_dependencies([root / "c.py"], graph, root, hops=1)
-        two = expand_dependencies([root / "c.py"], graph, root, hops=2)
-        assert (root / "b.py").resolve() in one
-        assert (root / "a.py").resolve() not in one
-        assert (root / "a.py").resolve() in two
-
-    def test_deleted_file_is_not_reindexed(self, tmp_path):
-        missing = tmp_path / "gone.py"
-        assert expand_dependencies([missing], {"nodes": [], "links": []}, tmp_path) == []
-
-    def test_empty_graph_returns_changed_only(self, tmp_path):
-        f = tmp_path / "x.py"
-        f.write_text("def x():\n    pass\n", encoding="utf-8")
-        assert expand_dependencies([f], {"nodes": [], "links": []}, tmp_path) == [f.resolve()]
-
-    @pytest.mark.parametrize(
-        ("label", "expected"),
-        [
-            ("slurp.ignore.load_ignore", "slurp.ignore"),
-            ("slurp.ignore", "slurp.ignore"),
-            ("slurp", "slurp"),
-            ("os.path", None),
-            ("", None),
-        ],
-    )
-    def test_module_id_resolution(self, label, expected):
-        modules = {"slurp": "slurp/__init__.py", "slurp.ignore": "slurp/ignore.py"}
-        assert _module_id_for_label(label, modules) == expected
-
-    def test_longest_prefix_wins(self):
-        modules = {"a": "a.py", "a.b": "a/b.py"}
-        assert _module_id_for_label("a.b.c", modules) == "a.b"
+    def test_reverted_edit_is_still_detected(self, project, tmp_path):
+        # Built while helpers.py was dirty, then reverted: git sees no change
+        # against the build commit, but the graph holds the dirty version.
+        original = (project / "helpers.py").read_text(encoding="utf-8")
+        (project / "helpers.py").write_text("def helper():\n    return 99\n", encoding="utf-8")
+        graph = tmp_path / "graph.json"
+        _cli_index(project, graph)
+        (project / "helpers.py").write_text(original, encoding="utf-8")
+        result = smart_reindex(project, graph)
+        assert (project / "helpers.py") in result.changed_files
 
 
 class TestNodeReplacement:
@@ -243,7 +234,7 @@ class TestNodeReplacement:
         (project / "helpers.py").write_text(
             "def renamed():\n    return 1\n", encoding="utf-8"
         )
-        smart_reindex(project, graph_path)
+        _smart(project, graph_path)
         assert "helpers.helper" not in _node_ids(graph_path)
 
     @requires_git
@@ -251,33 +242,31 @@ class TestNodeReplacement:
         (project / "helpers.py").write_text(
             "def renamed():\n    return 1\n", encoding="utf-8"
         )
-        smart_reindex(project, graph_path)
+        _smart(project, graph_path)
         assert "helpers.renamed" in _node_ids(graph_path)
 
     @requires_git
     def test_untouched_files_survive(self, project, graph_path):
         (project / "helpers.py").write_text("def renamed():\n    pass\n", encoding="utf-8")
-        smart_reindex(project, graph_path)
+        _smart(project, graph_path)
         assert "unrelated.solo" in _node_ids(graph_path)
 
     @requires_git
     def test_new_file_nodes_appear(self, project, graph_path):
         (project / "extra.py").write_text("def added_fn():\n    pass\n", encoding="utf-8")
-        result = smart_reindex(project, graph_path)
+        _smart(project, graph_path)
         assert "extra.added_fn" in _node_ids(graph_path)
-        assert result.updated_nodes > 0
 
     @requires_git
     def test_deleted_file_nodes_dropped(self, project, graph_path):
         assert "unrelated.py" in _files_in(graph_path)
         (project / "unrelated.py").unlink()
-        result = smart_reindex(project, graph_path)
+        _smart(project, graph_path)
         assert "unrelated.py" not in _files_in(graph_path)
-        assert result.removed_nodes > 0
 
     @requires_git
     def test_result_counts_are_reported(self, project, graph_path):
-        (project / "helpers.py").write_text("def renamed():\n    pass\n", encoding="utf-8")
+        (project / "helpers.py").write_text("def helper():\n    return 7\n", encoding="utf-8")
         result = smart_reindex(project, graph_path)
         assert result.updated_nodes > 0
         assert result.removed_nodes > 0
@@ -287,7 +276,7 @@ class TestNodeReplacement:
     @requires_git
     def test_no_dangling_edges(self, project, graph_path):
         (project / "helpers.py").write_text("def renamed():\n    pass\n", encoding="utf-8")
-        smart_reindex(project, graph_path)
+        _smart(project, graph_path)
         graph = _load(graph_path)
         ids = {n["id"] for n in graph["nodes"]}
         for e in graph["links"]:
@@ -299,7 +288,7 @@ class TestNodeReplacement:
         (project / "helpers.py").write_text(
             "def renamed():\n    return 9\n", encoding="utf-8"
         )
-        smart_reindex(project, graph_path)
+        _smart(project, graph_path)
         full = {n["id"] for n in index_project(project)["nodes"]}
         assert _node_ids(graph_path) == full
 
@@ -326,7 +315,7 @@ class TestDryRun:
 
     @requires_git
     def test_still_reports_what_would_change(self, project, graph_path):
-        (project / "helpers.py").write_text("def renamed():\n    pass\n", encoding="utf-8")
+        (project / "helpers.py").write_text("def helper():\n    return 7\n", encoding="utf-8")
         result = smart_reindex(project, graph_path, dry_run=True)
         assert result.dry_run is True
         assert result.updated_nodes > 0
@@ -363,25 +352,23 @@ class TestCliOutput:
 
     @requires_git
     def test_reports_detection_and_update(self, project, graph_path):
-        (project / "helpers.py").write_text("def renamed():\n    pass\n", encoding="utf-8")
+        (project / "helpers.py").write_text("def helper():\n    return 7\n", encoding="utf-8")
         res = CliRunner().invoke(
             cli, ["index", str(project), "--smart", "-o", str(graph_path)]
         )
         assert "changed file" in res.output
-        assert "(git diff)" in res.output
+        assert "since the graph was built" in res.output
         assert "✓ Updated" in res.output
         assert "nodes ·" in res.output
         assert f"Saved: {graph_path}" in res.output
         assert 'Next: slurp "your query"' in res.output
 
     @requires_git
-    def test_reports_dependency_expansion(self, project, graph_path):
+    def test_reports_why_a_full_index_runs(self, project, graph_path):
         (project / "helpers.py").write_text("def renamed():\n    pass\n", encoding="utf-8")
-        res = CliRunner().invoke(
-            cli, ["index", str(project), "--smart", "-o", str(graph_path)]
-        )
-        assert "→ Expanding to" in res.output
-        assert "dependent added" in res.output
+        res = _smart(project, graph_path)
+        assert "Full index needed: definitions or imports changed" in res.output
+        assert f"Saved: {graph_path}" in res.output
 
     @requires_git
     def test_no_graph_falls_back_and_builds_one(self, project):
@@ -397,3 +384,182 @@ class TestCliOutput:
         res = CliRunner().invoke(cli, ["index", "--help"])
         assert "--smart" in res.output
         assert "--dry-run" in res.output
+
+
+# ---------------------------------------------------------------------------
+# --smart must produce the same graph a full index would
+# ---------------------------------------------------------------------------
+
+def _cli_index(root: Path, out: Path, *extra: str):
+    res = CliRunner().invoke(cli, ["index", str(root), "-o", str(out),
+                                   "--ignore-file", "/dev/null", *extra])
+    assert res.exit_code == 0, res.output
+    return res
+
+
+def _public(graph: dict) -> tuple[dict, list[str], object]:
+    """Nodes by id and edges as a sorted multiset, public attributes only."""
+    nodes = {n["id"]: {k: v for k, v in n.items() if not k.startswith("_")}
+             for n in graph["nodes"]}
+    edges = sorted(
+        json.dumps({k: v for k, v in e.items() if not k.startswith("_")}, sort_keys=True)
+        for e in graph["links"]
+    )
+    return nodes, edges, graph.get("built_at_commit")
+
+
+def _write(root: Path, rel: str, text: str) -> None:
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+@pytest.fixture
+def mixed_project(tmp_path: Path) -> Path:
+    """Python and TypeScript files calling each other across files."""
+    root = tmp_path / "mixed"
+    _write(root, "pkg/__init__.py", "")
+    _write(root, "pkg/util.py", "def helper():\n    return 1\n\n\ndef other():\n    return 2\n")
+    _write(root, "pkg/app.py",
+           "from pkg.util import helper, missing\n\n\ndef main():\n    return helper()\n\n\n"
+           "def later():\n    return missing()\n")
+    _write(root, "pkg/side.py", "def side():\n    return 3\n")
+    _write(root, "web/client.ts", "export function send(): number { return 1 }\n")
+    _write(root, "web/use.ts",
+           'import { send, pending } from "./client"\n'
+           "export function boot(): number { return send() }\n"
+           "export function later(): number { return pending() }\n")
+    _init_repo(root)
+    _commit_all(root, "init")
+    return root
+
+
+def _mv(root: Path, old: str, new: str) -> None:
+    (root / new).parent.mkdir(parents=True, exist_ok=True)
+    (root / old).rename(root / new)
+
+
+_SCENARIOS = {
+    "file_added": lambda r: _write(
+        r, "pkg/extra.py", "from pkg.util import helper\n\n\ndef extra():\n    return helper()\n"),
+    "file_modified": lambda r: _write(
+        r, "pkg/app.py",
+        "from pkg.util import helper, other\n\n\ndef main():\n    return helper()\n\n\n"
+        "def more():\n    return other()\n"),
+    "file_deleted": lambda r: (r / "pkg/side.py").unlink(),
+    "callee_file_deleted": lambda r: (r / "pkg/util.py").unlink(),
+    "file_renamed": lambda r: _mv(r, "pkg/side.py", "pkg/side2.py"),
+    "callee_renamed_and_importer_updated": lambda r: (
+        _mv(r, "pkg/util.py", "pkg/utils.py"),
+        _write(r, "pkg/app.py", "from pkg.utils import helper\n\n\ndef main():\n    return helper()\n")),
+    # Only the callee changes: app.later() already calls missing(), which now exists.
+    "only_callee_gains_symbol": lambda r: _write(
+        r, "pkg/util.py", "def helper():\n    return 1\n\n\ndef missing():\n    return 4\n"),
+    # Only the callee changes: app.main() keeps calling helper(), which is gone.
+    "only_callee_loses_symbol": lambda r: _write(r, "pkg/util.py", "def other():\n    return 2\n"),
+    "only_ts_callee_gains_symbol": lambda r: _write(
+        r, "web/client.ts",
+        "export function send(): number { return 1 }\n"
+        "export function pending(): number { return 2 }\n"),
+    # Body-only edits keep every symbol: these take the incremental path, and the
+    # new cross-file calls must resolve exactly as a full index resolves them.
+    "caller_body_adds_cross_file_call": lambda r: _write(
+        r, "pkg/app.py",
+        "from pkg.util import helper, missing\n\n\ndef main():\n    return helper()\n\n\n"
+        "def later():\n    x = helper()\n    return missing() + x\n"),
+    "callee_body_edit": lambda r: _write(
+        r, "pkg/util.py", "def helper():\n    value = 41\n    return value + 1\n\n\n"
+                          "def other():\n    return helper()\n"),
+    "ts_caller_body_adds_cross_file_call": lambda r: _write(
+        r, "web/use.ts",
+        'import { send, pending } from "./client"\n'
+        "export function boot(): number { return send() }\n"
+        "export function later(): number { return pending() + send() }\n"),
+    "only_ts_caller_changes": lambda r: _write(
+        r, "web/use.ts",
+        'import { send } from "./client"\n'
+        "export function boot(): number { return send() + send() }\n"
+        "export function again(): number { return send() }\n"),
+}
+
+
+# Scenarios whose edits keep every symbol of the edited files.
+_INCREMENTAL = {"caller_body_adds_cross_file_call", "callee_body_edit",
+                "ts_caller_body_adds_cross_file_call"}
+
+
+@requires_git
+class TestSmartEquivalence:
+    @pytest.mark.parametrize("committed", [False, True], ids=["uncommitted", "committed"])
+    @pytest.mark.parametrize("scenario", sorted(_SCENARIOS))
+    def test_smart_matches_full_index(self, mixed_project, tmp_path, scenario, committed):
+        graph = tmp_path / "graph.json"
+        _cli_index(mixed_project, graph)
+        _SCENARIOS[scenario](mixed_project)
+        if committed:
+            _commit_all(mixed_project, scenario)
+
+        res = _cli_index(mixed_project, graph, "--smart")
+        took_fast_path = "Full index needed" not in res.output
+        assert took_fast_path == (scenario in _INCREMENTAL), res.output
+        full = tmp_path / "full.json"
+        _cli_index(mixed_project, full)
+
+        smart_nodes, smart_edges, smart_commit = _public(_load(graph))
+        full_nodes, full_edges, full_commit = _public(_load(full))
+        assert smart_nodes == full_nodes
+        assert smart_edges == full_edges
+        assert smart_commit == full_commit
+
+
+@requires_git
+class TestSmartRegressions:
+    """The three defects behind the equivalence failures, one test each."""
+
+    def test_cross_file_call_points_at_the_definition(self, project, tmp_path):
+        graph = tmp_path / "graph.json"
+        _cli_index(project, graph)
+        (project / "app.py").write_text(
+            "from helpers import helper\n\n\ndef main():\n    return helper()\n\n\n"
+            "def second():\n    return helper()\n", encoding="utf-8")
+        _cli_index(project, graph, "--smart")
+        g = _load(graph)
+        kinds = {n["id"]: n.get("type") for n in g["nodes"]}
+        calls = {(e["source"], e["target"]) for e in g["links"] if e["relation"] == "calls"}
+        assert ("app.second", "helpers.helper") in calls
+        assert not [t for _, t in calls if kinds.get(t) == "import"]
+
+    def test_pending_symbol_never_reaches_the_output(self, project, tmp_path):
+        graph = tmp_path / "graph.json"
+        _cli_index(project, graph)
+        _write(project, "app.py", "from helpers import helper\n\n\ndef run():\n    return helper()\n")
+        _cli_index(project, graph, "--smart")
+        assert "_pending_symbol" not in graph.read_text(encoding="utf-8")
+
+    def test_index_records_the_commit_it_was_built_from(self, project, tmp_path):
+        graph = tmp_path / "graph.json"
+        _cli_index(project, graph)
+        head = subprocess.run(["git", "-C", str(project), "rev-parse", "HEAD"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+        assert _load(graph)["built_at_commit"] == head
+
+    def test_commit_before_smart_is_not_up_to_date(self, project, tmp_path):
+        graph = tmp_path / "graph.json"
+        _cli_index(project, graph)
+        _write(project, "unrelated.py", "def solo():\n    pass\n\n\ndef added():\n    pass\n")
+        _commit_all(project, "edit")
+        res = _cli_index(project, graph, "--smart")
+        assert "up to date" not in res.output
+        assert "unrelated.added" in _node_ids(graph)
+
+    def test_graph_without_a_recorded_commit_is_rebuilt(self, project, tmp_path):
+        # Graphs written before v1.0.7 carry built_at_commit=None: there is no
+        # base to diff against, so --smart cannot know what changed.
+        graph = tmp_path / "graph.json"
+        stale = index_project(project)
+        assert stale["built_at_commit"] is None
+        graph.write_text(json.dumps(stale), encoding="utf-8")
+        _write(project, "unrelated.py", "def solo():\n    pass\n\n\ndef added():\n    pass\n")
+        _commit_all(project, "edit")
+        _cli_index(project, graph, "--smart")
+        assert "unrelated.added" in _node_ids(graph)

@@ -1363,25 +1363,39 @@ def _run_smart(root: Path, out: Path, ignore, dry_run: bool) -> bool:
         click.echo(f"  No existing graph at {out} — running full index")
         return False
 
+    if result.fallback_reason and not result.changed_files:
+        # No usable build commit: there is nothing to compare against.
+        click.echo(f"  Full index needed: {result.fallback_reason}")
+        if dry_run:
+            click.echo("\nNo changes written (--dry-run).")
+            return True
+        return False
+
     if not result.changed_files:
-        click.echo("✓ No changes detected since last commit — index is up to date")
+        click.echo("✓ No changes since the graph was built — index is up to date")
         return True
 
     click.echo(f"→ Detected {len(result.changed_files)} changed "
-               f"{_plural(len(result.changed_files), 'file')} (git diff)")
-    if result.dependents_added:
-        click.echo(f"→ Expanding to {len(result.expanded_files)} files "
-                   f"({result.dependents_added} "
-                   f"{_plural(result.dependents_added, 'dependent')} added)")
+               f"{_plural(len(result.changed_files), 'file')} since the graph was built")
+
+    if result.fallback_reason:
+        # DECISION: an edit that adds, removes or renames a file or a symbol can
+        # change how unchanged files resolve their calls, so --smart replaces
+        # the graph with a full index rather than return a graph a full index
+        # would not produce.
+        click.echo(f"  Full index needed: {result.fallback_reason}")
+        if dry_run:
+            for path in result.changed_files:
+                click.echo(f"  {_rel_display(path, root)}")
+            click.echo("\nNo changes written (--dry-run).")
+            return True
+        return False
 
     if dry_run:
         click.echo(f"\nWould re-index {len(result.expanded_files)} "
                    f"{_plural(len(result.expanded_files), 'file')}:")
         for path in result.expanded_files:
             click.echo(f"  {_rel_display(path, root)}")
-        deleted = [p for p in result.changed_files if not p.is_file()]
-        for path in deleted:
-            click.echo(f"  {_rel_display(path, root)} (deleted — nodes dropped)")
         click.echo("\nNo changes written (--dry-run).")
         return True
 
@@ -1409,7 +1423,8 @@ def _plural(count: int, word: str) -> str:
 @click.option("--ignore-file", "ignore_file", default=".slurpignore", show_default=True,
               help="Path to .slurpignore rules.")
 @click.option("--smart", is_flag=True, default=False,
-              help="Re-index only files changed since the last commit, plus their dependents.")
+              help="Re-index only files changed since the graph was built. Falls back to a full "
+                   "index when a file or symbol is added, removed or renamed.")
 @click.option("--dry-run", is_flag=True, default=False,
               help="With --smart, list the files that would be re-indexed and exit.")
 @click.option("--force", is_flag=True, default=False,
@@ -1437,6 +1452,7 @@ def index_cmd(
         iter_source_files,
         parser_summary,
     )
+    from slurp.smart import head_commit
 
     root = Path(path).resolve()
     out = Path(output_path) if output_path else root / "graphify-out" / "graph.json"
@@ -1445,6 +1461,8 @@ def index_cmd(
     def _run() -> None:
         click.echo(f"Indexing {root} ...")
         graph = index_project(root, ignore)
+        # The commit the graph reflects; --smart diffs against it later.
+        graph["built_at_commit"] = head_commit(root)
         n_nodes = len(graph["nodes"])
         n_edges = len(graph["links"])
         files_processed = len({n["source_file"] for n in graph["nodes"] if n.get("source_file")})
@@ -1615,6 +1633,9 @@ def init(yes: bool) -> None:
         ) as progress:
             task = progress.add_task("index", total=len(files))
             graph = index_project(root, ignore, on_file=lambda _p: progress.advance(task))
+        from slurp.smart import head_commit
+
+        graph["built_at_commit"] = head_commit(root)
 
         n_nodes = len(graph["nodes"])
         n_edges = len(graph["links"])

@@ -387,6 +387,34 @@ uv sync --extra rust            # solo una
     compartiendo internos; esos cinco nombres formarían un `_graphutils.py`
     público sin romper nada.
 
+- **`smart.py` — `--smart` produce siempre el grafo de un índice completo.** Hasta
+  v1.0.6 reparseaba los ficheros cambiados sin volver a resolver: las llamadas
+  cross-file acababan en nodos import, `_pending_symbol` se colaba en la salida, y
+  como comparaba contra HEAD, un commit antes de reindexar daba "up to date" sobre
+  un grafo viejo (`built_at_commit` era siempre `None`).
+  - `slurp index` (e `init`) graba en `built_at_commit` el commit de HEAD. `--smart`
+    compara contra ese commit (committed + staged + unstaged + untracked) y suma
+    todo fichero con mtime ≥ el del grafo: cubre lo que se ensució al construir y
+    luego se revirtió, y ficheros indexados que git ignora. Sin commit registrado
+    (grafos anteriores a v1.0.7) o con uno que ya no existe → índice completo.
+  - **Vía rápida solo si los nodos de los ficheros reparseados son idénticos**,
+    imports incluidos, en todo salvo `source_location`. Los índices de resolución
+    leen `id`/`type`/`label`/`source_file` y los de Rust y TS recorren también los
+    imports; con los mismos nodos ningún otro fichero puede resolver distinto. Por
+    eso no hay expansión a dependientes: se eliminó, reparseaba de más (editar
+    `budget.py` arrastraba 3.209 nodos) y no garantizaba nada.
+  - Altas, bajas, renombrados y cambios de símbolos o imports → índice completo,
+    con el motivo impreso. Coste medido: ~0,1 s sobre un índice completo.
+  - `index_project()` y la vía rápida comparten `_assemble_graph()` (dedup, ignore,
+    filtro y los 5 resolutores): los edges ya resueltos pasan por los resolutores
+    sin tocarse, así que alimentarlo con lo conservado + lo reparseado reproduce
+    el índice completo. La resolución cuesta 6–13 ms; el coste está en parsear.
+  - `TestSmartEquivalence` compara `--smart` con un índice completo en 13
+    escenarios × con/sin commit, y exige qué camino toma cada uno. Un cambio en
+    smart que no lo supere rompe la invariante.
+  - Limitación: si cambia `.slurpignore` entre dos ejecuciones, `--smart` no lo
+    detecta; hay que reindexar completo.
+
 - **`impact.py` — el radio *antes* de editar.** `slurp diff` responde a
   posteriori comparando dos snapshots; `impact` responde antes, con el grafo
   que ya hay. Umbrales de riesgo replicados de `explainer._risk_level` (6/2)
@@ -487,7 +515,7 @@ Señal de que ha pasado: la suite reporta tests *skipped* donde antes había 0, 
 │   ├── ignore.py          ← filtra nodos por .slurpignore
 │   ├── injector.py        ← extrae código fuente real para --inject-code (v0.5.0)
 │   ├── indexer.py         ← indexador estático autónomo (v0.6.0)
-│   ├── smart.py           ← re-indexado incremental vía git (--smart)
+│   ├── smart.py           ← re-indexado incremental (--smart), equivalente a un índice completo
 │   ├── advisor.py         ← recomienda budget óptimo desde el historial de queries
 │   ├── federation.py      ← mergea varios grafos en uno (--graph repetido)
 │   ├── explainer.py       ← explica un nodo en lenguaje natural (LLM + fallback estructural)
