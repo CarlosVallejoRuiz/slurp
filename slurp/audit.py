@@ -1,6 +1,7 @@
 """Append-only audit log for query history."""
 
 import json
+import sys
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -52,17 +53,35 @@ def read_audit(audit_dir: Path = Path(".slurp")) -> list[dict]:
     Returns:
         List of entry dicts in the order they were logged.
         Returns an empty list if the file or directory does not exist.
+        A line that is not a JSON object is skipped and reported on stderr.
     """
     audit_file = audit_dir / _AUDIT_FILE
     if not audit_file.exists():
         return []
 
     entries: list[dict] = []
-    for raw in audit_file.read_text(encoding="utf-8").splitlines():
+    for number, raw in enumerate(audit_file.read_text(encoding="utf-8").splitlines(), 1):
         stripped = raw.strip()
-        if stripped:
-            entries.append(json.loads(stripped))
+        if not stripped:
+            continue
+        # DECISION: the log is append-only and written by every query, so a
+        # crash mid-write leaves a truncated last line. One bad line must not
+        # take down `slurp audit` or make `slurp advisor` discard the whole
+        # history; it is skipped, but named, so the damage is never invisible.
+        try:
+            entry = json.loads(stripped)
+        except ValueError as exc:
+            _warn_skipped(audit_file, number, f"not valid JSON ({exc.msg})")
+            continue
+        if not isinstance(entry, dict):
+            _warn_skipped(audit_file, number, "not a JSON object")
+            continue
+        entries.append(entry)
     return entries
+
+
+def _warn_skipped(audit_file: Path, number: int, reason: str) -> None:
+    print(f"slurp: skipping line {number} of {audit_file}: {reason}", file=sys.stderr)
 
 
 def top_nodes_from_audit(

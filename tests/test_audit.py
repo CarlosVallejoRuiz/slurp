@@ -406,3 +406,72 @@ class TestAuditIntegration:
         # All top nodes appear; result is sorted by frequency
         counts = [count for _, count in result]
         assert counts == sorted(counts, reverse=True)
+
+
+# ---------------------------------------------------------------------------
+# A damaged line (crash mid-write, concurrent append) must not hide the rest
+# ---------------------------------------------------------------------------
+
+_GOOD = {"timestamp": "2026-11-24T10:00:00", "query": "auth flow", "budget": 4000,
+         "tokens_used": 120, "nodes_selected": 3, "nodes_total": 30,
+         "graph_path": "graph.json", "top_nodes": ["a", "b"]}
+
+
+def _write_audit(directory: Path, *lines: str) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "audit.jsonl"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+class TestReadAuditToleratesDamage:
+    def test_truncated_line_is_skipped(self, tmp_path, capsys):
+        _write_audit(tmp_path, json.dumps(_GOOD), '{"query": "trunc', json.dumps(_GOOD))
+        assert [e["query"] for e in read_audit(tmp_path)] == ["auth flow", "auth flow"]
+
+    def test_skipped_line_is_reported_on_stderr(self, tmp_path, capsys):
+        _write_audit(tmp_path, json.dumps(_GOOD), '{"query": "trunc')
+        read_audit(tmp_path)
+        err = capsys.readouterr().err
+        assert "audit.jsonl" in err
+        assert "line 2" in err
+
+    def test_non_object_line_is_skipped(self, tmp_path, capsys):
+        _write_audit(tmp_path, "42", '["not", "an", "entry"]', json.dumps(_GOOD))
+        assert len(read_audit(tmp_path)) == 1
+        warnings = capsys.readouterr().err.strip().splitlines()
+        assert [w.split(" of ")[0] for w in warnings] == [
+            "slurp: skipping line 1", "slurp: skipping line 2"]
+
+    def test_blank_lines_stay_silent(self, tmp_path, capsys):
+        _write_audit(tmp_path, json.dumps(_GOOD), "", "   ", json.dumps(_GOOD))
+        assert len(read_audit(tmp_path)) == 2
+        assert capsys.readouterr().err == ""
+
+    def test_top_nodes_survive_a_damaged_line(self, tmp_path):
+        _write_audit(tmp_path, json.dumps(_GOOD), "{oops", json.dumps(_GOOD))
+        assert top_nodes_from_audit(tmp_path, n=1) == [("a", 2)]
+
+    def test_cli_audit_shows_the_valid_entries(self, tmp_path):
+        from click.testing import CliRunner
+
+        from slurp.cli import cli
+
+        _write_audit(tmp_path / ".slurp", json.dumps(_GOOD), '{"query": "trunc')
+        res = CliRunner().invoke(cli, ["audit", "--audit-dir", str(tmp_path / ".slurp")])
+        assert res.exit_code == 0, res.output
+        assert "auth flow" in res.stdout
+        assert "line 2" in res.stderr
+
+    def test_cli_advisor_survives_a_damaged_line(self, tmp_path):
+        from click.testing import CliRunner
+
+        from slurp.cli import cli
+
+        # advisor used to swallow the decode error and discard the whole
+        # history, answering "no history" — wrong advice, silently.
+        _write_audit(tmp_path / ".slurp", json.dumps(_GOOD), "{oops")
+        res = CliRunner().invoke(cli, ["advisor", "auth flow",
+                                       "--audit-dir", str(tmp_path / ".slurp")])
+        assert res.exit_code == 0, res.output
+        assert "No query history yet" not in res.output
