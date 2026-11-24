@@ -140,11 +140,16 @@ class TestQueryBudgetResult:
             query="auth", budget=4000,
             tokens_slurp=200, tokens_full=1000,
             savings_pct=80.0, nodes_selected=3, nodes_total=10,
-            coverage_pct=30.0, precision=0.75,
+            coverage_pct=30.0,
         )
         assert r.query == "auth"
         assert r.savings_pct == 80.0
-        assert r.precision == 0.75
+
+    def test_circular_precision_is_gone(self):
+        # It compared the selection with the scorer's own idea of "relevant":
+        # agreement between two parts of slurp, not a quality measure.
+        assert "precision" not in QueryBudgetResult.__dataclass_fields__
+        assert "mean_precision" not in BenchmarkResult.__dataclass_fields__
 
 
 # ---------------------------------------------------------------------------
@@ -214,12 +219,30 @@ class TestRunBenchmarkBasics:
         for r in result.rows:
             assert 0.0 <= r.savings_pct <= 100.0, f"savings_pct={r.savings_pct} out of range"
 
-    def test_precision_in_valid_range(
-        self, simple_graph, multi_queries, multi_budgets
-    ):
-        result = run_benchmark(simple_graph, multi_queries, multi_budgets)
-        for r in result.rows:
-            assert 0.0 <= r.precision <= 1.0, f"precision={r.precision} out of range"
+    def test_tokens_slurp_is_the_text_sent(self, simple_graph):
+        from slurp.budget import build_context, count_tokens
+        from slurp.scorer import score_nodes
+
+        result = run_benchmark(simple_graph, ["auth flow"], [400])
+        scores = score_nodes(simple_graph, "auth flow")
+        text, _, _ = build_context(simple_graph, scores, 400, query="auth flow")
+        assert result.rows[0].tokens_slurp == count_tokens(text)
+
+    def test_full_graph_measured_the_same_way(self, simple_graph):
+        from slurp.budget import build_context, count_tokens
+        from slurp.scorer import score_nodes
+
+        result = run_benchmark(simple_graph, ["auth flow"], [400])
+        scores = score_nodes(simple_graph, "auth flow")
+        text, sub, _ = build_context(simple_graph, scores, 10_000_000, min_score=0.0,
+                                     query="auth flow")
+        assert sub.number_of_nodes() == simple_graph.number_of_nodes()
+        assert result.rows[0].tokens_full == count_tokens(text)
+
+    def test_budget_beyond_the_graph_saves_nothing(self, simple_graph):
+        result = run_benchmark(simple_graph, ["auth"], [10_000_000], min_score=0.0)
+        row = result.rows[0]
+        assert row.tokens_slurp == row.tokens_full and row.savings_pct == 0.0
 
     def test_nodes_selected_lte_nodes_total(
         self, simple_graph, multi_queries, multi_budgets
@@ -321,12 +344,6 @@ class TestRunBenchmarkAggregates:
         result = run_benchmark(simple_graph, multi_queries, multi_budgets)
         assert result.p95_savings_pct >= result.p90_savings_pct
 
-    def test_mean_precision_in_range(
-        self, simple_graph, multi_queries, multi_budgets
-    ):
-        result = run_benchmark(simple_graph, multi_queries, multi_budgets)
-        assert 0.0 <= result.mean_precision <= 1.0
-
     def test_single_row_mean_equals_that_row(self, simple_graph):
         result = run_benchmark(simple_graph, ["auth"], [4000])
         assert result.mean_savings_pct == result.rows[0].savings_pct
@@ -373,10 +390,10 @@ class TestFormatBenchmark:
         output = format_benchmark(result)
         assert "Savings" in output
 
-    def test_contains_precision_column(self, simple_graph, single_query, single_budget):
+    def test_no_precision_column(self, simple_graph, single_query, single_budget):
         result = run_benchmark(simple_graph, single_query, single_budget)
         output = format_benchmark(result)
-        assert "Precision" in output
+        assert "Precision" not in output and "precision" not in output
 
     def test_contains_mean_savings(self, simple_graph, single_query, single_budget):
         result = run_benchmark(simple_graph, single_query, single_budget)
@@ -579,7 +596,7 @@ class TestQueryBudgetResultCostFields:
         row = QueryBudgetResult(
             query="q", budget=1000, tokens_slurp=10, tokens_full=100,
             savings_pct=90.0, nodes_selected=1, nodes_total=5,
-            coverage_pct=20.0, precision=1.0,
+            coverage_pct=20.0,
         )
         assert row.cost_slurp_usd == 0.0
         assert row.cost_full_usd == 0.0

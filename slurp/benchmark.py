@@ -66,7 +66,6 @@ class QueryBudgetResult:
     nodes_selected: int
     nodes_total: int
     coverage_pct: float
-    precision: float  # fraction of relevant nodes (score >= threshold) that were selected
     cost_slurp_usd: float = 0.0
     cost_full_usd: float = 0.0
     # Set when the budget cannot hold even the header; the row is then left
@@ -85,7 +84,6 @@ class BenchmarkResult:
     p95_savings_pct: float = 0.0
     best_case: QueryBudgetResult | None = None
     worst_case: QueryBudgetResult | None = None
-    mean_precision: float = 0.0
     total_cost_slurp_usd: float = 0.0
     total_cost_full_usd: float = 0.0
     total_savings_usd: float = 0.0
@@ -134,7 +132,6 @@ def run_benchmark(
     model: str = "cl100k_base",
     min_score: float = DEFAULT_MIN_SCORE,
     neighbor_decay: float = 0.7,
-    relevance_threshold: float = 0.3,
     backend: str = "tfidf",
     model_price: str = "default",
 ) -> BenchmarkResult:
@@ -147,8 +144,6 @@ def run_benchmark(
         model: Tiktoken encoding for token counting.
         min_score: Minimum score filter passed to select_subgraph.
         neighbor_decay: Neighbor decay passed to select_subgraph.
-        relevance_threshold: Score cutoff that defines a "relevant" node for
-            precision calculation.
         backend: Scoring backend — 'tfidf' (default), 'openai', or 'anthropic'.
         model_price: Key into MODEL_PRICES_PER_MTok used to price token counts.
 
@@ -167,7 +162,6 @@ def run_benchmark(
 
     for query in queries:
         scores = score_nodes(G, query, backend=backend)
-        relevant_ids = {nid for nid, s in scores.items() if s >= relevance_threshold}
         tokens_full = _full_graph_tokens(G, scores, query, model)
 
         for budget in budgets:
@@ -180,18 +174,13 @@ def run_benchmark(
                 rows.append(QueryBudgetResult(
                     query=query, budget=budget, tokens_slurp=0, tokens_full=tokens_full,
                     savings_pct=0.0, nodes_selected=0, nodes_total=G.number_of_nodes(),
-                    coverage_pct=0.0, precision=0.0, error=str(exc)))
+                    coverage_pct=0.0, error=str(exc)))
                 continue
             # The real size of the text sent, measured — no longer an estimate.
             used = stats["tokens_used"]
             savings = (
                 max(0.0, (tokens_full - used) / tokens_full * 100)
                 if tokens_full > 0 else 0.0
-            )
-            selected_set = set(subG.nodes)
-            precision = (
-                len(selected_set & relevant_ids) / len(relevant_ids)
-                if relevant_ids else 1.0
             )
             rows.append(QueryBudgetResult(
                 query=query,
@@ -202,7 +191,6 @@ def run_benchmark(
                 nodes_selected=stats["nodes_selected"],
                 nodes_total=stats["nodes_total"],
                 coverage_pct=stats["coverage_pct"],
-                precision=round(precision, 4),
                 cost_slurp_usd=_cost_usd(used, price),
                 cost_full_usd=_cost_usd(tokens_full, price),
             ))
@@ -212,7 +200,6 @@ def run_benchmark(
         return BenchmarkResult(rows=rows, model_price=model_price)
 
     sv = [r.savings_pct for r in measured]
-    pv = [r.precision for r in measured]
 
     # DECISION: totals accumulate across every query×budget run, so they answer
     # "what would this benchmark's workload have cost" — not per-query cost.
@@ -227,7 +214,6 @@ def run_benchmark(
         p95_savings_pct=round(_percentile(sv, 95), 1),
         best_case=max(measured, key=lambda r: r.savings_pct),
         worst_case=min(measured, key=lambda r: r.savings_pct),
-        mean_precision=round(statistics.mean(pv), 4),
         total_cost_slurp_usd=total_slurp,
         total_cost_full_usd=total_full,
         total_savings_usd=total_full - total_slurp,
@@ -272,12 +258,11 @@ def format_benchmark(result: BenchmarkResult) -> str:
     runs_table.add_column("Nodes sel.", justify="right")
     runs_table.add_column("Nodes total", justify="right")
     runs_table.add_column("Coverage", justify="right")
-    runs_table.add_column("Precision", justify="right")
 
     for r in result.rows:
         if r.error:
             runs_table.add_row(r.query, f"{r.budget:,}", "—", f"{r.tokens_full:,}",
-                               "skipped", "—", "—", "—", str(r.nodes_total), "—", "—")
+                               "skipped", "—", "—", "—", str(r.nodes_total), "—")
             continue
         runs_table.add_row(
             r.query,
@@ -290,7 +275,6 @@ def format_benchmark(result: BenchmarkResult) -> str:
             str(r.nodes_selected),
             str(r.nodes_total),
             f"{r.coverage_pct}%",
-            f"{r.precision:.2%}",
         )
 
     summary_table = Table(title="Summary", show_header=True)
@@ -304,7 +288,6 @@ def format_benchmark(result: BenchmarkResult) -> str:
         ("p50 savings",  f"{result.p50_savings_pct:.1f}%"),
         ("p90 savings",  f"{result.p90_savings_pct:.1f}%"),
         ("p95 savings",  f"{result.p95_savings_pct:.1f}%"),
-        ("Mean precision", f"{result.mean_precision:.2%}"),
         (
             "Best case",
             f"{result.best_case.savings_pct:.1f}% "
@@ -329,6 +312,12 @@ def format_benchmark(result: BenchmarkResult) -> str:
     # DECISION: 150 columns, not 120 — the two cost columns push the runs table
     # past 120, and rich silently drops columns that don't fit rather than wrapping.
     Console(file=buf, no_color=True, width=150).print(runs_table, summary_table)
+    # DECISION: no quality figure here. The former "precision" compared the
+    # selection with the scorer's own idea of a relevant node (score >= 0.3) —
+    # agreement between two halves of slurp, and on `slurp index` graphs, where
+    # every node scores >= 0.3, just the coverage again. Retrieval quality is
+    # measured against labelled nodes by `slurp eval --retrieval`.
+    buf.write("Retrieval quality is not measured here: see `slurp eval --retrieval`.\n")
     skipped = [r for r in result.rows if r.error]
     if skipped:
         buf.write(f"\n{len(skipped)} run(s) skipped: {skipped[0].error}\n")

@@ -965,9 +965,15 @@ slurp benchmark \
 ```
 
 > One query at one budget, run against slurp's own graph. The real table also carries
-> `Nodes sel.`, `Nodes total`, `Coverage` and `Precision`, elided here for width.
+> `Nodes sel.`, `Nodes total` and `Coverage`, elided here for width.
 
-Outputs a per-run table and aggregate stats: mean savings, p50/p90/p95, best/worst case, and precision (fraction of relevant nodes captured).
+Outputs a per-run table and aggregate stats: mean savings, p50/p90/p95, best/worst case.
+Both sides are measured the same way since v1.1.0: `Tokens used` is the text slurp
+prints for that query and budget, and `Full graph` is the whole graph printed by the
+same formatter with the same header — so `Savings` compares two texts produced alike.
+The former `Precision` column is gone: it compared the selection with the scorer's own
+notion of a relevant node, which measures nothing; use `slurp eval --retrieval` for
+recall and MRR against labelled nodes.
 
 ---
 
