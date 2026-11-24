@@ -448,3 +448,89 @@ class TestInjectCode:
         # max_nodes=2 → 3 nodes exceeds limit, should not run
         result = inject_code(G, root, max_nodes=2)
         assert "code_block" not in result.nodes["n1"]
+
+
+# ---------------------------------------------------------------------------
+# Path containment — source_file comes from graph.json, which may not be ours
+# ---------------------------------------------------------------------------
+
+_SECRET = "API_SECRET=hunter2\n"
+
+
+class TestInjectCodeContainment:
+    @staticmethod
+    def _layout(tmp_path: Path) -> tuple[Path, Path]:
+        project = tmp_path / "project"
+        (project / "src").mkdir(parents=True)
+        (project / "src" / "ok.py").write_text("def ok():\n    return 1\n")
+        outside = tmp_path / "outside_secret.py"
+        outside.write_text(_SECRET)
+        return project, outside
+
+    @staticmethod
+    def _graph(**files: str) -> nx.DiGraph:
+        G = nx.DiGraph()
+        for node_id, source_file in files.items():
+            G.add_node(node_id, label=node_id, source_file=source_file,
+                       source_location="L1")
+        return G
+
+    def test_relative_escape_is_rejected(self, tmp_path, capsys):
+        project, _ = self._layout(tmp_path)
+        out = inject_code(self._graph(evil="../outside_secret.py"), project)
+        assert "code_block" not in out.nodes["evil"]
+        err = capsys.readouterr().err
+        assert "evil" in err and "outside" in err
+
+    def test_absolute_path_outside_is_rejected(self, tmp_path, capsys):
+        project, outside = self._layout(tmp_path)
+        out = inject_code(self._graph(evil=str(outside)), project)
+        assert "code_block" not in out.nodes["evil"]
+        assert "evil" in capsys.readouterr().err
+
+    def test_absolute_path_inside_is_allowed(self, tmp_path, capsys):
+        project, _ = self._layout(tmp_path)
+        out = inject_code(self._graph(ok=str(project / "src" / "ok.py")), project)
+        assert out.nodes["ok"]["code_block"].startswith("def ok")
+        assert capsys.readouterr().err == ""
+
+    def test_symlink_escaping_the_root_is_rejected(self, tmp_path, capsys):
+        project, outside = self._layout(tmp_path)
+        (project / "src" / "link.py").symlink_to(outside)
+        out = inject_code(self._graph(evil="src/link.py"), project)
+        assert "code_block" not in out.nodes["evil"]
+        assert "evil" in capsys.readouterr().err
+
+    def test_symlink_inside_the_root_is_allowed(self, tmp_path, capsys):
+        project, _ = self._layout(tmp_path)
+        (project / "src" / "alias.py").symlink_to(project / "src" / "ok.py")
+        out = inject_code(self._graph(ok="src/alias.py"), project)
+        assert out.nodes["ok"]["code_block"].startswith("def ok")
+        assert capsys.readouterr().err == ""
+
+    def test_relative_project_root_still_contains(self, tmp_path, monkeypatch, capsys):
+        project, _ = self._layout(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        out = inject_code(self._graph(ok="src/ok.py", evil="../outside_secret.py"),
+                          Path("project"))
+        assert "code_block" in out.nodes["ok"]
+        assert "code_block" not in out.nodes["evil"]
+
+    def test_cli_never_prints_the_outside_file(self, tmp_path):
+        import json
+
+        from click.testing import CliRunner
+
+        from slurp.cli import cli
+
+        project, _ = self._layout(tmp_path)
+        graph = project / "graph.json"
+        graph.write_text(json.dumps({"nodes": [
+            {"id": "evil", "label": "evil", "source_file": "../outside_secret.py",
+             "source_location": "L1"},
+        ], "links": []}))
+        res = CliRunner().invoke(cli, ["evil", "--graph", str(graph), "--inject-code",
+                                       "--no-audit", "--min-score", "0"])
+        assert res.exit_code == 0, res.output
+        assert "hunter2" not in res.output
+        assert "evil" in res.stderr

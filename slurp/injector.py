@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import networkx as nx
@@ -153,6 +154,8 @@ def inject_code(
     Args:
         G: Subgraph whose nodes to annotate. Not mutated; a copy is returned.
         project_root: Root directory for resolving relative source_file paths.
+            A source_file that resolves outside it (``../``, an absolute path,
+            a symlink) is skipped with a warning on stderr.
         max_nodes: Maximum subgraph size. Returns G unchanged if exceeded.
 
     Returns:
@@ -161,6 +164,7 @@ def inject_code(
     if G.number_of_nodes() > max_nodes:
         return G
 
+    root = project_root.resolve()
     result = G.copy()
     for nid in result.nodes:
         attrs = result.nodes[nid]
@@ -170,7 +174,19 @@ def inject_code(
         if not source_file or source_location is None:
             continue
 
-        file_path = project_root / source_file
+        # DECISION: source_file comes from graph.json, which may have been
+        # written by someone else (a graphify-out/ committed to a repo). A
+        # `../` path, an absolute path or a symlink must not pull a file from
+        # outside the project into the LLM context. resolve() follows symlinks,
+        # so containment is judged on the file that would actually be read.
+        file_path = (project_root / source_file).resolve()
+        if not file_path.is_relative_to(root):
+            print(
+                f"slurp: --inject-code skipped node {nid!r}: source_file "
+                f"{source_file!r} resolves outside the project root {root}",
+                file=sys.stderr,
+            )
+            continue
         label = attrs.get("label", str(nid))
         code = extract_code_block(file_path, source_location, label)
         if code:
