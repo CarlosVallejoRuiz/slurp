@@ -253,7 +253,7 @@ slurp "prisma models" --backend openai
 |---|---|---|
 | `--graph`, `-g` | auto-discover | Path to `graph.json`. Repeatable — see [federation](#multi-graph-federation). |
 | `--graph-label` | derived from path | Project name for each `--graph`, in the same order. |
-| `--budget`, `-b` | `4000` | Token budget for subgraph selection. |
+| `--budget`, `-b` | `4000` | Upper bound, in tokens, on the text slurp prints — nodes, relationships, header and all, measured on the final output in the chosen format. If not even one node fits, the output is the header with the budget it would need. |
 | `--format`, `-f` | `markdown` | Output format: `markdown`, `json`, or `yaml`. |
 | `--model`, `-m` | `cl100k_base` | Tiktoken encoding for token counting. |
 | `--explain` | off | Print per-node score breakdown: final / structural / semantic. |

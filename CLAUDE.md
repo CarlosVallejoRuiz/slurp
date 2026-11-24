@@ -659,33 +659,39 @@ def score_nodes_detailed(G: nx.DiGraph, query: str) -> dict[str, tuple[float, fl
 
 ### `slurp/budget.py`
 
-Selecciona el subgrafo óptimo que cabe en el presupuesto de tokens.
+**El presupuesto acota el texto que se envía, medido** (v1.1.0). Hasta v1.0.7
+contaba un resumen por nodo (`_serialize_node`, eliminado) y nunca las
+relaciones: `--budget 8000` daba 19k–42k tokens reales.
 
-**Algoritmo greedy con expansión de vecinos:**
-1. Filtra nodos con `score >= min_score` antes del loop greedy
-2. Ordena por score descendente
-3. Toma el nodo top, añade sus vecinos directos con score reducido (`score * neighbor_decay`)
-4. Añade el nodo si `tokens_usados + tokens_nodo <= budget`
-5. Si un nodo no cabe, continúa con el siguiente (no para)
-6. Retorna `(subgrafo, stats)`
-
-**API pública:**
-```python
-def select_subgraph(
-    G: nx.DiGraph,
-    scores: dict[str, float],
-    budget: int,
-    model: str = "cl100k_base",
-    neighbor_decay: float = 0.7,
-    min_score: float = 0.0,
-) -> tuple[nx.DiGraph, dict]:
-    """Retorna (subgrafo, stats dict)."""
-
-def count_tokens(text: str, model: str = "cl100k_base") -> int:
-    """Cuenta tokens con tiktoken. Resultado cacheado con lru_cache."""
-```
-
----
+**`build_context()` → `(texto, subgrafo, stats)`**, con `count_tokens(texto) ≤ budget`:
+1. **Suelo**: la salida mínima (cabecera + aviso de presupuesto) tiene que caber;
+   si no, `BudgetTooSmallError` (subclase de `ValueError`) con el mínimo. CLI →
+   `ClickException`; MCP → JSON-RPC `-32602`.
+2. **Greedy en una sola cola por valor** para nodos y relaciones. Nodo = score
+   efectivo (boost a vecinos `× neighbor_decay` como antes). Relación = elegible
+   cuando sus dos extremos están dentro, valor `min(extremos) × peso`; peso 0,5
+   para `contains`/`imports_from`/`imports`/`defines` (lo implica la ruta y los
+   imports), 1,0 para el resto. Empate: nodo antes que relación, luego por id.
+   Cada elemento se costea con **las mismas funciones del formatter**
+   (`formatter.item_text`, con un score de relleno de anchura máxima → coste
+   independiente de la query y cacheado en `_item_cost_cache`). Se apunta a
+   `(budget − cabecera) × 0,98`.
+3. **`fit_to_budget()` es la garantía**: renderiza el texto completo, lo cuenta y,
+   mientras se pase, quita los elementos de menor valor (relación antes que nodo,
+   un nodo arrastra sus relaciones). La suma de piezas NO es la garantía: los
+   límites entre piezas cambian la tokenización.
+4. **Las stats dicen la verdad**: `tokens_used` es la medida del texto final, que
+   la contiene → punto fijo (se rellena y se vuelve a medir).
+5. **Nunca vacío en silencio**: si no cabe ni un nodo (o el recorte los quita
+   todos, p. ej. tras `--inject-code`), la salida es la cabecera con un aviso y
+   `stats["min_budget"]` = lo que necesita el nodo de más valor, medido.
+- `select_subgraph()` devuelve `(subgrafo, stats)` del mismo cálculo; hay que
+  pasar el mismo `format` y `query` a `format_subgraph` para reproducir el texto.
+- `render=` permite medir un envoltorio (lo usa `slurp export`).
+- El subgrafo se construye con `_assemble()` en orden fijo: `G.subgraph()` itera un
+  `set` cuando la selección es pequeña y el orden de las relaciones cambiaba entre
+  procesos (aleatorización de hashes).
+- Coste medido: +3–7 ms de mediana por query en caliente (PrismaStats, slurp).
 
 ### `slurp/formatter.py`
 
@@ -981,6 +987,7 @@ Punto de entrada para un proyecto nuevo. No requiere flags. Secuencia:
 | `links` tiene prioridad sobre `edges` | Compatibilidad con formato real de graphify |
 | Boost +0.3 para file_type=code | Docs compiten injustamente con código en queries técnicas |
 | `min_score=0.15` default | Evita seleccionar 400+ nodos en grafos grandes |
+| El presupuesto mide el texto final | La suma de piezas no coincide con el texto; solo medir garantiza ≤ budget |
 | Freeze física al acabar la pasada de estabilización | Nodos quietos = grafo legible, y sin CPU ocupada sin fin en grafos medianos |
 | `max_nodes=50` en viz | Mantiene visualizador legible independiente del budget |
 | vis-network vendorizado inline | Viz offline y sin código de un CDN; +476 KB por HTML |

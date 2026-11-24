@@ -14,7 +14,7 @@ from pathlib import Path
 
 import networkx as nx
 
-from slurp.budget import count_tokens, select_subgraph
+from slurp.budget import build_context, count_tokens, select_subgraph
 from slurp.explainer import LLMConfig, SlurpExplainError, _call_llm
 from slurp.formatter import format_subgraph
 from slurp.scorer import score_nodes
@@ -248,9 +248,8 @@ def build_slurp_context(
 ) -> tuple[str, int]:
     """Budgeted subgraph context for one question."""
     scores = score_nodes(G, question)
-    subgraph, stats = select_subgraph(G, scores, budget=budget, model=model)
-    text = format_subgraph(subgraph, stats, format="markdown", scores=scores,
-                           query=question)
+    text, _subgraph, _stats = build_context(G, scores, budget=budget, model=model,
+                                            query=question)
     return text, count_tokens(text, model=model)
 
 
@@ -462,7 +461,7 @@ def run_retrieval_eval(
             order = sorted(scores, key=lambda n: (-scores[n], n))
             position = {n: i + 1 for i, n in enumerate(order)}
             subgraph, _ = select_subgraph(G, scores, budget=budget, model=model,
-                                          min_score=min_score)
+                                          min_score=min_score, query=question)
             result.found = [n for n in relevant if n in subgraph]
             result.first_rank = min(position[n] for n in relevant if n in position)
             result.subgraph_nodes = subgraph.number_of_nodes()

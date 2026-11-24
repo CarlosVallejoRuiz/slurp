@@ -12,8 +12,7 @@ from pathlib import Path
 from typing import TextIO
 
 from slurp import __version__
-from slurp.budget import clear_node_token_cache, select_subgraph
-from slurp.formatter import format_subgraph
+from slurp.budget import BudgetTooSmallError, build_context, clear_node_token_cache, select_subgraph
 from slurp.diff import diff_graphs, format_diff
 from slurp.explainer import (
     SlurpExplainError,
@@ -583,8 +582,12 @@ def _handle_suggest(msg_id, args: dict, G, out) -> None:
 
     try:
         scores = score_nodes(G, query)
-        subG, _stats = select_subgraph(G, scores, budget=budget, min_score=_MIN_SCORE)
+        subG, _stats = select_subgraph(G, scores, budget=budget, min_score=_MIN_SCORE,
+                                       query=query)
         text = format_suggestions(suggest_queries(G, query, scores, subG))
+    except BudgetTooSmallError as exc:
+        _write(_err(msg_id, -32602, str(exc)), out)
+        return
     except Exception as exc:
         _write(_tool_err(
             msg_id, f"slurp_suggest failed: {type(exc).__name__}: {exc}"), out)
@@ -785,8 +788,12 @@ def _handle(msg: dict, G, out, session_log: bool = True, state: "GraphState | No
         # Report it as a tool error instead so the session survives.
         try:
             scores = score_nodes(G, query)
-            subG, stats = select_subgraph(G, scores, budget=budget, min_score=_MIN_SCORE)
-            text = format_subgraph(subG, stats, format="markdown", scores=scores, query=query)
+            text, subG, stats = build_context(G, scores, budget=budget, min_score=_MIN_SCORE,
+                                              query=query)
+        except BudgetTooSmallError as exc:
+            # The caller's budget argument cannot work: an invalid parameter.
+            _write(_err(msg_id, -32602, str(exc)), out)
+            return
         except Exception as exc:
             _write(_tool_err(msg_id, f"slurp_query failed: {type(exc).__name__}: {exc}"), out)
             return

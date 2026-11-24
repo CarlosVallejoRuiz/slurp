@@ -10,8 +10,7 @@ import networkx as nx
 from rich.console import Console
 from rich.table import Table
 
-from slurp.budget import count_tokens, select_subgraph
-from slurp.formatter import format_subgraph
+from slurp.budget import BudgetTooSmallError, build_context, count_tokens
 from slurp.scorer import score_nodes
 
 # DECISION: input-token list prices in USD per million tokens. This is a static
@@ -70,6 +69,9 @@ class QueryBudgetResult:
     precision: float  # fraction of relevant nodes (score >= threshold) that were selected
     cost_slurp_usd: float = 0.0
     cost_full_usd: float = 0.0
+    # Set when the budget cannot hold even the header; the row is then left
+    # out of every aggregate rather than counted as zero tokens.
+    error: str = ""
 
 
 @dataclass
@@ -108,17 +110,20 @@ def _percentile(data: list[float], p: float) -> float:
     return s[lo] + (idx - lo) * (s[hi] - s[lo])
 
 
-def _full_graph_tokens(G: nx.DiGraph, model: str) -> int:
-    """Token count for serializing the entire graph to markdown (baseline)."""
-    n = G.number_of_nodes()
-    stats = {
-        "nodes_selected": n,
-        "nodes_total": n,
-        "tokens_used": 0,
-        "tokens_budget": 1_000_000,
-        "coverage_pct": 100.0,
-    }
-    text = format_subgraph(G, stats, format="markdown", query="")
+# A budget no graph reaches, so the "full graph" baseline holds every node and edge.
+_UNBOUNDED = 10_000_000
+
+
+def _full_graph_tokens(G: nx.DiGraph, scores: dict[str, float], query: str, model: str) -> int:
+    """Tokens of the whole graph sent the same way slurp's answer is sent.
+
+    DECISION: the baseline is measured by the same pipeline as the subgraph —
+    same formatter, same header with the same query, same scores — so savings
+    compare two texts produced alike. v1.0.7 measured the baseline without the
+    query in its header, so a subgraph holding the whole graph came out larger
+    than "the whole graph".
+    """
+    text, _, _ = build_context(G, scores, _UNBOUNDED, model, min_score=0.0, query=query)
     return count_tokens(text, model=model)
 
 
@@ -158,18 +163,26 @@ def run_benchmark(
     if not queries or not budgets:
         return BenchmarkResult(model_price=model_price)
 
-    tokens_full = _full_graph_tokens(G, model)
     rows: list[QueryBudgetResult] = []
 
     for query in queries:
         scores = score_nodes(G, query, backend=backend)
         relevant_ids = {nid for nid, s in scores.items() if s >= relevance_threshold}
+        tokens_full = _full_graph_tokens(G, scores, query, model)
 
         for budget in budgets:
-            subG, stats = select_subgraph(
-                G, scores, budget=budget, model=model,
-                neighbor_decay=neighbor_decay, min_score=min_score,
-            )
+            try:
+                _text, subG, stats = build_context(
+                    G, scores, budget=budget, model=model,
+                    neighbor_decay=neighbor_decay, min_score=min_score, query=query,
+                )
+            except BudgetTooSmallError as exc:
+                rows.append(QueryBudgetResult(
+                    query=query, budget=budget, tokens_slurp=0, tokens_full=tokens_full,
+                    savings_pct=0.0, nodes_selected=0, nodes_total=G.number_of_nodes(),
+                    coverage_pct=0.0, precision=0.0, error=str(exc)))
+                continue
+            # The real size of the text sent, measured — no longer an estimate.
             used = stats["tokens_used"]
             savings = (
                 max(0.0, (tokens_full - used) / tokens_full * 100)
@@ -194,16 +207,17 @@ def run_benchmark(
                 cost_full_usd=_cost_usd(tokens_full, price),
             ))
 
-    if not rows:
-        return BenchmarkResult(model_price=model_price)
+    measured = [r for r in rows if not r.error]
+    if not measured:
+        return BenchmarkResult(rows=rows, model_price=model_price)
 
-    sv = [r.savings_pct for r in rows]
-    pv = [r.precision for r in rows]
+    sv = [r.savings_pct for r in measured]
+    pv = [r.precision for r in measured]
 
     # DECISION: totals accumulate across every query×budget run, so they answer
     # "what would this benchmark's workload have cost" — not per-query cost.
-    total_slurp = sum(r.cost_slurp_usd for r in rows)
-    total_full = sum(r.cost_full_usd for r in rows)
+    total_slurp = sum(r.cost_slurp_usd for r in measured)
+    total_full = sum(r.cost_full_usd for r in measured)
 
     return BenchmarkResult(
         rows=rows,
@@ -211,8 +225,8 @@ def run_benchmark(
         p50_savings_pct=round(_percentile(sv, 50), 1),
         p90_savings_pct=round(_percentile(sv, 90), 1),
         p95_savings_pct=round(_percentile(sv, 95), 1),
-        best_case=max(rows, key=lambda r: r.savings_pct),
-        worst_case=min(rows, key=lambda r: r.savings_pct),
+        best_case=max(measured, key=lambda r: r.savings_pct),
+        worst_case=min(measured, key=lambda r: r.savings_pct),
         mean_precision=round(statistics.mean(pv), 4),
         total_cost_slurp_usd=total_slurp,
         total_cost_full_usd=total_full,
@@ -239,6 +253,9 @@ def format_benchmark(result: BenchmarkResult) -> str:
     """
     if not result.rows:
         return "No benchmark results."
+    if result.best_case is None:
+        return "No benchmark results: every budget was below the header's minimum.\n" + \
+            "\n".join(f"  {r.query!r} @ {r.budget:,}: {r.error}" for r in result.rows)
 
     price = MODEL_PRICES_PER_MTok.get(result.model_price, MODEL_PRICES_PER_MTok["default"])
     runs_table = Table(
@@ -258,6 +275,10 @@ def format_benchmark(result: BenchmarkResult) -> str:
     runs_table.add_column("Precision", justify="right")
 
     for r in result.rows:
+        if r.error:
+            runs_table.add_row(r.query, f"{r.budget:,}", "—", f"{r.tokens_full:,}",
+                               "skipped", "—", "—", "—", str(r.nodes_total), "—", "—")
+            continue
         runs_table.add_row(
             r.query,
             f"{r.budget:,}",
@@ -308,4 +329,7 @@ def format_benchmark(result: BenchmarkResult) -> str:
     # DECISION: 150 columns, not 120 — the two cost columns push the runs table
     # past 120, and rich silently drops columns that don't fit rather than wrapping.
     Console(file=buf, no_color=True, width=150).print(runs_table, summary_table)
+    skipped = [r for r in result.rows if r.error]
+    if skipped:
+        buf.write(f"\n{len(skipped)} run(s) skipped: {skipped[0].error}\n")
     return buf.getvalue()

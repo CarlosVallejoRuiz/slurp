@@ -517,7 +517,7 @@ class TestIntegration:
         runner = _runner()
         r_small = runner.invoke(
             cli,
-            ["auth", "-g", str(sample_graph_json), "-b", "50", "-f", "json", "--no-audit"],
+            ["auth", "-g", str(sample_graph_json), "-b", "200", "-f", "json", "--no-audit"],
         )
         r_large = runner.invoke(
             cli,
@@ -1152,7 +1152,7 @@ class TestExportCommand:
     def test_budget_option_respected(self, sample_graph_json, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         r_small = _runner().invoke(
-            cli, ["export", "auth", "--graph", str(sample_graph_json), "--budget", "100"]
+            cli, ["export", "auth", "--graph", str(sample_graph_json), "--budget", "200"]
         )
         r_large = _runner().invoke(
             cli, ["export", "auth", "--graph", str(sample_graph_json), "--budget", "8000"]

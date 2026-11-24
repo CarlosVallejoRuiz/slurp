@@ -3262,7 +3262,7 @@ class TestCrossFileCallResolution:
         graph = index_project(_SLURP_PACKAGE)
         callers = {
             e["source"] for e in graph["links"]
-            if e["relation"] == "calls" and e["target"] == "budget.select_subgraph"
+            if e["relation"] == "calls" and e["target"] == "budget.build_context"
         }
         assert "cli.run" in callers
         assert "mcp._handle" in callers

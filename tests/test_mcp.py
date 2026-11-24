@@ -231,7 +231,7 @@ class TestToolsCallSuccess:
 
     def test_large_budget_selects_more_nodes_than_small(self):
         import re
-        resp_small = self._call({"query": "auth", "budget": 60})
+        resp_small = self._call({"query": "auth", "budget": 200})
         resp_large = self._call({"query": "auth", "budget": 10_000})
         # Extract "Selected N/M" from both headers
         def selected(text):
@@ -758,7 +758,7 @@ class TestGraphState:
         assert len(_pagerank_cache) == 0
 
     def test_reload_clears_node_token_cache(self, graph_file):
-        from slurp.budget import _node_token_cache, select_subgraph
+        from slurp.budget import _item_cost_cache as _node_token_cache, select_subgraph
         state = GraphState(graph_file, load_graph(graph_file))
         select_subgraph(state.graph, {"alpha": 1.0}, budget=1000)
         assert len(_node_token_cache) > 0

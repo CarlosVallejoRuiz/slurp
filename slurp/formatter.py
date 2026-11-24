@@ -58,33 +58,122 @@ def _sorted_nodes(G: nx.DiGraph, scores: dict[str, float] | None) -> list[str]:
     )
 
 
+def _file_of(attrs: dict) -> str:
+    """The node's file, whichever key the source graph used.
+
+    graphify writes `source_file`, generic graphs `file_path`. Every renderer —
+    and through them the budget — reads it here, so the two can never disagree.
+    """
+    return attrs.get("source_file") or attrs.get("file_path") or ""
+
+
+def _node_record(G: nx.DiGraph, nid: str, scores: dict[str, float] | None) -> dict:
+    """One node as the JSON and YAML formats write it."""
+    attrs = G.nodes[nid]
+    node: dict = {"id": nid}
+    for field in ("label", "type", "description", "importance"):
+        if (val := attrs.get(field)) is not None:
+            node[field] = val
+    if fpath := _file_of(attrs):
+        node["file_path"] = fpath
+    if scores and nid in scores:
+        node["score"] = round(scores[nid], 4)
+    return node
+
+
+def _edge_record(G: nx.DiGraph, u: str, v: str) -> dict:
+    """One edge as the JSON and YAML formats write it."""
+    edge_attrs = G.edges[u, v]
+    edge: dict = {"source": u, "target": v}
+    if rel := edge_attrs.get("relation"):
+        edge["relation"] = rel
+    if (w := edge_attrs.get("weight")) is not None:
+        edge["weight"] = w
+    return edge
+
+
 def _build_data(G: nx.DiGraph, stats: dict, scores: dict[str, float] | None) -> dict:
     """Builds the canonical dict shared by JSON and YAML formatters."""
-    nodes = []
-    for nid in _sorted_nodes(G, scores):
-        attrs = G.nodes[nid]
-        node: dict = {"id": nid}
-        for field in ("label", "type", "description", "importance"):
-            if (val := attrs.get(field)) is not None:
-                node[field] = val
-        # One stable output key, whichever key the source graph used.
-        if fpath := (attrs.get("source_file") or attrs.get("file_path")):
-            node["file_path"] = fpath
-        if scores and nid in scores:
-            node["score"] = round(scores[nid], 4)
-        nodes.append(node)
+    return {
+        "stats": stats,
+        "nodes": [_node_record(G, nid, scores) for nid in _sorted_nodes(G, scores)],
+        "edges": [_edge_record(G, u, v) for u, v in G.edges],
+    }
 
-    edges = []
-    for u, v in G.edges:
-        edge_attrs = G.edges[u, v]
-        edge: dict = {"source": u, "target": v}
-        if rel := edge_attrs.get("relation"):
-            edge["relation"] = rel
-        if (w := edge_attrs.get("weight")) is not None:
-            edge["weight"] = w
-        edges.append(edge)
 
-    return {"stats": stats, "nodes": nodes, "edges": edges}
+def _md_node_lines(G: nx.DiGraph, nid: str, scores: dict[str, float] | None) -> list[str]:
+    """One node's block in the markdown format, trailing blank line included."""
+    attrs = G.nodes[nid]
+    label = attrs.get("label", nid)
+    ntype = attrs.get("type", "")
+    desc = attrs.get("description", "")
+    fpath = _file_of(attrs)
+
+    heading = f"### {label}"
+    if ntype:
+        heading += f" ({ntype})"
+    if scores and nid in scores:
+        heading += f" · score: {scores[nid]:.2f}"
+    lines = [heading]
+    if desc:
+        lines.append(desc)
+    if fpath:
+        lines.append(f"→ File: {fpath}")
+    code_block = attrs.get("code_block", "")
+    if code_block:
+        lines.append(f"```{_file_lang(fpath)}")
+        lines.append(code_block)
+        lines.append("```")
+    lines.append("")
+    return lines
+
+
+def _md_edge_line(G: nx.DiGraph, u: str, v: str) -> str:
+    rel = G.edges[u, v].get("relation", "→")
+    return f"- {u} → {rel} → {v}"
+
+
+def _yaml_entry(record: dict) -> list[str]:
+    """One list entry (node or edge) in the YAML format."""
+    return [f"{'  - ' if i == 0 else '    '}{k}: {_yaml_scalar(v)}"
+            for i, (k, v) in enumerate(record.items())]
+
+
+# A score with the most digits any real score is written with, so that an
+# item's cost measured once with it is never below its cost with a real score.
+_PLACEHOLDER_SCORE = 0.1234
+
+
+def item_text(G: nx.DiGraph, item: tuple, format: str = "markdown") -> str:
+    """The text one node or edge adds to the output in *format*.
+
+    Used by the budget selector to cost items with exactly the renderers this
+    module uses, so what is counted is what is written. A node is costed with a
+    placeholder score of the widest width, which keeps the cost independent of
+    the query and therefore cacheable.
+
+    Args:
+        G: The graph holding the item.
+        item: ("n", node_id) or ("e", source, target).
+        format: 'markdown', 'json' or 'yaml'.
+
+    Returns:
+        The item's text, including its line break or list separator.
+    """
+    if item[0] == "n":
+        nid = item[1]
+        scores = {nid: _PLACEHOLDER_SCORE}
+        if format == "markdown":
+            return "\n".join(_md_node_lines(G, nid, scores)) + "\n"
+        record = _node_record(G, nid, scores)
+    else:
+        if format == "markdown":
+            return _md_edge_line(G, item[1], item[2]) + "\n"
+        record = _edge_record(G, item[1], item[2])
+    if format == "json":
+        body = _json.dumps(record, indent=2)
+        return "\n".join("    " + line for line in body.splitlines()) + ",\n"
+    return "\n".join(_yaml_entry(record)) + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -115,45 +204,23 @@ def _format_markdown(
     lines.append(_box(title, subtitle))
     lines.append("")
 
+    # The budget could not hold a single node: say so instead of an empty list.
+    if warning := stats.get("warning"):
+        lines.append(f"⚠️ {warning}")
+        return "\n".join(lines)
+
     # Relevant nodes -----------------------------------------------------
     lines.append("## Relevant Nodes")
     lines.append("")
 
     for nid in _sorted_nodes(G, scores):
-        attrs = G.nodes[nid]
-        label = attrs.get("label", nid)
-        ntype = attrs.get("type", "")
-        desc = attrs.get("description", "")
-        # graphify writes `file_path`, `slurp index` writes `source_file`.
-        # Reading only one of them drops the file from every graph built by
-        # the other — which since v0.6.0 is the common case.
-        fpath = attrs.get("source_file") or attrs.get("file_path") or ""
-
-        heading = f"### {label}"
-        if ntype:
-            heading += f" ({ntype})"
-        if scores and nid in scores:
-            heading += f" · score: {scores[nid]:.2f}"
-        lines.append(heading)
-
-        if desc:
-            lines.append(desc)
-        if fpath:
-            lines.append(f"→ File: {fpath}")
-        code_block = attrs.get("code_block", "")
-        if code_block:
-            lang = _file_lang(fpath)
-            lines.append(f"```{lang}")
-            lines.append(code_block)
-            lines.append("```")
-        lines.append("")
+        lines.extend(_md_node_lines(G, nid, scores))
 
     # Key relationships --------------------------------------------------
     if G.number_of_edges() > 0:
         lines.append("## Key Relationships")
         for u, v in G.edges:
-            rel = G.edges[u, v].get("relation", "→")
-            lines.append(f"- {u} → {rel} → {v}")
+            lines.append(_md_edge_line(G, u, v))
         lines.append("")
 
     # Tip ----------------------------------------------------------------
@@ -190,20 +257,12 @@ def _format_yaml(
 
     lines.append("nodes:")
     for node in data["nodes"]:
-        first = True
-        for k, v in node.items():
-            prefix = "  - " if first else "    "
-            lines.append(f"{prefix}{k}: {_yaml_scalar(v)}")
-            first = False
+        lines.extend(_yaml_entry(node))
 
     lines.append("edges:")
     if data["edges"]:
         for edge in data["edges"]:
-            first = True
-            for k, v in edge.items():
-                prefix = "  - " if first else "    "
-                lines.append(f"{prefix}{k}: {_yaml_scalar(v)}")
-                first = False
+            lines.extend(_yaml_entry(edge))
     else:
         lines.append("  []")
 

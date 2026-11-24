@@ -18,7 +18,7 @@ from slurp._graphutils import _LANGUAGE_BY_EXT
 from slurp.audit import log_query, read_audit, top_nodes_from_audit
 # Imported at module level because the --price-model choices are built at decoration time.
 from slurp.benchmark import MODEL_PRICES_PER_MTok
-from slurp.budget import select_subgraph
+from slurp.budget import BudgetTooSmallError, build_context, count_tokens, fit_to_budget
 from slurp.explainer import PROVIDERS as _EXPLAIN_PROVIDERS
 from slurp.formatter import format_subgraph
 from slurp.ignore import apply_ignore, load_ignore
@@ -458,10 +458,14 @@ def run(
         scores = score_nodes(G, query, backend=backend)
         structural = semantic = {}
 
-    subG, stats = select_subgraph(
-        G, scores, budget=budget, model=model,
-        neighbor_decay=neighbor_decay, min_score=min_score,
-    )
+    try:
+        result, subG, stats = build_context(
+            G, scores, budget=budget, model=model,
+            neighbor_decay=neighbor_decay, min_score=min_score,
+            format=fmt, query=query,
+        )
+    except BudgetTooSmallError as exc:
+        raise click.ClickException(str(exc)) from None
 
     if inject_code_flag:
         from slurp.injector import inject_code
@@ -472,9 +476,17 @@ def run(
                 f"{subG.number_of_nodes()}. Increase --min-score or lower --budget to reduce.",
                 err=True,
             )
-        subG = inject_code(subG, root)
+        injected = inject_code(subG, root)
+        if injected is not subG:
+            # The code blocks count too: trim back under the budget, lowest
+            # scores first, now that the real text is longer.
+            from slurp.formatter import item_text
+            result, subG, stats = fit_to_budget(
+                injected, budget,
+                lambda sub, st: format_subgraph(sub, st, format=fmt, scores=scores, query=query),
+                _item_values(injected, scores), G.number_of_nodes(), model,
+                item_cost=lambda item: count_tokens(item_text(injected, item, fmt), model))
 
-    result = format_subgraph(subG, stats, format=fmt, scores=scores, query=query)
     click.echo(result)
 
     if suggest:
@@ -502,6 +514,14 @@ def run(
     if viz or viz_output:
         from slurp.viz import build_html
         _deliver_viz(build_html(subG, stats, scores, query), viz, viz_output)
+
+
+def _item_values(G, scores: dict[str, float]) -> dict[tuple, float]:
+    """Trimming order for fit_to_budget: a node by its score, an edge by its weaker end."""
+    values: dict[tuple, float] = {("n", n): scores.get(n, 0.0) for n in G.nodes}
+    for u, v in G.edges:
+        values[("e", u, v)] = min(scores.get(u, 0.0), scores.get(v, 0.0))
+    return values
 
 
 def _build_explain_table(
@@ -605,9 +625,12 @@ def diff_cmd(
             ]
             query = " ".join(query_terms) or "diff"
             scores = score_nodes(sub, query)
-            subG, stats = select_subgraph(sub, scores, budget=budget)
+            try:
+                text, _subG, _stats = build_context(sub, scores, budget=budget, query=query)
+            except BudgetTooSmallError as exc:
+                raise click.ClickException(str(exc)) from None
             click.echo("\n## Token-Budgeted Affected Subgraph\n")
-            click.echo(format_subgraph(subG, stats, scores=scores, query=query))
+            click.echo(text)
 
     if viz or viz_output:
         viz_G, viz_scores, viz_stats = build_diff_viz_graph(G_old, G_new, diff, hops)
@@ -722,12 +745,15 @@ def export_cmd(
 
     G = apply_ignore(G, load_ignore(Path(ignore_file)))
     scores = score_nodes(G, query, backend=backend)
-    subG, stats = select_subgraph(
-        G, scores, budget=budget, model=model,
-        neighbor_decay=neighbor_decay, min_score=min_score,
-    )
-
-    result = export_context(subG, stats, query, format=fmt, scores=scores)
+    # The export wrapper is part of what gets pasted, so it is what gets budgeted.
+    try:
+        result, _subG, _stats = build_context(
+            G, scores, budget=budget, model=model,
+            neighbor_decay=neighbor_decay, min_score=min_score, query=query,
+            render=lambda sub, st: export_context(sub, st, query, format=fmt, scores=scores),
+        )
+    except BudgetTooSmallError as exc:
+        raise click.ClickException(str(exc)) from None
 
     if output:
         out_path = Path(output)
@@ -906,9 +932,12 @@ def eval_cmd(
     if retrieval:
         # DECISION: no provider is resolved at all — the metric must run
         # offline, cost nothing and give the same numbers on every run.
-        suite = run_retrieval_eval(
-            G, questions, budget=budget,
-            min_score=RETRIEVAL_MIN_SCORE if min_score is None else min_score)
+        try:
+            suite = run_retrieval_eval(
+                G, questions, budget=budget,
+                min_score=RETRIEVAL_MIN_SCORE if min_score is None else min_score)
+        except BudgetTooSmallError as exc:
+            raise click.ClickException(str(exc)) from None
         if not suite.scored:
             raise click.ClickException(
                 f"None of the {len(questions)} questions' relevant_nodes exist in "

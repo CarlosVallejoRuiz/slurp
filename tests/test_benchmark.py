@@ -113,20 +113,20 @@ class TestPercentile:
 
 class TestFullGraphTokens:
     def test_returns_positive_int(self, simple_graph):
-        count = _full_graph_tokens(simple_graph, "cl100k_base")
+        count = _full_graph_tokens(simple_graph, {}, "", "cl100k_base")
         assert isinstance(count, int)
         assert count > 0
 
     def test_larger_graph_more_tokens(self, simple_graph):
         G_small = nx.DiGraph()
         G_small.add_node("a", label="A", description="short")
-        small = _full_graph_tokens(G_small, "cl100k_base")
-        full  = _full_graph_tokens(simple_graph, "cl100k_base")
+        small = _full_graph_tokens(G_small, {}, "", "cl100k_base")
+        full  = _full_graph_tokens(simple_graph, {}, "", "cl100k_base")
         assert full > small
 
     def test_same_graph_same_count(self, simple_graph):
-        c1 = _full_graph_tokens(simple_graph, "cl100k_base")
-        c2 = _full_graph_tokens(simple_graph, "cl100k_base")
+        c1 = _full_graph_tokens(simple_graph, {}, "", "cl100k_base")
+        c2 = _full_graph_tokens(simple_graph, {}, "", "cl100k_base")
         assert c1 == c2
 
 
@@ -201,9 +201,11 @@ class TestRunBenchmarkBasics:
     def test_tokens_full_same_for_all_rows(
         self, simple_graph, multi_queries, multi_budgets
     ):
+        # The baseline is measured per query (its header carries the query), and
+        # is the same for every budget of that query.
         result = run_benchmark(simple_graph, multi_queries, multi_budgets)
-        full_counts = {r.tokens_full for r in result.rows}
-        assert len(full_counts) == 1
+        for query in multi_queries:
+            assert len({r.tokens_full for r in result.rows if r.query == query}) == 1
 
     def test_savings_pct_in_valid_range(
         self, simple_graph, multi_queries, multi_budgets

@@ -450,7 +450,7 @@ class TestIntegration:
         from slurp.scorer import score_nodes
 
         scores = score_nodes(sample_graph, "auth")
-        subG, stats = select_subgraph(sample_graph, scores, budget=60)
+        subG, stats = select_subgraph(sample_graph, scores, budget=200)
         out = format_subgraph(subG, stats, format="markdown", scores=scores)
 
         if stats["nodes_selected"] < stats["nodes_total"]:
