@@ -2070,3 +2070,130 @@ class TestSessionCommand:
         result = _runner().invoke(cli, ["session", "--help"])
         assert "--last" in result.output
         assert "--tail" in result.output
+
+
+# ---------------------------------------------------------------------------
+# slurp index / init never clobber a graph another tool wrote
+# ---------------------------------------------------------------------------
+
+# The top-level shape graphify writes (networkx node-link data). It carries
+# built_at_commit too, so that key alone cannot tell the two apart.
+_GRAPHIFY_GRAPH = {
+    "directed": True, "multigraph": False, "graph": {}, "hyperedges": [],
+    "built_at_commit": "abc123",
+    "nodes": [{"id": "graphify_sentinel", "label": "GraphifySentinel",
+               "file_type": "code", "source_file": "src/a.py"}],
+    "links": [],
+}
+
+
+class TestIndexKeepsForeignGraphs:
+    @staticmethod
+    def _project(root: Path) -> Path:
+        (root / "src").mkdir(parents=True)
+        (root / "src" / "a.py").write_text("def handler():\n    return 1\n", encoding="utf-8")
+        out = root / "graphify-out" / "graph.json"
+        out.parent.mkdir()
+        out.write_text(json.dumps(_GRAPHIFY_GRAPH), encoding="utf-8")
+        return out
+
+    def test_default_output_refuses_graphify_graph(self, tmp_path):
+        out = self._project(tmp_path)
+        before = out.read_bytes()
+        result = _runner().invoke(cli, ["index", str(tmp_path), "--ignore-file", "/dev/null"],
+                                  input="n\n")
+        assert result.exit_code != 0
+        assert out.read_bytes() == before
+        assert "--force" in result.output
+        assert "-o" in result.output
+
+    def test_no_input_never_overwrites(self, tmp_path):
+        # CI / piped stdin: the confirmation reads EOF and must not default to yes.
+        out = self._project(tmp_path)
+        before = out.read_bytes()
+        result = _runner().invoke(cli, ["index", str(tmp_path), "--ignore-file", "/dev/null"])
+        assert result.exit_code != 0
+        assert out.read_bytes() == before
+
+    def test_confirming_overwrites(self, tmp_path):
+        out = self._project(tmp_path)
+        result = _runner().invoke(cli, ["index", str(tmp_path), "--ignore-file", "/dev/null"],
+                                  input="y\n")
+        assert result.exit_code == 0, result.output
+        data = json.loads(out.read_text(encoding="utf-8"))
+        assert set(data) == {"nodes", "links", "built_at_commit"}
+
+    def test_force_overwrites_without_asking(self, tmp_path):
+        out = self._project(tmp_path)
+        result = _runner().invoke(cli, ["index", str(tmp_path), "--force",
+                                        "--ignore-file", "/dev/null"])
+        assert result.exit_code == 0, result.output
+        assert "graphify_sentinel" not in out.read_text(encoding="utf-8")
+
+    def test_explicit_output_elsewhere_needs_no_confirmation(self, tmp_path):
+        out = self._project(tmp_path)
+        before = out.read_bytes()
+        other = tmp_path / "graphify-out" / "slurp-graph.json"
+        result = _runner().invoke(cli, ["index", str(tmp_path), "-o", str(other),
+                                        "--ignore-file", "/dev/null"])
+        assert result.exit_code == 0, result.output
+        assert other.is_file()
+        assert out.read_bytes() == before
+
+    def test_reindexing_own_output_stays_silent(self, tmp_path):
+        out = tmp_path / "graph.json"
+        (tmp_path / "a.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+        args = ["index", str(tmp_path), "-o", str(out), "--ignore-file", "/dev/null"]
+        assert _runner().invoke(cli, args).exit_code == 0
+        second = _runner().invoke(cli, args)  # no input given: must not prompt
+        assert second.exit_code == 0, second.output
+        assert "Overwrite" not in second.output
+
+    def test_unreadable_file_is_treated_as_foreign(self, tmp_path):
+        out = self._project(tmp_path)
+        out.write_text("{ half-written", encoding="utf-8")
+        result = _runner().invoke(cli, ["index", str(tmp_path), "--ignore-file", "/dev/null"],
+                                  input="n\n")
+        assert result.exit_code != 0
+        assert out.read_text(encoding="utf-8") == "{ half-written"
+
+    def test_smart_never_merges_into_graphify_graph(self, tmp_path):
+        import subprocess
+
+        out = self._project(tmp_path)
+        before = out.read_bytes()
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        result = _runner().invoke(cli, ["index", str(tmp_path), "--smart",
+                                        "--ignore-file", "/dev/null"], input="n\n")
+        assert result.exit_code != 0
+        assert out.read_bytes() == before
+
+    def test_smart_with_force_replaces_instead_of_merging(self, tmp_path):
+        import subprocess
+
+        out = self._project(tmp_path)
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        result = _runner().invoke(cli, ["index", str(tmp_path), "--smart", "--force",
+                                        "--ignore-file", "/dev/null"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(out.read_text(encoding="utf-8"))
+        assert set(data) == {"nodes", "links", "built_at_commit"}
+        assert "graphify_sentinel" not in json.dumps(data)
+
+    def test_init_declining_reuse_still_asks_before_overwriting(self, tmp_path, monkeypatch):
+        out = self._project(tmp_path)
+        before = out.read_bytes()
+        monkeypatch.chdir(tmp_path)
+        # proceed? y · reuse? n · overwrite graphify's graph? n
+        result = _runner().invoke(cli, ["init"], input="y\nn\nn\n")
+        assert result.exit_code != 0
+        assert out.read_bytes() == before
+        assert not (tmp_path / ".mcp.json").exists()
+
+    def test_init_yes_reuses_graphify_graph(self, tmp_path, monkeypatch):
+        out = self._project(tmp_path)
+        before = out.read_bytes()
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["init", "--yes"])
+        assert result.exit_code == 0, result.output
+        assert out.read_bytes() == before

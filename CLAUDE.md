@@ -794,7 +794,20 @@ slurp export "auth flow" --graph graph.json --budget 4000 --output context.md
 slurp index .
 slurp index /path/to/project --output graph.json
 slurp index . --watch
+slurp index . --force    # reemplaza un grafo que no escribió slurp (graphify)
 ```
+
+**`slurp index` nunca pisa en silencio un grafo ajeno.** La salida por defecto,
+`graphify-out/graph.json`, es también donde graphify escribe el suyo — que lleva
+relaciones extraídas por LLM que slurp no puede regenerar. `_is_foreign_graph()`
+lo reconoce por la forma de primer nivel: slurp escribe exactamente
+`{nodes, links, built_at_commit}`; graphify añade `directed`/`multigraph`/`graph`/
+`hyperedges` (node-link de networkx). **`built_at_commit` no sirve para distinguirlos:
+graphify también lo escribe.** Un fichero que no parsea cuenta como ajeno. Sin
+`--force` se pregunta con default *no* (sin TTY lee EOF y aborta); `--smart` sobre un
+grafo ajeno hace un índice completo en vez de fusionar; `slurp init` pregunta lo mismo
+si el usuario rechaza reutilizarlo. Un grafo genérico `{nodes, links}` no se distingue
+del de slurp y se trata como propio.
 
 **Auto-discovery de graph.json** (sin --graph):
 1. `./graph.json`

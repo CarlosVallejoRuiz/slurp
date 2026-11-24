@@ -1029,7 +1029,14 @@ slurp index /path/to/project              # specific path
 slurp index . --output custom/graph.json  # custom output path
 slurp index . --watch                     # re-index on file changes
 slurp index . --smart                     # only re-index what changed
+slurp index . --force                     # replace a graph another tool wrote
 ```
+
+> The default output, `graphify-out/graph.json`, is also where graphify writes its own
+> graph. If that file exists and was not written by slurp, `slurp index` asks before
+> replacing it (the default answer is no, and a non-interactive run never overwrites).
+> Keep both with `-o graphify-out/slurp-graph.json`, or replace it with `--force`.
+> `slurp init` asks the same question if you decline to reuse graphify's graph.
 
 ```
 Indexing /path/to/project ...
@@ -1142,6 +1149,7 @@ Next: slurp "your query" --graph /path/to/project/graphify-out/graph.json
 | `--smart` | off | Git-aware incremental re-index — only re-indexes changed files and their dependents. |
 | `--dry-run` | off | Show what `--smart` would re-index without making changes. |
 | `--ignore-file` | `.slurpignore` | Path to .slurpignore rules. |
+| `--force` | off | Overwrite the output even if another tool (e.g. graphify) wrote it. With `--smart`, a foreign graph is replaced by a full index, never merged into. |
 
 #### Incremental re-indexing with `--smart`
 

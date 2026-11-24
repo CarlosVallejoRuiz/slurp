@@ -63,6 +63,58 @@ def _find_graph() -> Path | None:
     return None
 
 
+# Exactly the top-level keys `slurp index` writes. graphify's graph.json is
+# networkx node-link data and adds directed/multigraph/graph/hyperedges — it
+# writes built_at_commit as well, so that key alone cannot tell them apart.
+_SLURP_GRAPH_KEYS = frozenset({"nodes", "links", "built_at_commit"})
+
+
+def _is_foreign_graph(path: Path) -> bool:
+    """Whether *path* holds a file that `slurp index` did not write.
+
+    DECISION: slurp's default output, graphify-out/graph.json, is also where
+    graphify writes its own graph, and that graph carries LLM-extracted
+    relations slurp cannot regenerate. Anything that is not recognisably
+    slurp's output counts as foreign — including a file that does not parse,
+    which may be another tool's half-written graph. A bare {nodes, links}
+    graph is indistinguishable from slurp's and is treated as slurp's.
+
+    Args:
+        path: Output path about to be written.
+
+    Returns:
+        True if the file exists and was not written by slurp.
+    """
+    if not path.exists():
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return True
+    return not isinstance(data, dict) or not set(data) <= _SLURP_GRAPH_KEYS
+
+
+def _confirm_replacing_foreign_graph(path: Path, keep_both_hint: str) -> None:
+    """Ask before replacing a graph another tool wrote; abort on anything but yes.
+
+    The hint goes out before the prompt, so a non-interactive run — where the
+    prompt reads EOF and aborts — still says how to proceed.
+
+    Args:
+        path: The foreign graph about to be replaced.
+        keep_both_hint: Command that writes slurp's graph somewhere else instead.
+    """
+    click.echo(
+        f"{path} exists and was not written by slurp — it looks like graphify's "
+        "graph, which slurp cannot regenerate.\n"
+        f"  Keep both:  {keep_both_hint}\n"
+        "  Replace it: run again with --force",
+        err=True,
+    )
+    if not click.confirm("Overwrite it?", default=False, err=True):
+        raise click.ClickException(f"Left {path} untouched.")
+
+
 def _echo_rich(renderable) -> None:
     """Render a rich renderable and echo via click.echo (always CliRunner-safe)."""
     buf = StringIO()
@@ -1360,6 +1412,8 @@ def _plural(count: int, word: str) -> str:
               help="Re-index only files changed since the last commit, plus their dependents.")
 @click.option("--dry-run", is_flag=True, default=False,
               help="With --smart, list the files that would be re-indexed and exit.")
+@click.option("--force", is_flag=True, default=False,
+              help="Overwrite the output even if another tool (e.g. graphify) wrote it.")
 def index_cmd(
     path: str,
     output_path: str | None,
@@ -1367,6 +1421,7 @@ def index_cmd(
     ignore_file: str,
     smart: bool,
     dry_run: bool,
+    force: bool,
 ) -> None:
     """Generate graph.json by statically indexing the project.
 
@@ -1418,9 +1473,19 @@ def index_cmd(
         _run_smart(root, out, ignore, dry_run=True)
         return
 
+    foreign = _is_foreign_graph(out)
+    if foreign and not force:
+        _confirm_replacing_foreign_graph(
+            out, f"slurp index {path} -o {out.parent / 'slurp-graph.json'}")
+    if foreign and smart:
+        # --smart edits the existing graph in place; merging slurp's nodes into
+        # another tool's graph would produce neither graph. Replace it whole.
+        click.echo("  Existing graph was not written by slurp — running a full "
+                   "index instead of --smart")
+
     # _run_smart returns False when it could not run incrementally (no git repo,
     # no existing graph); the reason is reported and a full index takes over.
-    if not smart or not _run_smart(root, out, ignore, dry_run=False):
+    if foreign or not smart or not _run_smart(root, out, ignore, dry_run=False):
         _run()
 
     if watch:
@@ -1522,6 +1587,14 @@ def init(yes: bool) -> None:
         from slurp.indexer import index_project, iter_source_files
 
         graph_path = root / "graphify-out" / "graph.json"
+        if _is_foreign_graph(graph_path):
+            # Declining reuse must not silently replace graphify's graph.
+            _confirm_replacing_foreign_graph(
+                graph_path,
+                "answer yes to reuse it, or run "
+                f"`slurp index . -o {graph_path.parent / 'slurp-graph.json'}` "
+                "and point .mcp.json at that file",
+            )
         ignore = load_ignore(Path(".slurpignore"))
         files = list(iter_source_files(root))
 

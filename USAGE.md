@@ -390,6 +390,11 @@ slurp index /path/to/project
 
 # Live re-indexing on file changes
 slurp index . --watch
+
+# graphify-out/graph.json already holds graphify's graph? Keep both...
+slurp index . -o graphify-out/slurp-graph.json
+# ...or replace it (without --force, slurp asks first and defaults to no)
+slurp index . --force
 ```
 
 **Example output on PrismaStats:**
