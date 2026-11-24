@@ -111,7 +111,12 @@ _SKIP_DIRS: frozenset[str] = frozenset({
 
 
 def _should_skip(path: Path) -> bool:
-    """Return True if path is inside a directory that should be skipped."""
+    """Return True if path is inside a directory that should be skipped.
+
+    Pass the path *relative to the project root*. Every part is checked, so an
+    absolute path would also test the folders above the project: a project
+    living under ~/code/build/ lost every file and indexed to 0 nodes.
+    """
     return any(
         part in _SKIP_DIRS or part.endswith(".egg-info")
         for part in path.parts
@@ -7003,7 +7008,8 @@ def iter_source_files(root: Path) -> Iterator[Path]:
     """
     root_resolved = root.resolve()
     for path in sorted(root.rglob("*")):
-        if not path.is_file() or _should_skip(path):
+        # Skip rules apply below the root only — see _should_skip.
+        if not path.is_file() or _should_skip(path.relative_to(root)):
             continue
         try:
             path.resolve().relative_to(root_resolved)
@@ -7014,6 +7020,31 @@ def iter_source_files(root: Path) -> Iterator[Path]:
             continue
         if path.suffix.lower() in _INDEXED_EXTENSIONS:
             yield path
+
+
+def skipped_source_files(root: Path) -> dict[str, int]:
+    """Indexable files under *root* that the skip rules leave out, by directory.
+
+    Used to explain an empty graph: a project whose sources all live under
+    vendor/ or dist/ indexes to 0 nodes, and saying which directories were
+    skipped is the difference between a puzzle and a one-line fix.
+
+    Args:
+        root: Project root.
+
+    Returns:
+        Mapping of skipped directory name (e.g. "vendor") to file count.
+    """
+    counts: dict[str, int] = {}
+    for path in root.rglob("*"):
+        if path.suffix.lower() not in _INDEXED_EXTENSIONS or not path.is_file():
+            continue
+        rel = path.relative_to(root)
+        for part in rel.parts[:-1]:
+            if part in _SKIP_DIRS or part.endswith(".egg-info"):
+                counts[part] = counts.get(part, 0) + 1
+                break
+    return counts
 
 
 def index_project(

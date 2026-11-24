@@ -169,7 +169,8 @@ def get_changed_files(root: Path, base: str = "HEAD") -> list[Path]:
             if not rel:
                 continue
             path = (root / rel).resolve()
-            if path.suffix.lower() in _INDEXED_EXTENSIONS and not _should_skip(path):
+            # Skip rules apply to the root-relative path, not the folders above it.
+            if path.suffix.lower() in _INDEXED_EXTENSIONS and not _should_skip(Path(rel)):
                 seen.add(path)
     return sorted(seen)
 

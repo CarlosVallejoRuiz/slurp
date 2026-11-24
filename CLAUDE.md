@@ -69,6 +69,14 @@ uv sync --extra rust            # solo una
 ```
 
 **Invariantes del indexador:**
+- **Las reglas de `_SKIP_DIRS` se aplican a la ruta relativa a la raíz**, nunca a
+  la absoluta. Antes un proyecto en `~/code/build/app` o `.../vendor/app` se
+  indexaba a 0 nodos sin aviso (y `--smart` no veía cambios). `_should_skip`
+  sigue mirando todas las partes de la ruta que recibe: son los llamadores
+  (`iter_source_files`, `smart.get_changed_files`) quienes le pasan la relativa.
+  Si un índice sale con 0 nodos, `slurp index` explica por stderr qué
+  directorios saltados tenían fuentes (`skipped_source_files`) o que no hay
+  ninguna extensión indexable.
 - Cada gramática es un extra **independiente**: su ausencia es una configuración
   soportada y debe degradar en silencio al fallback regex.
 - **Regex principal vs regex fallback**: Go, Lua, Elixir y PowerShell no tienen

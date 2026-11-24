@@ -54,6 +54,7 @@ from slurp.indexer import (
     _should_skip,
     index_go,
     index_project,
+    iter_source_files,
     index_python,
     index_typescript,
 )
@@ -5555,3 +5556,57 @@ class TestReturnTypeResolution:
         ), index_go)
         assert ("a.run", "a.NewServer") in calls
         assert ("a.NewServer", "a.Server") in calls
+
+
+# ---------------------------------------------------------------------------
+# Skip rules apply below the project root, never to the folders above it
+# ---------------------------------------------------------------------------
+
+class TestSkipRulesAreRootRelative:
+    @pytest.mark.parametrize("parent", ["build", "vendor", "dist", "coverage"])
+    def test_project_inside_a_skip_named_folder_is_indexed(self, tmp_path, parent):
+        root = tmp_path / parent / "myproj"
+        (root / "src").mkdir(parents=True)
+        (root / "src" / "app.py").write_text("def handler():\n    return 1\n")
+        ids = {n["id"] for n in index_project(root)["nodes"]}
+        assert "src.app.handler" in ids
+
+    def test_skip_dirs_inside_the_project_are_still_skipped(self, tmp_path):
+        root = tmp_path / "build" / "myproj"
+        (root / "vendor" / "lib").mkdir(parents=True)
+        (root / "vendor" / "lib" / "third.py").write_text("def third():\n    pass\n")
+        (root / "app.py").write_text("def mine():\n    pass\n")
+        files = {str(p.relative_to(root)) for p in iter_source_files(root)}
+        assert files == {"app.py"}
+
+    def test_cli_indexes_a_project_under_build(self, tmp_path):
+        root = tmp_path / "build" / "myproj"
+        root.mkdir(parents=True)
+        (root / "a.py").write_text("def f():\n    return 1\n")
+        out = tmp_path / "g.json"
+        res = CliRunner().invoke(cli, ["index", str(root), "-o", str(out),
+                                       "--ignore-file", "/dev/null"])
+        assert res.exit_code == 0, res.output
+        assert len(json.loads(out.read_text())["nodes"]) == 2
+
+    def test_zero_nodes_explains_skipped_directories(self, tmp_path):
+        root = tmp_path / "proj"
+        (root / "vendor" / "pkg").mkdir(parents=True)
+        (root / "vendor" / "pkg" / "lib.py").write_text("def lib():\n    pass\n")
+        (root / "dist").mkdir()
+        (root / "dist" / "bundle.js").write_text("function b() {}\n")
+        res = CliRunner().invoke(cli, ["index", str(root), "-o", str(tmp_path / "g.json"),
+                                       "--ignore-file", "/dev/null"])
+        assert res.exit_code == 0, res.output
+        assert "0 nodes" in res.stderr
+        assert "vendor" in res.stderr and "dist" in res.stderr
+        assert "slurp index" in res.stderr  # says how to index them anyway
+
+    def test_zero_nodes_without_sources_says_so(self, tmp_path):
+        root = tmp_path / "empty"
+        root.mkdir()
+        (root / "notes.txt").write_text("nothing to index\n")
+        res = CliRunner().invoke(cli, ["index", str(root), "-o", str(tmp_path / "g.json"),
+                                       "--ignore-file", "/dev/null"])
+        assert res.exit_code == 0, res.output
+        assert "no source files" in res.stderr.lower()

@@ -1410,6 +1410,35 @@ def _run_smart(root: Path, out: Path, ignore, dry_run: bool) -> bool:
     return True
 
 
+def _explain_empty_graph(root: Path) -> None:
+    """Say why indexing produced 0 nodes, on stderr.
+
+    An empty graph is otherwise indistinguishable from a broken one, and the
+    usual cause — every source file under vendor/, dist/ or build/ — has a
+    one-line fix.
+    """
+    from slurp.indexer import _INDEXED_EXTENSIONS, skipped_source_files
+
+    skipped = skipped_source_files(root)
+    if skipped:
+        listed = ", ".join(f"{d}/ ({n})" for d, n in sorted(skipped.items(),
+                                                           key=lambda kv: -kv[1]))
+        first = max(skipped, key=lambda d: skipped[d])
+        click.echo(
+            f"Warning: 0 nodes — {sum(skipped.values())} source files were skipped "
+            f"because they sit under directories slurp never indexes: {listed}.\n"
+            f"  To index one anyway, make it the root: slurp index {root / first}",
+            err=True,
+        )
+    else:
+        exts = " ".join(sorted(_INDEXED_EXTENSIONS))
+        click.echo(
+            f"Warning: 0 nodes — no source files with an indexable extension under "
+            f"{root}.\n  slurp indexes: {exts}",
+            err=True,
+        )
+
+
 def _plural(count: int, word: str) -> str:
     return word if count == 1 else f"{word}s"
 
@@ -1469,6 +1498,8 @@ def index_cmd(
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(_json.dumps(graph, indent=2), encoding="utf-8")
         click.echo(f"✓ {n_nodes} nodes · {n_edges} edges · {files_processed} files")
+        if not n_nodes:
+            _explain_empty_graph(root)
 
         extensions = {p.suffix.lower() for p in iter_source_files(root)}
         if summary := parser_summary(extensions):

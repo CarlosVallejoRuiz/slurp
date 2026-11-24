@@ -563,3 +563,15 @@ class TestSmartRegressions:
         _commit_all(project, "edit")
         _cli_index(project, graph, "--smart")
         assert "unrelated.added" in _node_ids(graph)
+
+
+@requires_git
+def test_changes_detected_in_a_project_under_build(tmp_path):
+    """get_changed_files filtered skip rules on the absolute path as well."""
+    root = tmp_path / "build" / "proj"
+    root.mkdir(parents=True)
+    (root / "a.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    _init_repo(root)
+    _commit_all(root)
+    (root / "a.py").write_text("def f():\n    return 2\n", encoding="utf-8")
+    assert (root / "a.py").resolve() in get_changed_files(root)
