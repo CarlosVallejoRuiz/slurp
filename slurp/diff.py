@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import networkx as nx
+
+from slurp import _graphutils
+from slurp._graphutils import _call_graph_gap, _extensions_with_calls, _split_callers
 
 
 @dataclass
@@ -17,6 +21,12 @@ class GraphDiff:
     added_edges: list[tuple[str, str]] = field(default_factory=list)
     removed_edges: list[tuple[str, str]] = field(default_factory=list)
     impact_score: float = 0.0
+    # Production callers the change reaches — what impact_score is computed
+    # from, kept so the figure can be checked.
+    dependents: list[str] = field(default_factory=list)
+    # Changed nodes in a language with no call graph: their callers are unknown.
+    unknown_nodes: list[str] = field(default_factory=list)
+    risk_reason: str = ""
 
     @property
     def has_changes(self) -> bool:
@@ -38,6 +48,31 @@ def _centrality(G: nx.DiGraph) -> dict[str, float]:
     }
 
 
+# DECISION: impact_score = 1 - exp(-D / k), where D is the number of distinct
+# production callers the change reaches. It used to be the mean degree
+# centrality of the touched nodes, which on a real graph never exceeds ~0.03:
+# deleting createAdminClient, with 97 callers, scored 0.0012 — "low".
+#
+# The scale and both bands are derived from _RISK_HIGH_MIN / _RISK_MEDIUM_MIN,
+# read when called, so `slurp diff`, `slurp impact` and `slurp explain` rate a
+# dependent count identically. k puts the high band at score 0.5 halfway between
+# HIGH_MIN - 1 and HIGH_MIN dependents; each threshold sits halfway between two
+# integer counts, so no real D lands on a boundary. With the constants at 6 and
+# 2: k ~= 7.9; D >= 6 is high (score >= 0.5), D 2-5 medium (>= ~0.17), 0-1 low.
+def _impact_scale() -> float:
+    return (_graphutils._RISK_HIGH_MIN - 0.5) / math.log(2)
+
+
+def _impact_from_dependents(dependents: float) -> float:
+    return 1.0 - math.exp(-dependents / _impact_scale())
+
+
+def _thresholds() -> tuple[float, float]:
+    """(high, medium) score thresholds, each halfway between two dependent counts."""
+    return (_impact_from_dependents(_graphutils._RISK_HIGH_MIN - 0.5),
+            _impact_from_dependents(_graphutils._RISK_MEDIUM_MIN - 0.5))
+
+
 def diff_graphs(old: nx.DiGraph, new: nx.DiGraph) -> GraphDiff:
     """Computes the structural difference between two graph versions.
 
@@ -50,7 +85,9 @@ def diff_graphs(old: nx.DiGraph, new: nx.DiGraph) -> GraphDiff:
 
     Returns:
         GraphDiff with sorted lists of changes and an impact_score in [0.0, 1.0]
-        based on the mean centrality of all affected nodes (including edge endpoints).
+        computed from the production callers the change reaches (see
+        _impact_from_dependents), plus those callers and any changed nodes
+        whose language has no call graph.
     """
     old_nodes = set(old.nodes)
     new_nodes = set(new.nodes)
@@ -71,20 +108,26 @@ def diff_graphs(old: nx.DiGraph, new: nx.DiGraph) -> GraphDiff:
     added_edges = sorted(new_edges - old_edges)
     removed_edges = sorted(old_edges - new_edges)
 
-    # Impact: mean centrality of all directly affected nodes.
-    new_cent = _centrality(new)
-    old_cent = _centrality(old)
+    # What could break: callers of deleted nodes (they now call nothing), and
+    # callers of nodes whose own behaviour changed — relabelled, retyped, or
+    # calling something different for a reason other than a deleted callee.
+    removed = set(removed_nodes)
+    changed = set(modified_nodes) | {
+        u for u, v in added_edges + removed_edges
+        if u in old and u in new and v not in removed
+    }
+    dependents: set[str] = set()
+    for node in removed:
+        dependents.update(_split_callers(old, node)[0])
+    for node in changed:
+        dependents.update(_split_callers(new, node)[0])
+    dependents -= removed
 
-    affected: set[str] = set(added_nodes) | set(removed_nodes) | set(modified_nodes)
-    for u, v in added_edges + removed_edges:
-        affected.add(u)
-        affected.add(v)
-
-    if affected:
-        scores = [new_cent.get(nid, old_cent.get(nid, 0.0)) for nid in affected]
-        impact = min(1.0, sum(scores) / len(scores))
-    else:
-        impact = 0.0
+    # A changed node with no call graph has callers nobody can count.
+    old_calls, new_calls = _extensions_with_calls(old), _extensions_with_calls(new)
+    gaps = {n: _call_graph_gap(old, n, old_calls) for n in removed}
+    gaps.update({n: _call_graph_gap(new, n, new_calls) for n in changed})
+    unknown = sorted(n for n, gap in gaps.items() if gap)
 
     return GraphDiff(
         added_nodes=added_nodes,
@@ -92,7 +135,10 @@ def diff_graphs(old: nx.DiGraph, new: nx.DiGraph) -> GraphDiff:
         modified_nodes=modified_nodes,
         added_edges=added_edges,
         removed_edges=removed_edges,
-        impact_score=round(impact, 4),
+        impact_score=round(_impact_from_dependents(len(dependents)), 4),
+        dependents=sorted(dependents),
+        unknown_nodes=unknown,
+        risk_reason=gaps[unknown[0]] if unknown else "",
     )
 
 
@@ -151,24 +197,43 @@ _HEADLINES = {
     "high": "⚠️ High impact change",
     "medium": "⚡ Medium impact change",
     "low": "✅ Low impact change",
+    "unknown": "❔ Impact unknown",
 }
-_SCORE_LABELS = {"high": "🔴 high", "medium": "🟡 medium", "low": "🟢 low"}
+_SCORE_LABELS = {"high": "🔴 high", "medium": "🟡 medium", "low": "🟢 low",
+                 "unknown": "⚪ unknown"}
 
 
 def impact_severity(impact_score: float) -> str:
-    """Severity band for an impact score.
+    """Severity band for an impact score, on the explain/impact dependent bands.
 
     Args:
         impact_score: GraphDiff.impact_score, in [0, 1].
 
     Returns:
-        One of 'high' (>= 0.5), 'medium' (>= 0.2), or 'low'.
+        'high', 'medium' or 'low' — thresholds derived from the risk constants
+        (0.5 and ~0.17 with the defaults; see _thresholds).
     """
-    if impact_score >= 0.5:
+    high, medium = _thresholds()
+    if impact_score >= high:
         return "high"
-    if impact_score >= 0.2:
+    if impact_score >= medium:
         return "medium"
     return "low"
+
+
+def diff_severity(diff: GraphDiff) -> str:
+    """The band to report for a whole diff.
+
+    Like impact_severity, except a "low" that rests on code with no call graph
+    becomes "unknown": zero counted callers there says nothing.
+    """
+    band = impact_severity(diff.impact_score)
+    return "unknown" if band == "low" and diff.unknown_nodes else band
+
+
+def diff_headline(diff: GraphDiff) -> str:
+    """One-line verdict for a diff, unknown risk included."""
+    return _HEADLINES[diff_severity(diff)]
 
 
 def impact_headline(impact_score: float) -> str:
@@ -238,9 +303,15 @@ def format_diff(diff: GraphDiff, G_new: nx.DiGraph, hops: int = 2) -> str:
 
     # --- Summary ---
     lines.append("## Summary")
-    impact_label = _SCORE_LABELS[impact_severity(diff.impact_score)]
-    lines.append(f"- **{impact_headline(diff.impact_score)}**")
-    lines.append(f"- **Impact score:** {diff.impact_score:.4f} ({impact_label})")
+    impact_label = _SCORE_LABELS[diff_severity(diff)]
+    lines.append(f"- **{diff_headline(diff)}**")
+    lines.append(f"- **Impact score:** {diff.impact_score:.4f} ({impact_label}) — "
+                 f"{len(diff.dependents)} production "
+                 f"{'caller' if len(diff.dependents) == 1 else 'callers'} reached")
+    if diff.unknown_nodes:
+        lines.append(f"- **Risk unknown for {len(diff.unknown_nodes)} changed "
+                     f"{'node' if len(diff.unknown_nodes) == 1 else 'nodes'}:** "
+                     f"{diff.risk_reason}")
     lines.append(
         f"- {len(diff.added_nodes)} nodes added · "
         f"{len(diff.removed_nodes)} removed · "

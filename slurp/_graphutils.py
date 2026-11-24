@@ -22,6 +22,19 @@ import networkx as nx
 _RISK_HIGH_MIN = 6
 _RISK_MEDIUM_MIN = 2
 
+def _risk_band(dependents: int) -> str:
+    """HIGH / MEDIUM / LOW for a count of direct dependents.
+
+    The one place the bands are decided: explain, impact and diff all call it,
+    and it reads the constants when called, so changing them moves every band.
+    """
+    if dependents >= _RISK_HIGH_MIN:
+        return "HIGH"
+    if dependents >= _RISK_MEDIUM_MIN:
+        return "MEDIUM"
+    return "LOW"
+
+
 _TEST_MARKERS = ("tests/", "test_", "_test.", ".test.", ".spec.", "spec/")
 
 # Display name of every language `slurp index` reads, by file extension.

@@ -741,7 +741,14 @@ def build_diff_viz_graph(G_old, G_new, diff, hops) -> nx.DiGraph
 **`GraphDiff` dataclass:**
 - `added_nodes`, `removed_nodes`, `modified_nodes` — listas de node IDs
 - `added_edges`, `removed_edges` — listas de (source, target)
-- `impact_score` — float 0-1 basado en centralidad de nodos afectados
+- `impact_score` — `1 − e^(−D/k)`, D = llamadores de producción distintos de los nodos borrados
+  (grafo viejo) y de los nodos cuyo label/tipo/llamadas salientes cambiaron (grafo nuevo),
+  sin tests ni `contains`. k y las bandas se **derivan** de `_RISK_HIGH_MIN`/`_RISK_MEDIUM_MIN`
+  (leídas al llamar): diff, impact y explain dan la misma banda para el mismo D — lo fija
+  `TestBandsDerivedFromRiskConstants`, también cambiando las constantes. Hasta v1.0.7 era la
+  centralidad media (máx. ~0,03): borrar createAdminClient (97 llamadores) daba 0,0012 "low".
+  `dependents`, `unknown_nodes`, `risk_reason`: sin call graph, un "low" pasa a "unknown"
+  (`diff_severity`). Titular y color del panel del CLI salen de la misma banda.
 - `has_changes` — property bool
 
 **Colores en viz:** verde=added, rojo=removed, amarillo=modified, gris=unchanged

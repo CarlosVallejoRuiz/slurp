@@ -18,12 +18,11 @@ import networkx as nx
 
 from slurp.budget import count_tokens
 from slurp._graphutils import (
-    _RISK_HIGH_MIN,
-    _RISK_MEDIUM_MIN,
     _call_graph_gap,
     _callees,
     _display,
     _label,
+    _risk_band,
     _split_callers,
 )
 
@@ -458,12 +457,7 @@ def _risk_level(G: nx.DiGraph, node_id: str) -> str:
     if _call_graph_gap(G, node_id):
         return "UNKNOWN"
     production, tests = _split_callers(G, node_id)
-    dependents = len(production) + len(tests)
-    if dependents >= _RISK_HIGH_MIN:
-        return "HIGH"
-    if dependents >= _RISK_MEDIUM_MIN:
-        return "MEDIUM"
-    return "LOW"
+    return _risk_band(len(production) + len(tests))
 
 
 def _neighbors_within(G: nx.DiGraph, node_id: str, hops: int) -> list[tuple[str, int]]:

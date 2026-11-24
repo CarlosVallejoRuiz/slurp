@@ -13,12 +13,11 @@ from dataclasses import dataclass, field
 import networkx as nx
 
 from slurp._graphutils import (
-    _RISK_HIGH_MIN,
-    _RISK_MEDIUM_MIN,
     _box,
     _call_graph_gap,
     _display,
     _extensions_with_calls,
+    _risk_band,
     _split_callers,
 )
 
@@ -155,12 +154,7 @@ def analyze_impact(G: nx.DiGraph, file_path: str, hops: int = 2) -> ImpactResult
     if ranked:
         result.highest_risk_node = max(ranked, key=lambda n: (ranked[n], -len(n)))
 
-    total = len(direct)
-    result.risk_level = (
-        "HIGH" if total >= _RISK_HIGH_MIN
-        else "MEDIUM" if total >= _RISK_MEDIUM_MIN
-        else "LOW"
-    )
+    result.risk_level = _risk_band(len(direct))
 
     # Zero callers in a language slurp extracts no calls for is a gap in the
     # graph, not evidence of safety: say so, and declare nothing safe.

@@ -770,8 +770,14 @@ slurp diff old.json new.json --viz-output reports/impact.html
 | `--viz-output PATH` | — | Save visualization HTML to file (without opening browser). |
 | `--budget`, `-b` | none | Token budget; selects the most relevant nodes from the affected area. |
 
-Impact score is computed from the centrality of the changed nodes — changing a
-leaf scores near zero, changing a hub scores high. `--hops` controls how far the
+Impact score counts what could break: the distinct production callers of every
+deleted node, and of every node whose label, type or outgoing calls changed
+(tests and containing modules do not count). It is `1 − e^(−D/k)`, with the scale
+and bands derived from the same thresholds `slurp impact` and `slurp explain` use,
+so the three always agree: 6+ callers is high, 2–5 medium, 0–1 low. Deleting a
+function with 97 callers scores 1.00 (high); adding an uncalled one scores 0. If a
+changed node is in a language with no call graph, a low score is reported as
+**unknown** instead, with the reason, and the report lists the callers it counted. `--hops` controls how far the
 blast radius is traced; `--budget` narrows the affected area down to what fits a
 token budget, so you can hand exactly the relevant slice to a reviewer or an LLM.
 

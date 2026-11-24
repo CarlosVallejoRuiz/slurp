@@ -568,8 +568,13 @@ class TestImpactHeadline:
     def test_medium_between_point_two_and_point_five(self, score):
         assert impact_headline(score) == "⚡ Medium impact change"
 
-    @pytest.mark.parametrize("score", [0.0, 0.1, 0.19])
-    def test_low_below_point_two(self, score):
+    # The medium threshold is derived from the risk constants (~0.17 with the
+    # defaults, halfway between 1 and 2 dependents), so "low" is read from it.
+    @pytest.mark.parametrize("score", [0.0, 0.1, 0.16])
+    def test_low_below_the_medium_threshold(self, score):
+        from slurp.diff import _thresholds
+
+        assert score < _thresholds()[1]
         assert impact_headline(score) == "✅ Low impact change"
 
     def test_boundaries_are_inclusive(self):
@@ -580,7 +585,7 @@ class TestImpactHeadline:
 
 class TestImpactSeverity:
     @pytest.mark.parametrize("score,band", [
-        (0.0, "low"), (0.19, "low"),
+        (0.0, "low"), (0.16, "low"),
         (0.2, "medium"), (0.49, "medium"),
         (0.5, "high"), (1.0, "high"),
     ])
@@ -863,3 +868,145 @@ class TestDiffCLIPanel:
             "diff", str(old_graph_json), str(new_graph_json), "--hops", "3",
         ])
         assert "--hops 3" in result.output
+
+
+# ---------------------------------------------------------------------------
+# impact_score from the dependents a change reaches (v1.1.0)
+# ---------------------------------------------------------------------------
+
+def _hub_graph(callers: int, ext: str = ".ts") -> nx.DiGraph:
+    """`hub` in lib/hub{ext} with *callers* production callers in their own files."""
+    G = nx.DiGraph()
+    G.add_node("hub", label="hub", type="function", source_file=f"lib/hub{ext}")
+    G.add_node("leaf", label="leaf", type="function", source_file=f"lib/leaf{ext}")
+    for i in range(callers):
+        G.add_node(f"c{i}", label=f"caller{i}", type="function", source_file=f"app/p{i}{ext}")
+        G.add_edge(f"c{i}", "hub", relation="calls")
+    return G
+
+
+def _without(G: nx.DiGraph, node: str) -> nx.DiGraph:
+    H = G.copy()
+    H.remove_node(node)
+    return H
+
+
+class TestImpactFromDependents:
+    @pytest.mark.parametrize(("callers", "band"), [
+        (97, "high"), (6, "high"), (5, "medium"), (2, "medium"), (1, "low"), (0, "low"),
+    ])
+    def test_deleting_a_node_is_rated_by_its_callers(self, callers, band):
+        G = _hub_graph(callers)
+        d = diff_graphs(G, _without(G, "hub"))
+        assert len(d.dependents) == callers
+        assert impact_severity(d.impact_score) == band
+
+    def test_createadminclient_sized_deletion_is_high(self):
+        G = _hub_graph(97)
+        d = diff_graphs(G, _without(G, "hub"))
+        assert d.impact_score > 0.99 and impact_severity(d.impact_score) == "high"
+
+    def test_adding_an_uncalled_function_is_zero(self):
+        G = _hub_graph(3)
+        H = G.copy()
+        H.add_node("fresh", label="fresh", type="function", source_file="lib/fresh.ts")
+        assert diff_graphs(G, H).impact_score == 0.0
+
+    def test_a_caller_that_changes_what_it_calls_exposes_its_own_callers(self):
+        G = _hub_graph(0)
+        for i in range(6):
+            G.add_node(f"u{i}", label=f"user{i}", type="function", source_file=f"app/u{i}.ts")
+            G.add_edge(f"u{i}", "leaf", relation="calls")
+        H = G.copy()
+        H.add_edge("leaf", "hub", relation="calls")   # leaf now also calls hub
+        d = diff_graphs(G, H)
+        assert set(d.dependents) == {f"u{i}" for i in range(6)}
+        assert impact_severity(d.impact_score) == "high"
+
+    def test_test_callers_and_containing_modules_do_not_count(self):
+        G = _hub_graph(1)
+        G.add_node("t", label="test_hub", type="function", source_file="tests/test_hub.py")
+        G.add_edge("t", "hub", relation="calls")
+        G.add_node("mod", label="hub.ts", type="module", source_file="lib/hub.ts")
+        G.add_edge("mod", "hub", relation="contains")
+        assert diff_graphs(G, _without(G, "hub")).dependents == ["c0"]
+
+
+class TestBandsDerivedFromRiskConstants:
+    """diff, impact and explain rate the same dependent count the same way."""
+
+    @staticmethod
+    def _bands(d: int) -> tuple[str, str, str]:
+        from slurp.explainer import _risk_level
+        from slurp.impact import analyze_impact
+
+        G = _hub_graph(d)
+        diff_band = impact_severity(diff_graphs(G, _without(G, "hub")).impact_score).upper()
+        impact_band = analyze_impact(G, "lib/hub.ts").risk_level
+        explain_band = _risk_level(G, "hub")
+        return diff_band, impact_band, explain_band
+
+    @pytest.mark.parametrize("d", range(0, 16))
+    def test_same_band_everywhere(self, d):
+        diff_band, impact_band, explain_band = self._bands(d)
+        assert diff_band == impact_band == explain_band
+
+    def test_scale_follows_the_constants(self, monkeypatch):
+        import slurp._graphutils as gu
+
+        monkeypatch.setattr(gu, "_RISK_HIGH_MIN", 10)
+        monkeypatch.setattr(gu, "_RISK_MEDIUM_MIN", 4)
+        for d in (3, 4, 9, 10):
+            diff_band, impact_band, explain_band = self._bands(d)
+            assert diff_band == impact_band == explain_band, d
+        assert self._bands(9)[0] == "MEDIUM" and self._bands(10)[0] == "HIGH"
+
+
+class TestUnknownRiskInDiff:
+    def test_change_without_call_graph_is_unknown_not_low(self):
+        from slurp.diff import diff_severity
+
+        G = _hub_graph(0, ext=".cs")
+        d = diff_graphs(G, _without(G, "hub"))
+        assert d.unknown_nodes == ["hub"]
+        assert diff_severity(d) == "unknown"
+        assert "C#" in d.risk_reason
+
+    def test_known_high_risk_stays_high_and_mentions_the_unknown(self):
+        from slurp.diff import diff_severity
+
+        G = _hub_graph(8)                                   # TS hub with 8 callers
+        G.add_node("cs", label="Billing", type="class", source_file="src/Billing.cs")
+        H = _without(_without(G, "hub"), "cs")
+        d = diff_graphs(G, H)
+        assert diff_severity(d) == "high"
+        out = format_diff(d, H)
+        assert "unknown" in out.lower() and "C#" in out
+
+    def test_report_and_cli_panel_say_unknown(self, tmp_path):
+        import json as _json
+
+        from click.testing import CliRunner
+
+        from slurp.cli import cli
+
+        G = _hub_graph(0, ext=".cs")
+        old, new = tmp_path / "old.json", tmp_path / "new.json"
+        old.write_text(_json.dumps(nx.node_link_data(G, edges="links")))
+        new.write_text(_json.dumps(nx.node_link_data(_without(G, "hub"), edges="links")))
+        res = CliRunner().invoke(cli, ["diff", str(old), str(new)])
+        assert res.exit_code == 0, res.output
+        assert "Low impact" not in res.output
+        assert "unknown" in res.output.lower()
+
+
+class TestCliPanelMatchesHeadline:
+    @pytest.mark.parametrize(("callers", "border"), [(10, "red"), (3, "yellow"), (0, "green")])
+    def test_colour_and_headline_share_one_band(self, callers, border):
+        from slurp.cli import _build_diff_panel
+
+        G = _hub_graph(callers)
+        d = diff_graphs(G, _without(G, "hub"))
+        panel = _build_diff_panel(d, "old.json", "new.json", 2, suggest_viz=False)
+        assert panel.border_style == border
+        assert impact_headline(d.impact_score) in panel.renderable

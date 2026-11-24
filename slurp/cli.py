@@ -689,17 +689,19 @@ def _build_diff_panel(
         hops: Neighborhood depth the report was run with.
         suggest_viz: Whether to append the --viz suggestion.
     """
-    from slurp.diff import impact_headline
+    from slurp.diff import diff_headline, diff_severity
 
-    if diff.impact_score > 0.7:
-        colour, border = "bold red", "red"
-    elif diff.impact_score > 0.3:
-        colour, border = "bold yellow", "yellow"
-    else:
-        colour, border = "bold green", "green"
+    # One band decides both the headline and the colour: they used different
+    # thresholds (0.5/0.2 vs 0.7/0.3) and could disagree on the same score.
+    colour, border = {
+        "high": ("bold red", "red"),
+        "medium": ("bold yellow", "yellow"),
+        "low": ("bold green", "green"),
+        "unknown": ("bold magenta", "magenta"),
+    }[diff_severity(diff)]
 
     body = [
-        f"[{colour}]{impact_headline(diff.impact_score)}[/]  "
+        f"[{colour}]{diff_headline(diff)}[/]  "
         f"[dim](impact score {diff.impact_score:.4f})[/]",
         "",
         f"[green]+{len(diff.added_nodes)} added[/]  "

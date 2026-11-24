@@ -14,9 +14,9 @@ from dataclasses import dataclass, field
 import networkx as nx
 
 from slurp._graphutils import (
-    _RISK_HIGH_MIN,
     _display,
     _is_test,
+    _risk_band,
     _split_callers,
     _tokenize,
 )
@@ -198,7 +198,7 @@ def _risk_exploration(G, frontier) -> SuggestedQuery | None:
     for node in frontier:
         production, tests = _split_callers(G, node)
         dependents = len(production) + len(tests)
-        if dependents >= _RISK_HIGH_MIN and dependents > highest:
+        if _risk_band(dependents) == "HIGH" and dependents > highest:
             riskiest, highest = node, dependents
     if not riskiest:
         return None
