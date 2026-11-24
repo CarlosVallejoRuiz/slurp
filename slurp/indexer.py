@@ -7163,8 +7163,18 @@ def _assemble_graph(
         unique_nodes, filtered_edges, _build_ts_symbol_index(unique_nodes)
     )
 
+    # DECISION: _-prefixed attributes (_imported_symbols, _source_module,
+    # _go_alias, _java_import, _rust_symbols, _pending_symbol…) are resolution
+    # scratch space. The resolvers above are their last readers, so nothing
+    # private reaches graph.json — they used to survive on TS, JS, Go, Java and
+    # Rust import nodes, contradicting the invariant documented in CLAUDE.md.
     return {
-        "nodes": unique_nodes,
-        "links": filtered_edges,
+        "nodes": [_public(n) for n in unique_nodes],
+        "links": [_public(e) for e in filtered_edges],
         "built_at_commit": None,
     }
+
+
+def _public(record: dict) -> dict:
+    """*record* without its private, underscore-prefixed keys."""
+    return {k: v for k, v in record.items() if not k.startswith("_")}

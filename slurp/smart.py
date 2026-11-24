@@ -206,9 +206,15 @@ def _reindex_files(
 
 
 def _symbols(nodes: list[dict]) -> list[str]:
-    """Every node, minus positional attributes, in a comparable form."""
+    """Every node, minus positional and private attributes, comparably.
+
+    Private keys are resolution metadata a fresh parse carries and the written
+    graph does not; they only steer the resolution of their own file, which
+    the incremental path redoes anyway.
+    """
     return sorted(
-        json.dumps({k: v for k, v in n.items() if k not in _POSITIONAL_ATTRS},
+        json.dumps({k: v for k, v in n.items()
+                    if k not in _POSITIONAL_ATTRS and not k.startswith("_")},
                    sort_keys=True, default=str)
         for n in nodes
     )
@@ -298,6 +304,10 @@ def smart_reindex(
 
     modified = sorted(changed)
     new_nodes, new_edges, parse_ms = _reindex_files([on_disk[k] for k in modified], root)
+    # A single parse can emit one id twice (two imports of the same module);
+    # the assembled graph keeps the first, so compare against that.
+    seen: set[str] = set()
+    new_nodes = [n for n in new_nodes if not (n["id"] in seen or seen.add(n["id"]))]
     if ignore is not None:
         new_nodes = [n for n in new_nodes if not ignore.should_ignore(n, n["id"])]
 

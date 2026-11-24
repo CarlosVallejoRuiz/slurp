@@ -3584,17 +3584,17 @@ class TestTSCrossFileCallResolution:
 
     @pytest.mark.skipif(not _TREE_SITTER_AVAILABLE, reason="requires the 'ts' extra")
     def test_import_node_records_symbol_metadata(self, tmp_path, monkeypatch):
-        graph = self._project(tmp_path, {
+        # The metadata lives on the per-file parse, where the resolvers read it;
+        # the assembled graph drops it (see TestNoPrivateAttributesInOutput).
+        self._project(tmp_path, {
             "lib/admin.ts": "export function createAdminClient() { return {}; }\n",
             "actions.ts": (
                 "import { createAdminClient, requireAdmin } from './lib/admin';\n"
                 "export function load() { return createAdminClient(); }\n"
             ),
         }, tree_sitter=True, monkeypatch=monkeypatch)
-        node = next(
-            n for n in graph["nodes"]
-            if n["type"] == "import" and n["source_file"].endswith("actions.ts")
-        )
+        nodes, _ = indexer_mod.index_typescript(tmp_path / "actions.ts", tmp_path)
+        node = next(n for n in nodes if n["type"] == "import")
         assert node[indexer_mod._TS_IMPORTED_SYMBOLS] == [
             "createAdminClient", "requireAdmin"
         ]
@@ -5636,3 +5636,84 @@ class TestVendoredAndMinifiedAreSkipped:
         graph = index_project(_SLURP_PACKAGE)
         sources = {n.get("source_file", "") for n in graph["nodes"]}
         assert not [s for s in sources if "_vendor" in s or s.endswith(".min.js")]
+
+
+# ---------------------------------------------------------------------------
+# No private (_-prefixed) attribute survives into the written graph
+# ---------------------------------------------------------------------------
+
+# Every language, each with the import forms whose resolver keeps metadata on
+# the import node (_imported_symbols, _go_alias, _java_import, _rust_symbols…).
+_ALL_LANGUAGES = {
+    "py/util.py": "def helper():\n    return 1\n",
+    "py/app.py": "from py.util import helper\n\ndef main():\n    return helper()\n",
+    "web/client.ts": "export function send(): number { return 1 }\n",
+    "web/use.ts": 'import { send } from "./client"\nimport * as ns from "./client"\n'
+                  "export function boot(): number { return send() + ns.send() }\n",
+    "web/a.js": 'import { send } from "./client"\nexport function x() { return send() }\n',
+    "go.mod": "module example.com/m\n\ngo 1.22\n",
+    "auth/auth.go": "package auth\n\nfunc Login() int { return 1 }\n",
+    "cmd/main.go": 'package main\n\nimport (\n\t"example.com/m/auth"\n\tal "example.com/m/auth"\n)\n\n'
+                   "func run() int { return auth.Login() + al.Login() }\n",
+    "java/com/a/Gw.java": "package com.a;\npublic class Gw { public void charge() {} }\n",
+    "java/com/b/Use.java": "package com.b;\nimport com.a.Gw;\nimport com.a.*;\n"
+                           "public class Use { void run(Gw g) { g.charge(); } }\n",
+    "rs/src/lib.rs": "pub mod pay;\nuse crate::pay::Engine;\npub fn run() { Engine::new(); }\n",
+    "rs/src/pay.rs": "pub struct Engine;\nimpl Engine { pub fn new() -> Self { Engine } }\n",
+    "cs/A.cs": "using System;\nclass A { void Run() {} }\n",
+    "rb/a.rb": "require 'json'\ndef run\nend\n",
+    "php/a.php": "<?php\nuse Foo\\Bar;\nfunction run() {}\n",
+    "kt/a.kt": "import foo.Bar\nfun run() {}\n",
+    "sc/a.scala": "import foo.Bar\nobject A { def run() = 1 }\n",
+    "sw/a.swift": "import Foundation\nfunc run() {}\n",
+    "c/a.c": "#include <stdio.h>\nint run(void) { return 1; }\n",
+    "cpp/a.cpp": "#include <vector>\nint run() { return 1; }\n",
+    "lua/a.lua": "local m = require('m')\nfunction run() end\n",
+    "ex/a.ex": "defmodule A do\n  alias Foo.Bar\n  def run, do: 1\nend\n",
+    "ps/a.ps1": "Import-Module Foo\nfunction Invoke-Run { 1 }\n",
+}
+
+
+def _private_keys(graph: dict) -> set[str]:
+    return ({k for n in graph["nodes"] for k in n if k.startswith("_")}
+            | {k for e in graph["links"] for k in e if k.startswith("_")})
+
+
+class TestNoPrivateAttributesInOutput:
+    @pytest.fixture
+    def polyglot(self, tmp_path):
+        root = tmp_path / "poly"
+        for rel, text in _ALL_LANGUAGES.items():
+            path = root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        return root
+
+    def test_index_project_output_has_no_private_keys(self, polyglot):
+        graph = index_project(polyglot)
+        assert _private_keys(graph) == set()
+        # Resolution still happened before the metadata was dropped.
+        assert sum(1 for e in graph["links"] if e["relation"] == "calls") >= 5
+
+    def test_cli_output_has_no_private_keys(self, polyglot, tmp_path):
+        out = tmp_path / "graph.json"
+        res = CliRunner().invoke(cli, ["index", str(polyglot), "-o", str(out),
+                                       "--ignore-file", "/dev/null"])
+        assert res.exit_code == 0, res.output
+        assert _private_keys(json.loads(out.read_text())) == set()
+
+    def test_smart_fast_path_output_has_no_private_keys(self, polyglot, tmp_path):
+        import subprocess
+
+        for args in (["init", "-q"], ["config", "user.email", "t@t"],
+                     ["config", "user.name", "t"], ["add", "-A"], ["commit", "-qm", "x"]):
+            subprocess.run(["git", "-C", str(polyglot), *args], check=True, capture_output=True)
+        out = tmp_path / "graph.json"
+        base = ["index", str(polyglot), "-o", str(out), "--ignore-file", "/dev/null"]
+        assert CliRunner().invoke(cli, base).exit_code == 0
+        use = polyglot / "web" / "use.ts"
+        use.write_text(use.read_text().replace("send() + ns.send()", "ns.send() + send()"))
+        res = CliRunner().invoke(cli, [*base, "--smart"])
+        assert res.exit_code == 0, res.output
+        assert "Full index needed" not in res.output  # the fast path ran
+        assert _private_keys(json.loads(out.read_text())) == set()

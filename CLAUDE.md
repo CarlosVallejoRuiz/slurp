@@ -133,6 +133,10 @@ uv sync --extra rust            # solo una
     `_pending_symbol`; `index_project()` lo reescribe al destino real o lo
     descarta. En el grafo terminado no sobrevive ninguna clave privada ni
     ningún edge `calls` hacia un nodo import.
+    - **Garantizado en `_assemble_graph()`**: tras los cinco resolutores se
+      quitan todos los atributos `_…` de nodos y edges. Hasta v1.0.7 sobrevivían
+      en los nodos import de TS/JS, Go, Java y Rust. Lo vigila
+      `TestNoPrivateAttributesInOutput` con los 16 lenguajes.
     - El id del nodo import usa el **scope actual**, no el módulo: un import
       perezoso dentro de una función vive en `cli.run.import_...`. Anclarlo al
       módulo hace que todos los edges apunten a nodos inexistentes y el filtro
