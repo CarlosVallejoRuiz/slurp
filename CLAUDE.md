@@ -428,6 +428,15 @@ uv sync --extra rust            # solo una
     entra en el radio externo, pero tampoco es SAFE TO EDIT. Son dos preguntas
     distintas y la primera versión las confundía: `recalcularPlayerStats()`
     salía como segura teniendo 3 llamadores.
+  - **Sin call graph, el riesgo es `UNKNOWN`, nunca `LOW`.** En los 11 lenguajes
+    sin edges `calls`, cero llamadores es un hueco del grafo: decía "SAFE TO EDIT"
+    de todo fichero C#. `_graphutils._call_graph_gap()` es la única fuente: hay
+    call graph si la extensión está en `_CALL_GRAPH_EXTENSIONS` (las 5 que extrae
+    slurp) **o** si el grafo trae algún `calls` para esa extensión (graphify los
+    extrae para cualquier lenguaje). Con hueco: `risk_level="UNKNOWN"` +
+    `risk_reason`, `safe_nodes` vacío, y en `explain` el rol, la prosa y
+    ARCHITECTURE dicen "unknown" en vez de "isolated"/"nothing"; el contexto del
+    LLM lleva una NOTE para que no lo describa como código muerto.
   - Rutas por **sufijo normalizado**, con la coincidencia exacta ganando
     siempre, para que un `vendor/lib/core.py` no secuestre la consulta.
   - **Un fichero desconocido no es un error**: resultado vacío, exit 0 y un

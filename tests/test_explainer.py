@@ -929,3 +929,59 @@ class TestStructuralOutputSize:
     def test_long_caller_list_is_truncated_with_a_count(self):
         out = format_explanation(explain_node(_call_graph(callers=40), "target"))
         assert "more" in out
+
+
+# ---------------------------------------------------------------------------
+# A language with no call graph: no callers means "unknown", never "unused"
+# ---------------------------------------------------------------------------
+
+def _csharp_graph() -> nx.DiGraph:
+    G = nx.DiGraph()
+    G.add_node("mod", label="Billing.cs", type="module", source_file="src/Billing.cs")
+    G.add_node("run", label="Run", type="function", source_file="src/Billing.cs")
+    G.add_edge("mod", "run", relation="contains")
+    return G
+
+
+class TestExplainWithoutCallGraph:
+    def test_risk_is_unknown(self):
+        result = explain_node(_csharp_graph(), "run")
+        assert result.risk_level == "UNKNOWN"
+        assert "C#" in result.risk_reason
+
+    def test_no_claim_that_nothing_depends_on_it(self):
+        text = format_explanation(explain_node(_csharp_graph(), "run"))
+        assert "RISK IF CHANGED: UNKNOWN" in text
+        assert "Nothing in the project depends on" not in text
+        assert "Safe to refactor" not in text
+        assert "C#" in text
+
+    def test_structural_prose_does_not_call_it_unused(self):
+        text = format_explanation(explain_node(_csharp_graph(), "run"))
+        assert "unused" not in text
+        assert "Isolated" not in text
+        assert "nothing calls it" not in text.lower()
+
+    def test_llm_context_says_unknown_not_absent(self):
+        context = _build_context(_csharp_graph(), "run", {}, hops=2)
+        assert "unknown" in context.lower()
+        assert "risk LOW" not in context
+
+    def test_call_graph_language_unchanged(self):
+        G = nx.DiGraph()
+        G.add_node("m", label="core.py", type="module", source_file="lib/core.py")
+        G.add_node("f", label="helper", type="function", source_file="lib/core.py")
+        G.add_edge("m", "f", relation="contains")
+        result = explain_node(G, "f")
+        assert result.risk_level == "LOW"
+        assert result.risk_reason == ""
+
+    def test_architecture_lists_are_unknown_not_empty(self):
+        text = format_explanation(explain_node(_csharp_graph(), "run"))
+        assert "Called by: nothing" not in text
+        assert "Calls: nothing" not in text
+        assert "Called by: unknown" in text
+
+    def test_reason_is_stated_once(self):
+        text = format_explanation(explain_node(_csharp_graph(), "run"))
+        assert text.count("slurp extracts calls only for") == 1

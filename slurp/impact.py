@@ -16,7 +16,9 @@ from slurp._graphutils import (
     _RISK_HIGH_MIN,
     _RISK_MEDIUM_MIN,
     _box,
+    _call_graph_gap,
     _display,
+    _extensions_with_calls,
     _split_callers,
 )
 
@@ -40,6 +42,9 @@ class ImpactResult:
     # question: not only what is dangerous, but what is free to touch.
     safe_nodes: list[str] = field(default_factory=list)
     dependents_per_node: dict[str, int] = field(default_factory=dict)
+    # Set when the file's language has no call graph: risk_level is then
+    # "UNKNOWN" and nothing is listed as safe.
+    risk_reason: str = ""
 
 
 def _source_of(G: nx.DiGraph, node: str) -> str:
@@ -157,6 +162,15 @@ def analyze_impact(G: nx.DiGraph, file_path: str, hops: int = 2) -> ImpactResult
         else "LOW"
     )
 
+    # Zero callers in a language slurp extracts no calls for is a gap in the
+    # graph, not evidence of safety: say so, and declare nothing safe.
+    with_calls = _extensions_with_calls(G)
+    gap = next((g for g in (_call_graph_gap(G, n, with_calls) for n in owned) if g), "")
+    if gap:
+        result.risk_level = "UNKNOWN"
+        result.risk_reason = gap
+        result.safe_nodes = []
+
     files = {
         _source_of(G, n) for n in direct | reached
         if _source_of(G, n) and _normalise(_source_of(G, n)) != _normalise(file_path)
@@ -183,6 +197,9 @@ def _file_counts(G: nx.DiGraph, dependents: list[str]) -> list[tuple[str, int]]:
 
 def _recommendation(result: ImpactResult) -> str:
     total = len(result.direct_dependents)
+    if result.risk_level == "UNKNOWN":
+        return ("Search the code for usages of these definitions before editing — "
+                "the graph cannot show who calls them.")
     if result.risk_level == "HIGH":
         return (f"Add integration tests before editing. {total} nodes depend on "
                 f"functions in this file.")
@@ -234,6 +251,11 @@ def format_impact(result: ImpactResult, G: nx.DiGraph, width: int = 69) -> str:
             lines.append(f"  … and {len(counts) - _TOP_FILES} more files")
         lines.append("")
 
+    if result.risk_reason:
+        lines.append("RISK UNKNOWN")
+        lines.append(f"  {result.risk_reason[0].upper()}{result.risk_reason[1:]}.")
+        lines.append("")
+
     if result.safe_nodes:
         shown = [_display(G, n) for n in result.safe_nodes[:_SAFE_LISTED]]
         extra = len(result.safe_nodes) - len(shown)
@@ -260,6 +282,7 @@ def impact_to_dict(result: ImpactResult) -> dict:
     return {
         "file_path": result.file_path,
         "risk_level": result.risk_level,
+        "risk_reason": result.risk_reason,
         "impact_score": result.impact_score,
         "nodes_in_file": result.nodes_in_file,
         "direct_dependents": result.direct_dependents,

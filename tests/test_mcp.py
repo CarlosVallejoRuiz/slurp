@@ -1189,3 +1189,31 @@ class TestImpactTool:
             None,
         )
         assert resp["error"]["code"] == -32603
+
+
+class TestUnknownRiskOverMcp:
+    """slurp_impact and slurp_explain on a language with no call graph."""
+
+    @staticmethod
+    def _csharp() -> nx.DiGraph:
+        G = nx.DiGraph()
+        G.add_node("mod", label="Billing.cs", type="module", source_file="src/Billing.cs")
+        G.add_node("run", label="Run", type="function", source_file="src/Billing.cs")
+        G.add_edge("mod", "run", relation="contains")
+        return G
+
+    def test_impact_says_unknown(self):
+        resp = _invoke(_req("tools/call", {"name": "slurp_impact",
+                                           "arguments": {"file_path": "src/Billing.cs"}}),
+                       self._csharp())
+        text = resp["result"]["content"][0]["text"]
+        assert "RISK: UNKNOWN" in text
+        assert "SAFE TO EDIT" not in text
+
+    def test_explain_says_unknown(self):
+        resp = _invoke(_req("tools/call", {"name": "slurp_explain",
+                                           "arguments": {"node_name": "run"}}),
+                       self._csharp())
+        text = resp["result"]["content"][0]["text"]
+        assert "RISK IF CHANGED: UNKNOWN" in text
+        assert "Nothing in the project depends on" not in text

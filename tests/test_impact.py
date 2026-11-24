@@ -251,3 +251,76 @@ class TestImpactCommand:
             cli, ["impact", "nope.py", "--graph", str(self._graph_file(tmp_path))])
         assert res.exit_code == 0
         assert "No nodes found" in res.output
+
+
+# ---------------------------------------------------------------------------
+# A language with no call graph: zero callers means "unknown", never "safe"
+# ---------------------------------------------------------------------------
+
+def _no_call_graph(ext: str = ".cs") -> nx.DiGraph:
+    """What `slurp index` builds for C#: contains edges, no calls at all."""
+    G = nx.DiGraph()
+    src = f"src/Billing{ext}"
+    _add(G, "mod", f"Billing{ext}", src, ntype="module")
+    _add(G, "cls", "Billing", src, ntype="class")
+    _add(G, "run", "Run", src)
+    _add(G, "helper", "Helper", src)
+    for child in ("cls", "run", "helper"):
+        G.add_edge("mod", child, relation="contains")
+    return G
+
+
+class TestUnknownRiskWithoutCallGraph:
+    def test_risk_is_unknown_not_low(self):
+        result = analyze_impact(_no_call_graph(), "src/Billing.cs")
+        assert result.risk_level == "UNKNOWN"
+        assert "C#" in result.risk_reason
+
+    def test_nothing_is_declared_safe(self):
+        result = analyze_impact(_no_call_graph(), "src/Billing.cs")
+        assert result.safe_nodes == []
+
+    def test_report_explains_instead_of_reassuring(self):
+        G = _no_call_graph()
+        text = format_impact(analyze_impact(G, "src/Billing.cs"), G)
+        assert "RISK: UNKNOWN" in text
+        assert "SAFE TO EDIT" not in text
+        assert "Safe to edit" not in text
+        assert "C#" in text and "calls" in text
+
+    def test_json_reports_unknown_for_ci(self):
+        data = impact_to_dict(analyze_impact(_no_call_graph(), "src/Billing.cs"))
+        assert data["risk_level"] == "UNKNOWN"
+        assert data["risk_reason"]
+        assert data["safe_nodes"] == []
+
+    def test_every_language_without_calls_is_covered(self):
+        for ext in (".rb", ".php", ".kt", ".scala", ".swift", ".c", ".cpp", ".lua",
+                    ".ex", ".ps1"):
+            G = _no_call_graph(ext)
+            assert analyze_impact(G, f"src/Billing{ext}").risk_level == "UNKNOWN", ext
+
+    def test_call_graph_language_with_no_callers_is_still_safe(self):
+        # Python has a call graph: an uncalled function really is uncalled.
+        result = analyze_impact(_graph(dependents=0), TARGET)
+        assert result.risk_level == "LOW"
+        assert result.risk_reason == ""
+        assert "cold" in result.safe_nodes
+
+    def test_calls_from_another_tool_make_the_risk_known(self):
+        # graphify extracts calls for any language; then the risk can be rated.
+        G = _no_call_graph()
+        _add(G, "caller", "Checkout", "src/Checkout.cs")
+        G.add_edge("caller", "run", relation="calls")
+        result = analyze_impact(G, "src/Billing.cs")
+        assert result.risk_level == "LOW"
+        assert result.risk_reason == ""
+
+    def test_cli_json_output(self, tmp_path):
+        G = _no_call_graph()
+        path = tmp_path / "graph.json"
+        path.write_text(json.dumps(nx.node_link_data(G, edges="links")), encoding="utf-8")
+        res = CliRunner().invoke(cli, ["impact", "src/Billing.cs", "--graph", str(path),
+                                       "--output", "json"])
+        assert res.exit_code == 0, res.output
+        assert json.loads(res.output)["risk_level"] == "UNKNOWN"

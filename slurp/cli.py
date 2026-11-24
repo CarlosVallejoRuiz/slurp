@@ -14,6 +14,7 @@ from rich.table import Table
 from rich.text import Text
 
 from slurp import __version__
+from slurp._graphutils import _LANGUAGE_BY_EXT
 from slurp.audit import log_query, read_audit, top_nodes_from_audit
 # Imported at module level because the --price-model choices are built at decoration time.
 from slurp.benchmark import MODEL_PRICES_PER_MTok
@@ -152,36 +153,6 @@ def _deliver_viz(html: str, viz: bool, viz_output: str | None) -> None:
         webbrowser.open(target.resolve().as_uri())
 
 
-_LANGUAGE_BY_EXT: dict[str, str] = {
-    ".py": "Python",
-    ".ts": "TypeScript",
-    ".tsx": "TypeScript",
-    ".js": "JavaScript",
-    ".jsx": "JavaScript",
-    ".go": "Go",
-    ".java": "Java",
-    ".rs": "Rust",
-    ".cs": "C#",
-    ".rb": "Ruby",
-    ".php": "PHP",
-    ".kt": "Kotlin",
-    ".kts": "Kotlin",
-    ".scala": "Scala",
-    ".swift": "Swift",
-    ".c": "C",
-    ".h": "C",
-    ".cpp": "C++",
-    ".cc": "C++",
-    ".cxx": "C++",
-    ".hpp": "C++",
-    ".hh": "C++",
-    ".hxx": "C++",
-    ".lua": "Lua",
-    ".ex": "Elixir",
-    ".exs": "Elixir",
-    ".ps1": "PowerShell",
-    ".psm1": "PowerShell",
-}
 
 
 def _detect_language(root: Path) -> tuple[str | None, dict[str, int]]:

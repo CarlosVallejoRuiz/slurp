@@ -24,6 +24,44 @@ _RISK_MEDIUM_MIN = 2
 
 _TEST_MARKERS = ("tests/", "test_", "_test.", ".test.", ".spec.", "spec/")
 
+# Display name of every language `slurp index` reads, by file extension.
+_LANGUAGE_BY_EXT: dict[str, str] = {
+    ".py": "Python",
+    ".ts": "TypeScript",
+    ".tsx": "TypeScript",
+    ".js": "JavaScript",
+    ".jsx": "JavaScript",
+    ".go": "Go",
+    ".java": "Java",
+    ".rs": "Rust",
+    ".cs": "C#",
+    ".rb": "Ruby",
+    ".php": "PHP",
+    ".kt": "Kotlin",
+    ".kts": "Kotlin",
+    ".scala": "Scala",
+    ".swift": "Swift",
+    ".c": "C",
+    ".h": "C",
+    ".cpp": "C++",
+    ".cc": "C++",
+    ".cxx": "C++",
+    ".hpp": "C++",
+    ".hh": "C++",
+    ".hxx": "C++",
+    ".lua": "Lua",
+    ".ex": "Elixir",
+    ".exs": "Elixir",
+    ".ps1": "PowerShell",
+    ".psm1": "PowerShell",
+}
+
+# DECISION: the extensions slurp's own indexer extracts `calls` edges for. The
+# other eleven languages get `contains` and imports only, so an empty caller
+# list there means "unknown", never "unused" — reporting it as SAFE TO EDIT
+# would turn a gap in the graph into a reassurance.
+_CALL_GRAPH_EXTENSIONS = frozenset({".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".java", ".rs"})
+
 
 def _tokenize(text: str) -> list[str]:
     """Splits text into tokens handling snake_case, camelCase, and PascalCase.
@@ -113,3 +151,47 @@ def _box(title: str, subtitle: str) -> str:
     mid = f"│ {subtitle}{' ' * sub_spaces} │"
     bot = "╰" + "─" * (total_w - 2) + "╯"
     return "\n".join([top, mid, bot])
+
+
+def _extension(G: nx.DiGraph, node_id: str) -> str:
+    attrs = G.nodes.get(node_id, {})
+    source = str(attrs.get("source_file") or attrs.get("file_path") or "")
+    name = source.replace("\\", "/").rsplit("/", 1)[-1]
+    return "." + name.rsplit(".", 1)[-1].lower() if "." in name else ""
+
+
+def _extensions_with_calls(G: nx.DiGraph) -> set[str]:
+    """Extensions of every file that takes part in at least one `calls` edge."""
+    found: set[str] = set()
+    for u, v, relation in G.edges(data="relation"):
+        if relation == "calls":
+            found.update(e for e in (_extension(G, u), _extension(G, v)) if e)
+    return found
+
+
+def _call_graph_gap(G: nx.DiGraph, node_id: str,
+                    with_calls: set[str] | None = None) -> str:
+    """Why this graph cannot say who calls *node_id*, or "" when it can.
+
+    A node is covered when slurp extracts calls for its language, or when the
+    graph holds calls for that language anyway — graphify extracts them with
+    an LLM for any language. Nodes without a source file are left alone.
+
+    Args:
+        G: The graph.
+        node_id: The node in question.
+        with_calls: Precomputed _extensions_with_calls(G), for callers that ask
+            about many nodes of the same graph.
+
+    Returns:
+        A sentence fragment explaining the gap, or "".
+    """
+    ext = _extension(G, node_id)
+    if not ext or ext in _CALL_GRAPH_EXTENSIONS:
+        return ""
+    if ext in (_extensions_with_calls(G) if with_calls is None else with_calls):
+        return ""
+    language = _LANGUAGE_BY_EXT.get(ext, f"{ext} files")
+    return (f"the graph has no call edges for {language} — slurp extracts calls only "
+            "for Python, TypeScript/JavaScript, Go, Java and Rust — so who calls "
+            "this code is unknown")

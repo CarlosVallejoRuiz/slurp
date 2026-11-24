@@ -833,6 +833,15 @@ A **SAFE TO EDIT** block lists the definitions in the file that nothing depends 
 the other half of the question. A node called only from inside the same file is not listed
 there: contained is not the same as safe.
 
+**Risk is `UNKNOWN` when the file's language has no call graph.** slurp extracts calls
+for Python, TypeScript/JavaScript, Go, Java and Rust; the other eleven languages get
+definitions and imports only, so zero callers there means "not in the graph", not
+"nobody calls it". `slurp impact` then reports `RISK: UNKNOWN` with the reason, lists
+nothing as safe, and `--output json` carries `"risk_level": "UNKNOWN"` plus a
+`risk_reason` — gate on it as you would on `HIGH`. A graph whose `calls` edges cover
+that language (graphify extracts them for any language) is rated as usual. `slurp
+explain` and the MCP tools `slurp_impact` and `slurp_explain` say the same.
+
 | Flag | Default | Description |
 |---|---|---|
 | `--hops` | `2` | How far to follow dependants outward. |

@@ -20,6 +20,7 @@ from slurp.budget import count_tokens
 from slurp._graphutils import (
     _RISK_HIGH_MIN,
     _RISK_MEDIUM_MIN,
+    _call_graph_gap,
     _callees,
     _display,
     _label,
@@ -106,6 +107,8 @@ class ExplainResult:
     dependents_pct: float = 0.0
     advice: str = ""
     explore: list[str] = field(default_factory=list)
+    # Set when the node's language has no call graph: risk_level is "UNKNOWN".
+    risk_reason: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +373,11 @@ def _architectural_role(G: nx.DiGraph, node_id: str) -> str:
     production, _tests = _split_callers(G, node_id)
     callees = _callees(G, node_id)
 
+    # Every role below is read off calls. Without a call graph, "isolated" or
+    # "entry point" would be a claim the graph cannot back.
+    if ntype != "module" and _call_graph_gap(G, node_id):
+        return "Role unknown — no call graph for this language"
+
     if ntype == "module":
         held = sum(1 for _, t in G.out_edges(node_id)
                    if G.edges[node_id, t].get("relation") == "contains")
@@ -402,6 +410,9 @@ def _dependents_share(G: nx.DiGraph, node_id: str) -> float:
 
 def _risk_advice(G: nx.DiGraph, node_id: str, risk: str) -> str:
     """What to actually do about the risk, in one line."""
+    if risk == "UNKNOWN":
+        return ("Search the code for its usages before changing it — the graph "
+                "cannot show who calls it.")
     if risk == "HIGH":
         return "Add tests covering the current behaviour before modifying."
     if risk == "MEDIUM":
@@ -441,8 +452,11 @@ def _risk_level(G: nx.DiGraph, node_id: str) -> str:
     real count, pushing a single-caller helper up to MEDIUM.
 
     Returns:
-        "HIGH" (6+ dependents), "MEDIUM" (2–5), or "LOW" (0–1).
+        "HIGH" (6+ dependents), "MEDIUM" (2–5), "LOW" (0–1), or "UNKNOWN" when
+        the node's language has no call graph and its callers cannot be known.
     """
+    if _call_graph_gap(G, node_id):
+        return "UNKNOWN"
     production, tests = _split_callers(G, node_id)
     dependents = len(production) + len(tests)
     if dependents >= _RISK_HIGH_MIN:
@@ -518,6 +532,10 @@ def _build_context(
     # writing "4 direct dependents" above a RISK line that said 3.
     production, tests = _split_callers(G, node_id)
     callers = production + tests
+    if gap := _call_graph_gap(G, node_id):
+        lines.append("")
+        lines.append(f"NOTE: {gap}. The caller and callee lists below are unknown, "
+                     "not empty — do not describe this code as unused.")
     lines.append("")
     lines.append(f"CALLED BY ({len(callers)}):")
     if callers:
@@ -638,6 +656,8 @@ def _explain_structural(
             f"Only tests call it ({len(tests)}), so nothing in the shipped "
             "code depends on it yet."
         )
+    elif _call_graph_gap(G, node_id):
+        pass  # the role sentence says it; RISK IF CHANGED gives the reason
     else:
         sentences.append(
             "Nothing in the graph references it, so it is either an entry point "
@@ -933,6 +953,7 @@ def explain_node(
     result.test_callers = len(tests)
     result.production_callers = len(production)
     result.dependents_pct = _dependents_share(G, node_id)
+    result.risk_reason = _call_graph_gap(G, node_id)
     result.advice = _risk_advice(G, node_id, result.risk_level)
     result.explore = _explore_further(G, node_id, result.risk_level)
 
@@ -1016,11 +1037,16 @@ def format_explanation(result: ExplainResult, width: int = 69) -> str:
     # and printing them turned a explanation into ninety lines of test names
     # that buried every other section.
     lines.append("ARCHITECTURE")
-    shown = result.callers[:_ARCH_LIST_MAX]
-    extra = len(result.callers) - len(shown)
-    lines.extend(_wrap_list(
-        shown + ([f"+{extra} more"] if extra > 0 else []), "→ Called by: "))
-    lines.extend(_wrap_list(result.callees[:_ARCH_LIST_MAX], "← Calls: "))
+    if result.risk_reason:
+        # Empty lists here are a gap in the graph, not an absence of calls.
+        lines.append("→ Called by: unknown — no call graph for this language")
+        lines.append("← Calls: unknown")
+    else:
+        shown = result.callers[:_ARCH_LIST_MAX]
+        extra = len(result.callers) - len(shown)
+        lines.extend(_wrap_list(
+            shown + ([f"+{extra} more"] if extra > 0 else []), "→ Called by: "))
+        lines.extend(_wrap_list(result.callees[:_ARCH_LIST_MAX], "← Calls: "))
     lines.append("")
 
     noun = result.node_type or "node"
@@ -1028,11 +1054,14 @@ def format_explanation(result: ExplainResult, width: int = 69) -> str:
     # result built by hand still renders an accurate line.
     count = result.production_callers or (len(result.callers) - result.test_callers)
     lines.append(f"RISK IF CHANGED: {result.risk_level}")
-    summary = (
-        f"{count} node depends on this {noun}" if count == 1
-        else f"{count} nodes depend on this {noun}" if count
-        else f"Nothing in the project depends on this {noun}"
-    )
+    if result.risk_reason:
+        summary = f"Callers unknown: {result.risk_reason}"
+    else:
+        summary = (
+            f"{count} node depends on this {noun}" if count == 1
+            else f"{count} nodes depend on this {noun}" if count
+            else f"Nothing in the project depends on this {noun}"
+        )
     if result.test_callers:
         summary += f" ({result.test_callers} more in tests)"
     if result.dependents_pct:
