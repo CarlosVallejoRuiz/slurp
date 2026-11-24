@@ -851,6 +851,10 @@ def serve(graph: tuple[str, ...], graph_labels: tuple[str, ...], log: bool) -> N
               help="Write full results as JSON to PATH.")
 @click.option("--dry-run", "dry_run", is_flag=True, default=False,
               help="List the questions and exit without calling any LLM.")
+@click.option("--retrieval", is_flag=True, default=False,
+              help="No LLM: measure recall and MRR of each question's relevant_nodes.")
+@click.option("--min-score", "min_score", default=None, type=float,
+              help="Minimum score for --retrieval (default: the CLI query default).")
 @click.option("--config-dir", "config_dir", default=".slurp", show_default=True,
               help="Directory holding config.json.")
 def eval_cmd(
@@ -862,13 +866,17 @@ def eval_cmd(
     endpoint: str | None,
     output_path: str | None,
     dry_run: bool,
+    retrieval: bool,
+    min_score: float | None,
     config_dir: str,
 ) -> None:
     """Measure whether answers are better with slurp than with the full graph."""
     from slurp.evaluator import (
+        RETRIEVAL_MIN_SCORE,
         default_questions,
         load_eval_questions,
         run_eval,
+        run_retrieval_eval,
     )
     from slurp.explainer import SlurpExplainError, resolve_config
 
@@ -894,6 +902,26 @@ def eval_cmd(
         G = load_graph(graph_path)
     except SlurpLoadError as exc:
         raise click.ClickException(str(exc)) from exc
+
+    if retrieval:
+        # DECISION: no provider is resolved at all — the metric must run
+        # offline, cost nothing and give the same numbers on every run.
+        suite = run_retrieval_eval(
+            G, questions, budget=budget,
+            min_score=RETRIEVAL_MIN_SCORE if min_score is None else min_score)
+        if not suite.scored:
+            raise click.ClickException(
+                f"None of the {len(questions)} questions' relevant_nodes exist in "
+                f"{graph_path}. The built-in set targets a `slurp index` graph of "
+                "PrismaStats; pass --questions with node ids from this graph.")
+        _echo_rich(_build_retrieval_table(suite))
+        _echo_rich(_build_retrieval_panel(suite))
+        if output_path:
+            out = Path(output_path)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(json.dumps(suite.to_dict(), indent=2), encoding="utf-8")
+            click.echo(f"\nResults saved to {out}")
+        return
 
     try:
         config = resolve_config(provider, model, endpoint, Path(config_dir))
@@ -937,6 +965,38 @@ def eval_cmd(
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(suite.to_dict(), indent=2), encoding="utf-8")
         click.echo(f"\nResults saved to {out}")
+
+
+def _build_retrieval_table(suite) -> Table:
+    """Per-question recall and rank, for `slurp eval --retrieval`."""
+    table = Table(title="Retrieval (no LLM)", show_header=True, header_style="bold")
+    table.add_column("ID", style="dim")
+    table.add_column("Found", justify="right")
+    table.add_column("Recall", justify="right")
+    table.add_column("Rank", justify="right")
+    table.add_column("Subgraph", justify="right")
+    for r in suite.results:
+        if not r.scorable:
+            table.add_row(r.question_id, "—", "—", "—", "not in graph")
+            continue
+        present = len(r.relevant) - len(r.missing)
+        table.add_row(r.question_id, f"{len(r.found)}/{present}", f"{r.recall:.2f}",
+                      str(r.first_rank), f"{r.subgraph_nodes} nodes")
+    return table
+
+
+def _build_retrieval_panel(suite) -> Panel:
+    """Summary panel of `slurp eval --retrieval`."""
+    skipped = len(suite.results) - len(suite.scored)
+    lines = [
+        f"Recall (mean):  {suite.mean_recall:.3f}",
+        f"Hit rate:       {suite.hit_rate:.3f}",
+        f"MRR:            {suite.mrr:.3f}",
+        f"Questions:      {len(suite.scored)} scored"
+        + (f", {skipped} not in this graph" if skipped else ""),
+        f"Budget {suite.budget:,} · min score {suite.min_score}",
+    ]
+    return Panel("\n".join(lines), title="Retrieval Results", border_style="cyan")
 
 
 def _build_eval_questions_table(questions) -> Table:

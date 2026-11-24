@@ -984,6 +984,7 @@ judge scores both against a known ground truth.
 slurp eval --graph graph.json --budget 4000 --provider anthropic
 slurp eval --graph graph.json --questions my-questions.json --output results.json
 slurp eval --dry-run          # list the questions, call no LLM
+slurp eval --retrieval        # recall + MRR of relevant_nodes — no LLM, no cost, reproducible
 ```
 
 Real run against a 1,796-node Next.js codebase, 15 questions, budget 4,000:
@@ -1017,6 +1018,8 @@ Quality/token baseline: 0.000012
 | `--provider` | auto-detected | LLM provider — same four as [`slurp explain`](#slurp-explain). |
 | `--output`, `-o` | — | Write full results, including both answers, as JSON. |
 | `--dry-run` | off | List the questions and exit without calling any LLM. |
+| `--retrieval` | off | No LLM: for each question, the share of its `relevant_nodes` inside the selected subgraph (recall) and 1/rank of the best one by score (MRR). Same selection settings as `slurp QUERY`; questions whose nodes are not in the graph are reported, not scored. |
+| `--min-score` | CLI default | Minimum score for `--retrieval`. |
 
 Each question costs **three LLM calls** (answer with slurp, answer from the full graph,
 judge). The built-in set of 15 questions is therefore 45 calls; budget accordingly. The

@@ -459,6 +459,16 @@ uv sync --extra rust            # solo una
   - El fixture de tests usa `file_path` y los grafos reales `source_file`;
     `_source_of` lee ambos. Un test que mire solo uno falla en silencio.
 
+- **`slurp eval --retrieval` — calidad de recuperación sin LLM.** Usa los
+  `relevant_nodes` que ya traían las preguntas (hasta v1.0.7 nadie los leía):
+  recall = relevantes dentro del subgrafo / relevantes presentes en el grafo;
+  MRR = 1 / rango del mejor relevante por score, desempate por id (determinista).
+  Misma selección que `slurp QUERY` (`RETRIEVAL_MIN_SCORE`). Preguntas cuyos
+  nodos no existen en el grafo se marcan no evaluables, no cuentan como fallo.
+  Línea base PrismaStats (`slurp index`, budget 4000): recall 1,000 · MRR 0,400,
+  15/15 preguntas iguales a la implementación del diagnóstico. Es la métrica para
+  medir cualquier cambio de scorer o de presupuesto.
+
 - **`_graphutils.py` — el hogar de lo compartido.** Cada uno de estos nombres
   fue un privado del módulo que lo necesitó primero, importado con underscore
   desde los demás según aparecían. A seis módulos de profundidad eso deja de

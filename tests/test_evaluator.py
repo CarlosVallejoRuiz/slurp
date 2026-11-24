@@ -456,3 +456,102 @@ class TestEvalCommand:
     def test_appears_in_top_level_help(self):
         res = CliRunner().invoke(cli, ["--help"])
         assert "eval" in res.output
+
+
+# ---------------------------------------------------------------------------
+# Retrieval-only evaluation: recall and MRR from relevant_nodes, no LLM
+# ---------------------------------------------------------------------------
+
+def _retrieval_graph() -> nx.DiGraph:
+    """Three findable functions, plus filler that shares no query words."""
+    G = nx.DiGraph()
+    G.add_node("auth.login", label="login_user", type="function", source_file="auth.py")
+    G.add_node("auth.logout", label="logout_user", type="function", source_file="auth.py")
+    G.add_node("billing.charge", label="charge_card", type="function", source_file="billing.py")
+    for i in range(6):
+        G.add_node(f"misc.f{i}", label=f"helper{i}", type="function", source_file="misc.py")
+    G.add_edge("auth.login", "billing.charge", relation="calls")
+    return G
+
+
+def _q(qid: str, question: str, relevant: list[str]) -> "EvalQuestion":
+    return EvalQuestion(id=qid, question=question, area="t", ground_truth="-",
+                        relevant_nodes=relevant)
+
+
+class TestRetrievalEval:
+    def test_recall_and_reciprocal_rank_per_question(self):
+        from slurp.evaluator import run_retrieval_eval
+
+        suite = run_retrieval_eval(_retrieval_graph(), [
+            _q("a", "login user", ["auth.login"]),
+            _q("b", "charge card", ["billing.charge", "auth.logout"]),
+        ], budget=4000)
+        a, b = suite.results
+        assert a.recall == 1.0 and a.first_rank == 1 and a.reciprocal_rank == 1.0
+        assert b.first_rank == 1
+        assert 0.0 <= b.recall <= 1.0
+        assert suite.mrr == 1.0
+        assert suite.mean_recall == round((a.recall + b.recall) / 2, 4)
+
+    def test_rank_counts_every_node_ahead_of_the_first_relevant_one(self):
+        from slurp.evaluator import run_retrieval_eval
+
+        # "user" matches login_user and logout_user; asking for logout ranks it
+        # below login only if login scores higher — the rank is read, not assumed.
+        suite = run_retrieval_eval(_retrieval_graph(), [_q("c", "user", ["auth.logout"])])
+        r = suite.results[0]
+        assert r.first_rank in (1, 2)
+        assert r.reciprocal_rank == round(1 / r.first_rank, 4)
+
+    def test_never_calls_an_llm(self, monkeypatch):
+        import slurp.evaluator as ev
+
+        monkeypatch.setattr(ev, "_call_llm", lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("LLM called")))
+        suite = ev.run_retrieval_eval(_retrieval_graph(), [_q("a", "login", ["auth.login"])])
+        assert suite.results[0].recall == 1.0
+
+    def test_is_deterministic(self):
+        from slurp.evaluator import run_retrieval_eval
+
+        qs = [_q("a", "login user", ["auth.login"]), _q("b", "card", ["billing.charge"])]
+        first = run_retrieval_eval(_retrieval_graph(), qs).to_dict()
+        assert run_retrieval_eval(_retrieval_graph(), qs).to_dict() == first
+
+    def test_missing_relevant_nodes_are_reported_not_scored(self):
+        from slurp.evaluator import run_retrieval_eval
+
+        suite = run_retrieval_eval(_retrieval_graph(), [
+            _q("a", "login", ["auth.login"]),
+            _q("gone", "anything", ["does.not.exist"]),
+        ])
+        gone = suite.results[1]
+        assert not gone.scorable and gone.missing == ["does.not.exist"]
+        assert len(suite.scored) == 1 and suite.mean_recall == 1.0
+
+    def test_cli_retrieval_needs_no_provider(self, tmp_path, monkeypatch):
+        for var in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "SLURP_LLM_ENDPOINT"):
+            monkeypatch.delenv(var, raising=False)
+        graph = tmp_path / "g.json"
+        graph.write_text(json.dumps(nx.node_link_data(_retrieval_graph(), edges="links")))
+        questions = tmp_path / "q.json"
+        questions.write_text(json.dumps([{"id": "a", "question": "login user",
+                                          "ground_truth": "-", "relevant_nodes": ["auth.login"]}]))
+        out = tmp_path / "r.json"
+        res = CliRunner().invoke(cli, ["eval", "--retrieval", "--graph", str(graph),
+                                       "--questions", str(questions), "--output", str(out),
+                                       "--config-dir", str(tmp_path / "cfg")])
+        assert res.exit_code == 0, res.output
+        assert "Recall" in res.output and "MRR" in res.output
+        data = json.loads(out.read_text())
+        assert data["mean_recall"] == 1.0 and data["mrr"] == 1.0
+        assert data["results"][0]["first_rank"] == 1
+
+    def test_cli_errors_when_no_question_matches_the_graph(self, tmp_path):
+        graph = tmp_path / "g.json"
+        graph.write_text(json.dumps(nx.node_link_data(_retrieval_graph(), edges="links")))
+        # The built-in set targets a `slurp index` graph of PrismaStats.
+        res = CliRunner().invoke(cli, ["eval", "--retrieval", "--graph", str(graph)])
+        assert res.exit_code != 0
+        assert "relevant_nodes" in res.output

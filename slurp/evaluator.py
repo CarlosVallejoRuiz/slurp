@@ -346,6 +346,131 @@ def run_eval(
 
 
 # ---------------------------------------------------------------------------
+# Retrieval-only evaluation (no LLM)
+# ---------------------------------------------------------------------------
+
+# DECISION: same selection settings as `slurp QUERY` and the MCP server, so the
+# metric describes the subgraph users actually get.
+RETRIEVAL_MIN_SCORE = 0.15
+
+
+@dataclass
+class RetrievalResult:
+    """How well the selector found one question's relevant nodes."""
+
+    question_id: str
+    question: str
+    relevant: list[str] = field(default_factory=list)
+    found: list[str] = field(default_factory=list)      # relevant and selected
+    missing: list[str] = field(default_factory=list)    # relevant but not in the graph
+    first_rank: int | None = None                        # best relevant node, by score
+    subgraph_nodes: int = 0
+
+    @property
+    def scorable(self) -> bool:
+        """False when none of the relevant nodes exists in this graph."""
+        return len(self.missing) < len(self.relevant)
+
+    @property
+    def recall(self) -> float:
+        present = len(self.relevant) - len(self.missing)
+        return round(len(self.found) / present, 4) if present else 0.0
+
+    @property
+    def reciprocal_rank(self) -> float:
+        return round(1 / self.first_rank, 4) if self.first_rank else 0.0
+
+    def to_dict(self) -> dict:
+        return {
+            "question_id": self.question_id, "question": self.question,
+            "relevant": self.relevant, "found": self.found, "missing": self.missing,
+            "first_rank": self.first_rank, "subgraph_nodes": self.subgraph_nodes,
+            "recall": self.recall, "reciprocal_rank": self.reciprocal_rank,
+            "scorable": self.scorable,
+        }
+
+
+@dataclass
+class RetrievalSuite:
+    """Aggregate retrieval quality over the questions this graph can answer."""
+
+    results: list[RetrievalResult] = field(default_factory=list)
+    budget: int = 0
+    min_score: float = 0.0
+
+    @property
+    def scored(self) -> list[RetrievalResult]:
+        return [r for r in self.results if r.scorable]
+
+    @property
+    def mean_recall(self) -> float:
+        return EvalSuite._mean(r.recall for r in self.scored)
+
+    @property
+    def hit_rate(self) -> float:
+        """Share of questions with at least one relevant node selected."""
+        return EvalSuite._mean(1.0 if r.found else 0.0 for r in self.scored)
+
+    @property
+    def mrr(self) -> float:
+        return EvalSuite._mean(r.reciprocal_rank for r in self.scored)
+
+    def to_dict(self) -> dict:
+        return {
+            "budget": self.budget, "min_score": self.min_score,
+            "questions_scored": len(self.scored),
+            "questions_unscorable": len(self.results) - len(self.scored),
+            "mean_recall": self.mean_recall, "hit_rate": self.hit_rate, "mrr": self.mrr,
+            "results": [r.to_dict() for r in self.results],
+        }
+
+
+def run_retrieval_eval(
+    G: nx.DiGraph,
+    questions: list[EvalQuestion],
+    budget: int = 4000,
+    min_score: float = RETRIEVAL_MIN_SCORE,
+    model: str = "cl100k_base",
+) -> RetrievalSuite:
+    """Score retrieval against each question's relevant_nodes, with no LLM.
+
+    For every question the graph is scored and a subgraph selected exactly as
+    `slurp QUERY` would. Recall is the share of the question's relevant nodes
+    (those present in the graph) that made it into the subgraph; the reciprocal
+    rank is 1 / the position of the best-ranked relevant node in the full score
+    ordering, ties broken by node id so runs are reproducible.
+
+    Args:
+        G: The graph under test.
+        questions: Questions carrying relevant_nodes.
+        budget: Token budget for the subgraph.
+        min_score: Minimum score, as in select_subgraph.
+        model: Tiktoken encoding for token counting.
+
+    Returns:
+        A RetrievalSuite. Questions whose relevant nodes are all absent from
+        the graph are kept, marked unscorable, and left out of the means.
+    """
+    suite = RetrievalSuite(budget=budget, min_score=min_score)
+    for question in questions:
+        relevant = list(question.relevant_nodes)
+        result = RetrievalResult(question_id=question.id, question=question.question,
+                                 relevant=relevant,
+                                 missing=[n for n in relevant if n not in G])
+        if relevant and result.scorable:
+            scores = score_nodes(G, question.question)
+            order = sorted(scores, key=lambda n: (-scores[n], n))
+            position = {n: i + 1 for i, n in enumerate(order)}
+            subgraph, _ = select_subgraph(G, scores, budget=budget, model=model,
+                                          min_score=min_score)
+            result.found = [n for n in relevant if n in subgraph]
+            result.first_rank = min(position[n] for n in relevant if n in position)
+            result.subgraph_nodes = subgraph.number_of_nodes()
+        suite.results.append(result)
+    return suite
+
+
+# ---------------------------------------------------------------------------
 # Question sets
 # ---------------------------------------------------------------------------
 
