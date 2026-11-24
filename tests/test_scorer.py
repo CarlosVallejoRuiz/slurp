@@ -625,19 +625,30 @@ class TestBackendCLI:
         assert result.exit_code == 0, result.output
         mock_fn.assert_called()
 
-    def test_anthropic_backend_calls_embed_anthropic(
-        self, sample_graph_json, tmp_path, monkeypatch
+    # Anthropic has no embeddings endpoint (POST /v1/embeddings is a 404; the
+    # official docs point to Voyage AI), so the CLI refuses the backend before
+    # any call is made, and says why.
+    @pytest.mark.parametrize("command", [
+        ["auth"], ["export", "auth"], ["benchmark", "-q", "auth"],
+    ], ids=["query", "export", "benchmark"])
+    def test_anthropic_backend_is_refused_with_a_reason(
+        self, sample_graph_json, command
     ):
-        monkeypatch.chdir(tmp_path)
-        n = 7
-        fake = _fake_embeddings(n + 1)
-        with patch("slurp.scorer._embed_anthropic", return_value=fake) as mock_fn:
+        with patch("slurp.scorer._embed_anthropic") as mock_fn:
             result = CliRunner().invoke(cli, [
-                "auth", "--graph", str(sample_graph_json),
-                "--backend", "anthropic", "--no-audit", "--min-score", "0.0"
+                *command, "--graph", str(sample_graph_json), "--backend", "anthropic",
             ])
-        assert result.exit_code == 0, result.output
-        mock_fn.assert_called()
+        assert result.exit_code != 0
+        mock_fn.assert_not_called()
+        assert "Anthropic" in result.output
+        assert "embeddings" in result.output
+        assert "--backend openai" in result.output
+
+    def test_help_no_longer_offers_anthropic(self):
+        result = CliRunner().invoke(cli, ["export", "--help"])
+        backend_help = result.output[result.output.index("--backend"):]
+        assert "anthropic" not in backend_help.split("--", 2)[1]
+        assert "openai" in backend_help
 
     def test_invalid_backend_rejected(self, sample_graph_json, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)

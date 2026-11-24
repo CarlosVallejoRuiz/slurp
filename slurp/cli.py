@@ -272,6 +272,35 @@ def _ensure_gitignored(gitignore: Path) -> bool:
     return True
 
 
+# DECISION: --backend anthropic is refused, not removed silently. Anthropic
+# offers no embedding model — POST /v1/embeddings answers 404 and the official
+# docs point to Voyage AI — so the backend could never have worked. A bare
+# click.Choice would answer "not one of 'tfidf', 'openai'", leaving anyone who
+# used it to guess why; this says what happened and what to use instead. The
+# library's score_nodes(backend="anthropic") is untouched until v1.1.
+_ANTHROPIC_BACKEND_RETIRED = (
+    "'anthropic' is not available: Anthropic does not offer an embeddings "
+    "endpoint or model, so this backend could never return results. Use "
+    "--backend openai for real embeddings (needs OPENAI_API_KEY and the "
+    "llm-openai extra), or the default --backend tfidf."
+)
+
+
+class _BackendChoice(click.Choice):
+    """--backend values, explaining the one that was retired."""
+
+    def __init__(self) -> None:
+        super().__init__(["tfidf", "openai"])
+
+    def convert(self, value, param, ctx):  # type: ignore[override]
+        if isinstance(value, str) and value.strip().lower() == "anthropic":
+            self.fail(_ANTHROPIC_BACKEND_RETIRED, param, ctx)
+        return super().convert(value, param, ctx)
+
+
+_BACKEND = _BackendChoice()
+
+
 class _SlurpGroup(click.Group):
     """Routes unknown first args to the hidden 'run' subcommand."""
 
@@ -343,8 +372,8 @@ def cli(ctx: click.Context) -> None:
 @click.option("--ignore-file", "ignore_file", default=".slurpignore", show_default=True,
               help="Path to .slurpignore file for excluding nodes.")
 @click.option("--backend", default="tfidf", show_default=True,
-              type=click.Choice(["tfidf", "openai", "anthropic"]),
-              help="Scoring backend. 'openai'/'anthropic' use real embeddings.")
+              type=_BACKEND,
+              help="Scoring backend: 'tfidf', or 'openai' for real embeddings.")
 @click.option("--inject-code", "inject_code_flag", is_flag=True, default=False,
               help="Append source code blocks for each selected node (≤30 nodes required).")
 @click.option("--project-root", "project_root", type=click.Path(), default=None,
@@ -663,8 +692,8 @@ def _build_diff_panel(
 @click.option("--ignore-file", "ignore_file", default=".slurpignore", show_default=True,
               help="Path to .slurpignore file for excluding nodes.")
 @click.option("--backend", default="tfidf", show_default=True,
-              type=click.Choice(["tfidf", "openai", "anthropic"]),
-              help="Scoring backend. 'openai'/'anthropic' use real embeddings.")
+              type=_BACKEND,
+              help="Scoring backend: 'tfidf', or 'openai' for real embeddings.")
 def export_cmd(
     query: str,
     graph: str | None,
@@ -723,8 +752,8 @@ def export_cmd(
 @click.option("--min-score", "min_score", default=0.0, show_default=True,
               help="Minimum score filter (0.0 = include all nodes).")
 @click.option("--backend", default="tfidf", show_default=True,
-              type=click.Choice(["tfidf", "openai", "anthropic"]),
-              help="Scoring backend. 'openai'/'anthropic' use real embeddings.")
+              type=_BACKEND,
+              help="Scoring backend: 'tfidf', or 'openai' for real embeddings.")
 @click.option("--price-model", "model_price", default="default", show_default=True,
               type=click.Choice(sorted(MODEL_PRICES_PER_MTok)),
               help="Model whose input-token price is used for cost estimates.")

@@ -223,7 +223,7 @@ slurp "auth flow" --ignore-file .slurpignore
 | `--viz` | off | Interactive HTML visualizer in the browser. |
 | `--min-score` | `0.15` | Minimum relevance threshold. Raise if too many nodes are selected. |
 | `--inject-code` | off | Append source code block below each node (max 30 nodes). |
-| `--backend` | `tfidf` | `tfidf` (no API), `openai`, or `anthropic` for real embeddings. |
+| `--backend` | `tfidf` | `tfidf` (no API) or `openai` for real embeddings. `anthropic` is refused: Anthropic has no embeddings endpoint. |
 | `--no-audit` | off | Do not save this query to `.slurp/audit.jsonl`. |
 
 ---

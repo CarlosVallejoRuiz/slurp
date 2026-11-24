@@ -263,7 +263,7 @@ slurp "prisma models" --backend openai
 | `--viz` | off | Open an interactive graph visualization in the browser. |
 | `--viz-output PATH` | — | Save visualization HTML to file (without opening browser). |
 | `--ignore-file` | `.slurpignore` | Path to node exclusion rules. |
-| `--backend` | `tfidf` | Scoring backend: `tfidf` (default), `openai`, or `anthropic`. |
+| `--backend` | `tfidf` | Scoring backend: `tfidf` (default) or `openai` (real embeddings). `anthropic` was retired in v1.0.7: Anthropic offers no embeddings endpoint. |
 | `--inject-code` | off | Embed source code blocks for each selected node (requires ≤30 nodes). |
 | `--project-root` | graph dir | Root directory for resolving `source_file` paths. |
 
@@ -1392,7 +1392,7 @@ Pass a custom path with `--ignore-file path/to/.slurpignore`.
 
 **Power-iteration PageRank without numpy.** `nx.pagerank()` requires numpy. Slurp implements a 20-line pure-Python power-iteration algorithm (convergence: `Σ|rank_new − rank_old| < N × tol`). Same result, no heavy dependency.
 
-**TF-IDF without scikit-learn.** Hand-rolled TF-IDF with smoothed IDF (`log((N+1)/(df+1)) + 1`) and cosine similarity. The tokenizer splits camelCase and snake_case, so `authenticate_user` scores on both `authenticate` and `user`. The `score_nodes()` interface is backend-agnostic — swap to real embeddings with `--backend openai` or `--backend anthropic` without touching any caller.
+**TF-IDF without scikit-learn.** Hand-rolled TF-IDF with smoothed IDF (`log((N+1)/(df+1)) + 1`) and cosine similarity. The tokenizer splits camelCase and snake_case, so `authenticate_user` scores on both `authenticate` and `user`. The `score_nodes()` interface is backend-agnostic — swap to real embeddings with `--backend openai` without touching any caller. (`--backend anthropic` is refused since v1.0.7: Anthropic offers no embedding model, and its docs point to Voyage AI.)
 
 **YAML serializer without PyYAML.** `_yaml_scalar()` renders Python primitives as valid YAML scalars using `json.dumps()` for strings that need quoting (JSON string literals are valid YAML 1.1). No PyYAML dependency.
 
