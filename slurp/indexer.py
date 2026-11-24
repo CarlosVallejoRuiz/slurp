@@ -107,7 +107,14 @@ _SKIP_DIRS: frozenset[str] = frozenset({
     ".git", "__pycache__", "node_modules", ".venv", "venv",
     "dist", "build", ".mypy_cache", ".ruff_cache", ".pytest_cache",
     "coverage", ".tox", ".eggs", "vendor",
+    # pip, setuptools and slurp itself keep third-party code here.
+    "_vendor",
 })
+
+# DECISION: a minified bundle is someone else's code compressed onto a few
+# lines. Parsing it yields hundreds of one-letter "functions", and tree-sitter
+# usually fails on it first (slurp's own vis-network added 118 such nodes).
+_MINIFIED_SUFFIX = ".min.js"
 
 
 def _should_skip(path: Path) -> bool:
@@ -116,7 +123,10 @@ def _should_skip(path: Path) -> bool:
     Pass the path *relative to the project root*. Every part is checked, so an
     absolute path would also test the folders above the project: a project
     living under ~/code/build/ lost every file and indexed to 0 nodes.
+    Minified bundles (*.min.js) are skipped wherever they sit.
     """
+    if path.name.lower().endswith(_MINIFIED_SUFFIX):
+        return True
     return any(
         part in _SKIP_DIRS or part.endswith(".egg-info")
         for part in path.parts

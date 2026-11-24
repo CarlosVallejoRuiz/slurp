@@ -5610,3 +5610,29 @@ class TestSkipRulesAreRootRelative:
                                        "--ignore-file", "/dev/null"])
         assert res.exit_code == 0, res.output
         assert "no source files" in res.stderr.lower()
+
+
+# ---------------------------------------------------------------------------
+# Vendored and minified code is not the project's own code
+# ---------------------------------------------------------------------------
+
+class TestVendoredAndMinifiedAreSkipped:
+    def test_underscore_vendor_directory_is_skipped(self, tmp_path):
+        (tmp_path / "pkg" / "_vendor").mkdir(parents=True)
+        (tmp_path / "pkg" / "_vendor" / "third.py").write_text("def third():\n    pass\n")
+        (tmp_path / "pkg" / "mine.py").write_text("def mine():\n    pass\n")
+        files = {p.relative_to(tmp_path).as_posix() for p in iter_source_files(tmp_path)}
+        assert files == {"pkg/mine.py"}
+
+    def test_minified_bundles_are_skipped_but_plain_js_is_not(self, tmp_path):
+        (tmp_path / "web").mkdir()
+        (tmp_path / "web" / "app.js").write_text("function app() { return 1 }\n")
+        (tmp_path / "web" / "lib.min.js").write_text("function a(){return 1}\n")
+        (tmp_path / "web" / "lib.MIN.JS").write_text("function b(){return 1}\n")
+        files = {p.name for p in iter_source_files(tmp_path)}
+        assert files == {"app.js"}
+
+    def test_slurp_index_has_no_vis_network_nodes(self):
+        graph = index_project(_SLURP_PACKAGE)
+        sources = {n.get("source_file", "") for n in graph["nodes"]}
+        assert not [s for s in sources if "_vendor" in s or s.endswith(".min.js")]

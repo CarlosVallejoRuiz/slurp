@@ -74,6 +74,8 @@ uv sync --extra rust            # solo una
   indexaba a 0 nodos sin aviso (y `--smart` no veía cambios). `_should_skip`
   sigue mirando todas las partes de la ruta que recibe: son los llamadores
   (`iter_source_files`, `smart.get_changed_files`) quienes le pasan la relativa.
+  `_vendor/` está en `_SKIP_DIRS` y los `*.min.js` se saltan estén donde estén:
+  la v1.0.6 vendorizó vis-network y el índice de slurp ganó 118 nodos basura.
   Si un índice sale con 0 nodos, `slurp index` explica por stderr qué
   directorios saltados tenían fuentes (`skipped_source_files`) o que no hay
   ninguna extensión indexable.
