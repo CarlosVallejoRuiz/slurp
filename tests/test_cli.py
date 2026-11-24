@@ -578,7 +578,7 @@ class TestVizFlag:
         _, opened = _viz_html(monkeypatch, sample_graph_json)
         assert opened[0].startswith("file://")
 
-    def test_viz_html_contains_vis_network_cdn(self, sample_graph_json, monkeypatch):
+    def test_viz_html_contains_vis_network(self, sample_graph_json, monkeypatch):
         html, _ = _viz_html(monkeypatch, sample_graph_json)
         assert "vis-network" in html
 
@@ -2247,3 +2247,55 @@ class TestVizEmbeddingIsInert:
         html = self._html(label="<<<EDGES_JSON>>>")
         nodes = {n["id"]: n for n in _viz_data(html, "RN")}
         assert nodes["a"]["label"] == "<<<EDGES_JSON>>>"
+
+
+# ---------------------------------------------------------------------------
+# viz: vis-network is vendored, so the page works without network access
+# ---------------------------------------------------------------------------
+
+# sha256 of vis-network 9.1.9 dist/vis-network.min.js — identical in the npm
+# tarball (registry integrity verified) and on cdnjs, which v1.0.5 loaded.
+_VIS_NETWORK_SHA256 = "f6ee3a6560dd2bc7fce0b08149a30f2111e78255c5bb677e02c6517acc770379"
+
+
+class TestVizIsSelfContained:
+    @staticmethod
+    def _vendor_dir() -> Path:
+        from importlib.resources import files
+
+        return Path(str(files("slurp") / "_vendor"))
+
+    def _html(self) -> str:
+        G = nx.DiGraph()
+        G.add_node("a", label="alpha")
+        return build_html(G, _VIZ_STATS, {"a": 1.0}, "q")
+
+    def test_vendored_file_is_the_pinned_release(self):
+        import hashlib
+
+        data = (self._vendor_dir() / "vis-network-9.1.9.min.js").read_bytes()
+        assert hashlib.sha256(data).hexdigest() == _VIS_NETWORK_SHA256
+
+    def test_license_files_ship_with_it(self):
+        for name in ("vis-network-LICENSE-MIT", "vis-network-LICENSE-APACHE-2.0"):
+            assert (self._vendor_dir() / name).is_file()
+
+    def test_page_loads_no_external_script(self):
+        html = self._html()
+        assert "<script src" not in html
+        assert "cdnjs" not in html
+        assert "https://" not in html.split("<script>", 1)[0]
+
+    def test_page_inlines_vis_network(self):
+        html = self._html()
+        assert "@version 9.1.9" in html
+        assert "new vis.Network(" in html
+
+    def test_vendored_code_cannot_end_the_inline_script(self):
+        data = (self._vendor_dir() / "vis-network-9.1.9.min.js").read_text(encoding="utf-8")
+        assert "</script" not in data.lower()
+        assert "<!--" not in data
+
+    def test_library_precedes_the_code_that_uses_it(self):
+        html = self._html()
+        assert html.index("@version 9.1.9") < html.index("new vis.Network(")

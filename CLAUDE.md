@@ -679,6 +679,13 @@ def build_diff_viz_graph(G_old, G_new, diff, hops) -> nx.DiGraph
 
 Genera HTML interactivo con vis.js para visualizar subgrafos.
 
+**vis-network 9.1.9 va vendorizado e inline** (`slurp/_vendor/`, con sus licencias
+Apache-2.0/MIT): el HTML funciona sin red y no ejecuta lo que sirva un CDN. Es
+`dist/vis-network.min.js` del tarball de npm, idéntico byte a byte al de cdnjs que
+usaba la v1.0.5; un test fija su sha256. Coste: +476.620 bytes por página (~31 KB →
+~508 KB a 50 nodos). Todo dato embebido pasa por `_script_json()`, que escribe cada
+`<` como `\u003c`: un `</script>` en una descripción cerraba el script.
+
 **API pública:**
 ```python
 def build_html(
@@ -913,6 +920,7 @@ Punto de entrada para un proyecto nuevo. No requiere flags. Secuencia:
 | `min_score=0.15` default | Evita seleccionar 400+ nodos en grafos grandes |
 | Freeze física tras stabilize | Nodos quietos = grafo legible |
 | `max_nodes=50` en viz | Mantiene visualizador legible independiente del budget |
+| vis-network vendorizado inline | Viz offline y sin código de un CDN; +476 KB por HTML |
 
 ---
 

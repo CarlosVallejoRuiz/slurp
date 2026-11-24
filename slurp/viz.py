@@ -1,8 +1,27 @@
 """Generates a self-contained interactive HTML visualisation of a subgraph."""
 
 import json
+from functools import lru_cache
+from importlib.resources import files
 
 import networkx as nx
+
+# DECISION: vis-network is vendored and inlined into every page instead of
+# loaded from cdnjs. The page is saved, shared and reopened offline as a file;
+# with the CDN it rendered nothing without network, and it ran whatever the
+# CDN served (there was no integrity hash). The cost is size: the library is
+# 476,620 bytes (127,908 gzipped), so a 50-node page grows from ~31 KB to
+# ~508 KB. The file is dist/vis-network.min.js from the npm tarball of 9.1.9 —
+# byte-identical to the cdnjs copy v1.0.5 used, so rendering is unchanged — and
+# a test pins its sha256. Licence: Apache-2.0 OR MIT, files alongside it.
+_VIS_NETWORK_VERSION = "9.1.9"
+_VIS_NETWORK_FILE = f"vis-network-{_VIS_NETWORK_VERSION}.min.js"
+
+
+@lru_cache(maxsize=1)
+def _vis_network_js() -> str:
+    """The vendored vis-network source, read once per process."""
+    return (files("slurp") / "_vendor" / _VIS_NETWORK_FILE).read_text(encoding="utf-8")
 
 # DECISION: one saturated hue per node type, used as a solid fill. The previous
 # palette drew hollow rings on near-black fills, which read as noise at small
@@ -276,6 +295,8 @@ def build_html(
         .replace("<<<QUIET_SCORE>>>",    str(_QUIET_LABEL_SCORE))
         .replace("<<<NODES_JSON>>>",     _script_json(nodes))
         .replace("<<<EDGES_JSON>>>",     _script_json(edges))
+        # Last, so no later replace scans the library's 476 KB.
+        .replace("<<<VIS_NETWORK_JS>>>", _vis_network_js())
     )
 
 
@@ -291,7 +312,8 @@ _HTML_TEMPLATE = """\
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>slurp — <<<QUERY>>></title>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.9/dist/vis-network.min.js"></script>
+  <script>
+<<<VIS_NETWORK_JS>>></script>
   <style>
     :root {
       --bg:        #0d1117;
