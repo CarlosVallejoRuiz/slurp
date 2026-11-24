@@ -12,3 +12,6 @@ wheels/
 .agents/
 .claude/
 skills-lock.json
+
+# macOS Finder metadata
+.DS_Store
