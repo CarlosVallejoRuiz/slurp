@@ -773,6 +773,10 @@ def build_html(
   (no en `stabilized`: con 745 nodos el reposo natural no llegaba en 30 s y el hilo
   principal ejecutaba 29 s de script; ahora congela a los 3,3 s)
 - Nodos aislados con opacity 0.4
+- **Badge de ahorro solo con cifras medidas** (v1.1.0): `stats["tokens_full"]` = el grafo
+  entero impreso con el mismo formatter y query (`budget.full_graph_tokens`). Sin esa
+  cifra no hay badge, y sin presupuesto (impact, diff) tampoco contador de tokens. Antes
+  asumía 50 tokens/nodo y `impact --viz` proclamaba ~100% de ahorro.
 - Modo diff: verde/rojo/amarillo/gris, tamaños compactos (12-28px), font 11px
 
 ---

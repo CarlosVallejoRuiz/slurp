@@ -267,10 +267,22 @@ def build_html(
     # a cross-project result is readable without clicking every node.
     projects = sorted({n["project"] for n in nodes if n["project"]})
 
-    # Token savings vs naively injecting the full graph (≈ 50 tokens/node baseline).
-    baseline = stats["nodes_total"] * 50
-    saved = max(0, baseline - stats["tokens_used"])
-    saved_pct = round(saved / baseline * 100) if baseline > 0 else 0
+    # DECISION: the savings badge shows measured figures or nothing. It used to
+    # assume 50 tokens per node for the full graph, and `slurp impact --viz`,
+    # which has no budget, claimed ~100% saved. Callers that measured the whole
+    # graph (stats["tokens_full"], same formatter and query) get the badge; views
+    # without a budget get neither a badge nor a token count.
+    full = stats.get("tokens_full") or 0
+    used = stats.get("tokens_used", 0)
+    save_badge = ""
+    if full > 0:
+        saved = max(0, full - used)
+        save_badge = (f'<span class="save">Saved {saved:,} of {full:,} tokens '
+                      f'&middot; {round(saved / full * 100, 1)}%</span>')
+    tokens_stat = ""
+    if stats.get("tokens_budget"):
+        tokens_stat = (f'<span class="sep">&middot;</span>\n    <span><b>{used:,}</b>'
+                       f'&thinsp;/&thinsp;{stats["tokens_budget"]:,} tokens</span>')
 
     palette = {
         t: {"fill": c, "border": _darken(c)} for t, c in _TYPE_COLORS.items()
@@ -281,11 +293,9 @@ def build_html(
         .replace("<<<QUERY>>>",          _esc_html(query))
         .replace("<<<NODES_SELECTED>>>", str(stats["nodes_selected"]))
         .replace("<<<NODES_TOTAL>>>",    str(stats["nodes_total"]))
-        .replace("<<<TOKENS_USED>>>",    f"{stats['tokens_used']:,}")
-        .replace("<<<TOKENS_BUDGET>>>",  f"{stats['tokens_budget']:,}")
+        .replace("<<<TOKENS_STAT>>>",    tokens_stat)
         .replace("<<<COVERAGE_PCT>>>",   str(stats["coverage_pct"]))
-        .replace("<<<SAVED_TOKENS>>>",   f"{saved:,}")
-        .replace("<<<SAVED_PCT>>>",      str(saved_pct))
+        .replace("<<<SAVE_BADGE>>>",     save_badge)
         .replace("<<<TOP_BADGE>>>",      top_badge)
         .replace("<<<PALETTE_JSON>>>",   _script_json(palette))
         .replace("<<<LEGEND_JSON>>>",    _script_json(legend))
@@ -552,12 +562,11 @@ _HTML_TEMPLATE = """\
   <span class="qry">query: <em><<<QUERY>>></em></span>
   <span class="stats">
     <span><b><<<NODES_SELECTED>>></b>&thinsp;/&thinsp;<<<NODES_TOTAL>>> nodes<<<TOP_BADGE>>></span>
-    <span class="sep">&middot;</span>
-    <span><b><<<TOKENS_USED>>></b>&thinsp;/&thinsp;<<<TOKENS_BUDGET>>> tokens</span>
+    <<<TOKENS_STAT>>>
     <span class="sep">&middot;</span>
     <span><b><<<COVERAGE_PCT>>>%</b> coverage</span>
   </span>
-  <span class="save">Saved ~<<<SAVED_TOKENS>>> tokens &middot; <<<SAVED_PCT>>>%</span>
+  <<<SAVE_BADGE>>>
 </div>
 <div id="wrap">
   <div id="graph"></div>

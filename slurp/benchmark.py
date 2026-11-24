@@ -10,7 +10,12 @@ import networkx as nx
 from rich.console import Console
 from rich.table import Table
 
-from slurp.budget import DEFAULT_MIN_SCORE, BudgetTooSmallError, build_context, count_tokens
+from slurp.budget import (
+    DEFAULT_MIN_SCORE,
+    BudgetTooSmallError,
+    build_context,
+    full_graph_tokens,
+)
 from slurp.scorer import score_nodes
 
 # DECISION: input-token list prices in USD per million tokens. This is a static
@@ -108,10 +113,6 @@ def _percentile(data: list[float], p: float) -> float:
     return s[lo] + (idx - lo) * (s[hi] - s[lo])
 
 
-# A budget no graph reaches, so the "full graph" baseline holds every node and edge.
-_UNBOUNDED = 10_000_000
-
-
 def _full_graph_tokens(G: nx.DiGraph, scores: dict[str, float], query: str, model: str) -> int:
     """Tokens of the whole graph sent the same way slurp's answer is sent.
 
@@ -121,8 +122,7 @@ def _full_graph_tokens(G: nx.DiGraph, scores: dict[str, float], query: str, mode
     query in its header, so a subgraph holding the whole graph came out larger
     than "the whole graph".
     """
-    text, _, _ = build_context(G, scores, _UNBOUNDED, model, min_score=0.0, query=query)
-    return count_tokens(text, model=model)
+    return full_graph_tokens(G, scores, query, model=model)
 
 
 def run_benchmark(

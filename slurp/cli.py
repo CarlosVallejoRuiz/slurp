@@ -518,8 +518,12 @@ def run(
         _echo_rich(_build_explain_table(subG, scores, structural, semantic))
 
     if viz or viz_output:
+        from slurp.budget import full_graph_tokens
         from slurp.viz import build_html
-        _deliver_viz(build_html(subG, stats, scores, query), viz, viz_output)
+        # The badge compares two measured texts: what was printed, and the whole
+        # graph printed the same way.
+        viz_stats = {**stats, "tokens_full": full_graph_tokens(G, scores, query, fmt, model)}
+        _deliver_viz(build_html(subG, viz_stats, scores, query), viz, viz_output)
 
 
 def _item_values(G, scores: dict[str, float]) -> dict[tuple, float]:

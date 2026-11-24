@@ -383,6 +383,27 @@ def build_context(
     return text, sub, stats
 
 
+# A budget no graph reaches, so the "whole graph" holds every node and edge.
+_UNBOUNDED = 10_000_000
+
+
+def full_graph_tokens(
+    G: nx.DiGraph,
+    scores: dict[str, float],
+    query: str = "",
+    format: str = "markdown",
+    model: str = "cl100k_base",
+) -> int:
+    """Tokens of the whole graph sent exactly the way an answer is sent.
+
+    The honest baseline for "tokens saved": same formatter, same header with
+    the same query, same scores, every node and relationship.
+    """
+    text, _, _ = build_context(G, scores, _UNBOUNDED, model, min_score=0.0,
+                               format=format, query=query)
+    return count_tokens(text, model)
+
+
 def select_subgraph(
     G: nx.DiGraph,
     scores: dict[str, float],

@@ -2322,3 +2322,59 @@ class TestVizFreezesAfterStabilisation:
 
     def test_natural_rest_no_longer_gates_the_freeze(self):
         assert "net.once('stabilized'" not in self._html()
+
+
+# ---------------------------------------------------------------------------
+# viz badge: real token counts, and no claim where there is no budget
+# ---------------------------------------------------------------------------
+
+class TestVizSavingsBadge:
+    def _graph(self):
+        G = nx.DiGraph()
+        G.add_node("a", label="alpha")
+        return G
+
+    def test_no_full_graph_figure_means_no_savings_claim(self):
+        html = build_html(self._graph(), dict(_VIZ_STATS), {"a": 1.0}, "q")
+        assert "Saved" not in html
+
+    def test_badge_shows_the_real_figures(self):
+        stats = {**_VIZ_STATS, "tokens_used": 1_200, "tokens_budget": 4_000,
+                 "tokens_full": 48_000}
+        html = build_html(self._graph(), stats, {"a": 1.0}, "q")
+        assert "Saved 46,800 of 48,000 tokens" in html
+        assert "97.5%" in html
+        assert "~" not in html.split('class="save"', 1)[1].split("</span>", 1)[0]
+
+    def test_query_viz_badge_matches_what_was_printed(self, sample_graph_json, tmp_path):
+        from slurp.budget import count_tokens, full_graph_tokens
+        from slurp.loader import load_graph
+        from slurp.scorer import score_nodes
+
+        out = tmp_path / "v.html"
+        res = _runner().invoke(cli, ["auth", "--graph", str(sample_graph_json), "--budget", "300",
+                                     "--no-audit", "--viz-output", str(out)])
+        assert res.exit_code == 0, res.output
+        printed = res.stdout.split("✓ Visualization saved")[0].rstrip("\n")
+        used = count_tokens(printed)
+        G = load_graph(sample_graph_json)
+        full = full_graph_tokens(G, score_nodes(G, "auth"), "auth")
+        html = out.read_text(encoding="utf-8")
+        assert f"Saved {full - used:,} of {full:,} tokens" in html
+
+    def test_impact_viz_claims_no_savings(self, tmp_path):
+        G = nx.DiGraph()
+        G.add_node("m", label="core.py", type="module", source_file="lib/core.py")
+        G.add_node("f", label="helper", type="function", source_file="lib/core.py")
+        G.add_node("c", label="caller", type="function", source_file="app/page.py")
+        G.add_edge("m", "f", relation="contains")
+        G.add_edge("c", "f", relation="calls")
+        graph = tmp_path / "g.json"
+        graph.write_text(json.dumps(nx.node_link_data(G, edges="links")), encoding="utf-8")
+        out = tmp_path / "impact.html"
+        res = _runner().invoke(cli, ["impact", "lib/core.py", "--graph", str(graph),
+                                     "--viz-output", str(out)])
+        assert res.exit_code == 0, res.output
+        html = out.read_text(encoding="utf-8")
+        assert "Saved" not in html
+        assert "0/0 tokens" not in html
