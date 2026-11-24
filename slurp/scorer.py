@@ -211,26 +211,21 @@ def _embed_openai(texts: list[str]) -> list[list[float]]:
     return [item.embedding for item in response.data]
 
 
-def _embed_anthropic(texts: list[str]) -> list[list[float]]:
-    """Embed a list of texts using Anthropic's voyage-3-large model.
+# DECISION: there is no Anthropic embeddings backend. Anthropic offers no
+# embedding model — POST /v1/embeddings answers 404 and the official docs point
+# to Voyage AI — so the former _embed_anthropic could only ever fail with an API
+# error. Asking for it now fails at once, with the reason, before any client
+# is built or any node text leaves the machine.
+_ANTHROPIC_BACKEND_RETIRED = (
+    "backend='anthropic' is not available: Anthropic does not offer an embeddings "
+    "endpoint or model. Use backend='openai' for real embeddings, or the default "
+    "backend='tfidf'."
+)
 
-    Raises:
-        ImportError: If the anthropic package is not installed.
-    """
-    try:
-        import anthropic
-    except ImportError:
-        raise ImportError(
-            "Anthropic backend requires the anthropic package.\n"
-            "Install it with: pip install anthropic"
-        )
-    client = anthropic.Anthropic()
-    # DECISION: Anthropic exposes Voyage embeddings through their unified HTTP API.
-    # The Python SDK's SyncAPIClient.post() allows raw endpoint calls until
-    # a first-class .embeddings namespace is added to the SDK.
-    body = {"model": "voyage-3-large", "input": texts, "input_type": "document"}
-    resp: object = client.post(path="/v1/embeddings", body=body, cast_to=object)  # type: ignore[call-overload]
-    return [item["embedding"] for item in resp["data"]]  # type: ignore[index]
+
+def _check_backend(backend: str) -> None:
+    if backend == "anthropic":
+        raise ValueError(_ANTHROPIC_BACKEND_RETIRED)
 
 
 def _score_nodes_embeddings(
@@ -252,11 +247,9 @@ def _score_nodes_embeddings(
 
     if backend == "openai":
         all_embeddings = _embed_openai(all_texts)
-    elif backend == "anthropic":
-        all_embeddings = _embed_anthropic(all_texts)
     else:
         raise ValueError(
-            f"Unknown backend {backend!r}. Expected 'tfidf', 'openai', or 'anthropic'."
+            f"Unknown backend {backend!r}. Expected 'tfidf' or 'openai'."
         )
 
     query_emb = all_embeddings[0]
@@ -280,22 +273,23 @@ def score_nodes(G: nx.DiGraph, query: str, backend: str = "tfidf") -> dict[str, 
     - Structural (40%): PageRank normalized by the max value in the graph.
     - Semantic  (60%): TF-IDF cosine similarity between query and node text.
 
-    With --backend openai or --backend anthropic, uses real embedding cosine
-    similarity instead of TF-IDF. The structural PageRank component is dropped
-    when using an embedding backend.
+    With backend='openai', uses real embedding cosine similarity instead of
+    TF-IDF. The structural PageRank component is dropped when using an
+    embedding backend.
 
     Args:
         G: Directed graph with node attributes (label, description).
         query: Free-text query string.
-        backend: Scoring backend — 'tfidf' (default), 'openai', or 'anthropic'.
+        backend: Scoring backend — 'tfidf' (default) or 'openai'.
 
     Returns:
         Dict mapping every node ID to a score in [0.0, 1.0].
 
     Raises:
-        ValueError: If backend is unknown.
+        ValueError: If backend is unknown, or is the retired 'anthropic'.
         ImportError: If the required package for an embedding backend is missing.
     """
+    _check_backend(backend)
     if G.number_of_nodes() == 0:
         return {}
     if backend == "tfidf":
@@ -316,18 +310,22 @@ def score_nodes_detailed(
         structural = normalized PageRank (0–1, before 0.4 weight).
         semantic   = TF-IDF cosine similarity (0–1, before 0.6 weight).
 
-    For embedding backends ('openai', 'anthropic'):
+    For the embedding backend ('openai'):
         structural = all zeros (PageRank is not computed).
         semantic   = cosine similarity to query embedding (same as final).
 
     Args:
         G: Directed graph with node attributes (label, description).
         query: Free-text query string.
-        backend: Scoring backend — 'tfidf', 'openai', or 'anthropic'.
+        backend: Scoring backend — 'tfidf' or 'openai'.
 
     Returns:
         Tuple of (final_scores, structural_scores, semantic_scores).
+
+    Raises:
+        ValueError: If backend is unknown, or is the retired 'anthropic'.
     """
+    _check_backend(backend)
     if G.number_of_nodes() == 0:
         return {}, {}, {}
     if backend == "tfidf":

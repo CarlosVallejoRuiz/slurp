@@ -14,7 +14,6 @@ from slurp.scorer import (
     _pagerank_cache,
     clear_pagerank_cache,
     _cosine_sim,
-    _embed_anthropic,
     _embed_openai,
     _node_text,
     _tokenize,
@@ -431,20 +430,35 @@ class TestEmbedOpenAIImport:
 
 
 # ---------------------------------------------------------------------------
-# _embed_anthropic — ImportError behavior
+# backend="anthropic" — retired: Anthropic offers no embeddings endpoint
 # ---------------------------------------------------------------------------
 
-class TestEmbedAnthropicImport:
-    def test_raises_import_error_if_not_installed(self):
-        with patch.dict(sys.modules, {"anthropic": None}):
-            with pytest.raises(ImportError, match="pip install anthropic"):
-                _embed_anthropic(["hello"])
+class TestAnthropicBackendRetired:
+    @pytest.mark.parametrize("fn", [score_nodes, score_nodes_detailed])
+    def test_raises_a_clear_error(self, sample_graph, fn):
+        with pytest.raises(ValueError, match="Anthropic does not offer an embeddings"):
+            fn(sample_graph, "auth", backend="anthropic")
 
-    def test_error_message_mentions_anthropic(self):
-        with patch.dict(sys.modules, {"anthropic": None}):
-            with pytest.raises(ImportError) as exc_info:
-                _embed_anthropic(["hello"])
-            assert "anthropic" in str(exc_info.value).lower()
+    def test_suggests_the_working_backends(self, sample_graph):
+        with pytest.raises(ValueError) as info:
+            score_nodes(sample_graph, "auth", backend="anthropic")
+        assert "openai" in str(info.value) and "tfidf" in str(info.value)
+
+    def test_no_client_is_ever_built(self, sample_graph):
+        import anthropic
+
+        with patch.object(anthropic, "Anthropic", side_effect=AssertionError("called")):
+            with pytest.raises(ValueError):
+                score_nodes(sample_graph, "auth", backend="anthropic")
+
+    def test_rejected_even_on_an_empty_graph(self):
+        with pytest.raises(ValueError, match="anthropic"):
+            score_nodes(nx.DiGraph(), "auth", backend="anthropic")
+
+    def test_helper_is_gone(self):
+        import slurp.scorer as scorer
+
+        assert not hasattr(scorer, "_embed_anthropic")
 
 
 # ---------------------------------------------------------------------------
@@ -467,14 +481,6 @@ class TestEmbeddingBackendScoreNodes:
         fake = _fake_embeddings(n_nodes + 1)  # query + nodes
         with patch("slurp.scorer._embed_openai", return_value=fake) as mock_fn:
             scores = score_nodes(sample_graph, "auth", backend="openai")
-            mock_fn.assert_called_once()
-        assert set(scores.keys()) == set(sample_graph.nodes)
-
-    def test_anthropic_backend_calls_embed_anthropic(self, sample_graph):
-        n_nodes = sample_graph.number_of_nodes()
-        fake = _fake_embeddings(n_nodes + 1)
-        with patch("slurp.scorer._embed_anthropic", return_value=fake) as mock_fn:
-            scores = score_nodes(sample_graph, "auth", backend="anthropic")
             mock_fn.assert_called_once()
         assert set(scores.keys()) == set(sample_graph.nodes)
 
@@ -501,12 +507,6 @@ class TestEmbeddingBackendScoreNodes:
                    side_effect=ImportError("pip install openai")):
             with pytest.raises(ImportError, match="pip install openai"):
                 score_nodes(sample_graph, "auth", backend="openai")
-
-    def test_anthropic_import_error_propagates(self, sample_graph):
-        with patch("slurp.scorer._embed_anthropic",
-                   side_effect=ImportError("pip install anthropic")):
-            with pytest.raises(ImportError, match="pip install anthropic"):
-                score_nodes(sample_graph, "auth", backend="anthropic")
 
     def test_embed_called_with_query_plus_all_nodes(self, sample_graph):
         n_nodes = sample_graph.number_of_nodes()
@@ -546,8 +546,8 @@ class TestEmbeddingBackendScoreNodes:
     def test_embedding_backend_returns_correct_node_count(self, sample_graph):
         n_nodes = sample_graph.number_of_nodes()
         fake = _fake_embeddings(n_nodes + 1)
-        with patch("slurp.scorer._embed_anthropic", return_value=fake):
-            scores = score_nodes(sample_graph, "auth", backend="anthropic")
+        with patch("slurp.scorer._embed_openai", return_value=fake):
+            scores = score_nodes(sample_graph, "auth", backend="openai")
         assert len(scores) == n_nodes
 
 
@@ -574,9 +574,9 @@ class TestEmbeddingBackendDetailed:
     def test_three_dicts_same_keys_for_embedding(self, sample_graph):
         n_nodes = sample_graph.number_of_nodes()
         fake = _fake_embeddings(n_nodes + 1)
-        with patch("slurp.scorer._embed_anthropic", return_value=fake):
+        with patch("slurp.scorer._embed_openai", return_value=fake):
             final, structural, semantic = score_nodes_detailed(
-                sample_graph, "auth", backend="anthropic"
+                sample_graph, "auth", backend="openai"
             )
         assert set(final) == set(structural) == set(semantic) == set(sample_graph.nodes)
 
@@ -634,7 +634,7 @@ class TestBackendCLI:
     def test_anthropic_backend_is_refused_with_a_reason(
         self, sample_graph_json, command
     ):
-        with patch("slurp.scorer._embed_anthropic") as mock_fn:
+        with patch("slurp.scorer._score_nodes_embeddings") as mock_fn:
             result = CliRunner().invoke(cli, [
                 *command, "--graph", str(sample_graph_json), "--backend", "anthropic",
             ])

@@ -277,7 +277,7 @@ def _ensure_gitignored(gitignore: Path) -> bool:
 # docs point to Voyage AI — so the backend could never have worked. A bare
 # click.Choice would answer "not one of 'tfidf', 'openai'", leaving anyone who
 # used it to guess why; this says what happened and what to use instead. The
-# library's score_nodes(backend="anthropic") is untouched until v1.1.
+# library refuses it too (scorer._check_backend).
 _ANTHROPIC_BACKEND_RETIRED = (
     "'anthropic' is not available: Anthropic does not offer an embeddings "
     "endpoint or model, so this backend could never return results. Use "

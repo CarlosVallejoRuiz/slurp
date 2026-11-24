@@ -1392,7 +1392,7 @@ Pass a custom path with `--ignore-file path/to/.slurpignore`.
 
 **Power-iteration PageRank without numpy.** `nx.pagerank()` requires numpy. Slurp implements a 20-line pure-Python power-iteration algorithm (convergence: `Σ|rank_new − rank_old| < N × tol`). Same result, no heavy dependency.
 
-**TF-IDF without scikit-learn.** Hand-rolled TF-IDF with smoothed IDF (`log((N+1)/(df+1)) + 1`) and cosine similarity. The tokenizer splits camelCase and snake_case, so `authenticate_user` scores on both `authenticate` and `user`. The `score_nodes()` interface is backend-agnostic — swap to real embeddings with `--backend openai` without touching any caller. (`--backend anthropic` is refused since v1.0.7: Anthropic offers no embedding model, and its docs point to Voyage AI.)
+**TF-IDF without scikit-learn.** Hand-rolled TF-IDF with smoothed IDF (`log((N+1)/(df+1)) + 1`) and cosine similarity. The tokenizer splits camelCase and snake_case, so `authenticate_user` scores on both `authenticate` and `user`. The `score_nodes()` interface is backend-agnostic — swap to real embeddings with `--backend openai` without touching any caller. (`--backend anthropic` is refused since v1.0.7, and `score_nodes(backend="anthropic")` raises a `ValueError` since v1.1.0: Anthropic offers no embedding model, and its docs point to Voyage AI.)
 
 **YAML serializer without PyYAML.** `_yaml_scalar()` renders Python primitives as valid YAML scalars using `json.dumps()` for strings that need quoting (JSON string literals are valid YAML 1.1). No PyYAML dependency.
 
