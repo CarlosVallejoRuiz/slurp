@@ -58,6 +58,9 @@ from slurp.indexer import (
     index_typescript,
 )
 
+# The slurp package itself, independent of the working directory.
+_SLURP_PACKAGE = Path(__file__).resolve().parent.parent / "slurp"
+
 # ---------------------------------------------------------------------------
 # Sample source fixtures
 # ---------------------------------------------------------------------------
@@ -3245,7 +3248,7 @@ class TestCrossFileCallResolution:
 
     def test_cross_file_calls_increase_on_the_slurp_project(self):
         """The real measure: cross-file edges exist where none did before."""
-        graph = index_project(Path("slurp"))
+        graph = index_project(_SLURP_PACKAGE)
         source_file = {n["id"]: n.get("source_file") for n in graph["nodes"]}
         cross = [
             e for e in graph["links"]
@@ -3255,7 +3258,7 @@ class TestCrossFileCallResolution:
         assert len(cross) > 50
 
     def test_select_subgraph_has_cross_module_callers(self):
-        graph = index_project(Path("slurp"))
+        graph = index_project(_SLURP_PACKAGE)
         callers = {
             e["source"] for e in graph["links"]
             if e["relation"] == "calls" and e["target"] == "budget.select_subgraph"

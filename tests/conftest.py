@@ -1,7 +1,46 @@
 import json
+from pathlib import Path
 
 import networkx as nx
 import pytest
+
+# The repository's own .slurp/ holds the developer's real audit and session
+# logs. A test that writes there pollutes them and passes anyway.
+_REPO_SLURP_DIR = Path(__file__).resolve().parent.parent / ".slurp"
+
+
+def _snapshot(directory: Path) -> dict[str, tuple[int, int]]:
+    """Size and mtime of every file directly inside *directory*."""
+    if not directory.is_dir():
+        return {}
+    return {
+        p.name: (p.stat().st_size, p.stat().st_mtime_ns)
+        for p in directory.iterdir() if p.is_file()
+    }
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _repo_slurp_dir_untouched():
+    """Fail the run if any test wrote to the repository's .slurp/."""
+    before = _snapshot(_REPO_SLURP_DIR)
+    yield
+    after = _snapshot(_REPO_SLURP_DIR)
+    if after != before:
+        changed = sorted(k for k in before.keys() | after.keys() if before.get(k) != after.get(k))
+        pytest.fail(f"tests wrote to {_REPO_SLURP_DIR}: {', '.join(changed)}", pytrace=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_cwd(tmp_path_factory, monkeypatch):
+    """Run every test from an empty directory of its own.
+
+    slurp resolves .slurp/ (audit log, session log, config), .slurpignore and
+    graph auto-discovery against the working directory, so a test run from the
+    repository root read and wrote the repository's own files. A directory
+    separate from tmp_path keeps tests that inspect tmp_path unaffected; a
+    test that needs a specific cwd still calls monkeypatch.chdir itself.
+    """
+    monkeypatch.chdir(tmp_path_factory.mktemp("cwd"))
 
 
 @pytest.fixture
