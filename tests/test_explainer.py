@@ -1,6 +1,8 @@
 """Tests for slurp.explainer — natural-language node explanations."""
 
 import json
+import os
+import stat
 from pathlib import Path
 
 import networkx as nx
@@ -570,6 +572,20 @@ class TestConfigFile:
         tmp_path.mkdir(exist_ok=True)
         (tmp_path / "config.json").write_text("{broken", encoding="utf-8")
         assert read_config(tmp_path) == {}
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+    def test_new_config_is_owner_only(self, tmp_path):
+        write_config("api_key", "sk-secret", tmp_path)
+        assert stat.S_IMODE((tmp_path / "config.json").stat().st_mode) == 0o600
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+    def test_existing_world_readable_config_is_tightened(self, tmp_path):
+        path = tmp_path / "config.json"
+        path.write_text("{}", encoding="utf-8")
+        path.chmod(0o644)
+        write_config("api_key", "sk-secret", tmp_path)
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert read_config(tmp_path) == {"api_key": "sk-secret"}
 
 
 class TestFormatExplanation:

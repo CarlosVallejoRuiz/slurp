@@ -156,8 +156,23 @@ def write_config(key: str, value: str, config_dir: Path | None = None) -> dict:
     config[key] = value
     path = config_path(config_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+    _write_owner_only(path, json.dumps(config, indent=2))
     return config
+
+
+def _write_owner_only(path: Path, text: str) -> None:
+    """Write *text* to *path* with permissions 0600.
+
+    DECISION: config.json can hold an API key, so it is readable by its owner
+    only. The mode passed to os.open applies to a new file; an existing file
+    keeps its old bits, so it is tightened before the secret is written rather
+    than after.
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    if hasattr(os, "fchmod"):  # not available on Windows
+        os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
 
 
 # ---------------------------------------------------------------------------

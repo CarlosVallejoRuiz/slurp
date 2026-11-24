@@ -215,6 +215,40 @@ def _build_mcp_config(command: str, graph_path: Path, existing: dict | None) -> 
     return config
 
 
+def _mentions_slurp_dir(line: str) -> bool:
+    """Whether a .gitignore line already decides what happens to .slurp/.
+
+    A negation (`!.slurp/`) counts too: it is the user deliberately choosing to
+    track the directory, and appending `.slurp/` after it would override them.
+    """
+    pattern = line.strip().lstrip("!")
+    pattern = pattern.removeprefix("**/").removeprefix("/")
+    return pattern.rstrip("*").rstrip("/") == ".slurp"
+
+
+def _ensure_gitignored(gitignore: Path) -> bool:
+    """Append `.slurp/` to an existing .gitignore that does not mention it yet.
+
+    DECISION: .slurp/ holds the audit log, the session log and config.json,
+    which may contain an API key — none of it belongs in a commit. A missing
+    .gitignore is left missing: creating one is a project decision, not slurp's.
+
+    Args:
+        gitignore: Path to the project's .gitignore.
+
+    Returns:
+        True if the entry was appended.
+    """
+    if not gitignore.is_file():
+        return False
+    text = gitignore.read_text(encoding="utf-8")
+    if any(_mentions_slurp_dir(line) for line in text.splitlines()):
+        return False
+    separator = "" if not text or text.endswith("\n") else "\n"
+    gitignore.write_text(f"{text}{separator}.slurp/\n", encoding="utf-8")
+    return True
+
+
 class _SlurpGroup(click.Group):
     """Routes unknown first args to the hidden 'run' subcommand."""
 
@@ -1542,6 +1576,9 @@ def init(yes: bool) -> None:
     if write_mcp:
         mcp_path.write_text(config_json + "\n", encoding="utf-8")
 
+    # --- Step 3: keep .slurp/ out of git -------------------------------------
+    gitignored = _ensure_gitignored(Path(".gitignore"))
+
     # --- Summary ------------------------------------------------------------
     summary: list[str] = [
         f"[bold]Nodes:[/]   {n_nodes}",
@@ -1555,6 +1592,9 @@ def init(yes: bool) -> None:
         summary.append("[yellow].mcp.json left untouched.[/] Add this entry manually:")
     # JSON contains square brackets, which rich would parse as markup tags.
     summary.append(escape(config_json))
+    if gitignored:
+        summary.append("")
+        summary.append("[bold].gitignore[/]: added .slurp/ (logs and config stay out of git)")
 
     _echo_rich(Panel("\n".join(summary), title="slurp is ready", border_style="green",
                      padding=(1, 2)))

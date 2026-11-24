@@ -1457,6 +1457,59 @@ class TestInitCommand:
         assert args[1] == "--graph"
         assert args[2].endswith("graph.json")
 
+    # --- .gitignore ------------------------------------------------------------
+
+    def test_gitignore_gains_slurp_dir(self, tmp_path, monkeypatch):
+        self._make_project(tmp_path)
+        (tmp_path / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["init", "--yes"])
+        assert result.exit_code == 0, result.output
+        lines = (tmp_path / ".gitignore").read_text(encoding="utf-8").splitlines()
+        assert lines == ["node_modules/", ".slurp/"]
+
+    def test_gitignore_without_trailing_newline(self, tmp_path, monkeypatch):
+        self._make_project(tmp_path)
+        (tmp_path / ".gitignore").write_text("dist", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        _runner().invoke(cli, ["init", "--yes"])
+        assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == "dist\n.slurp/\n"
+
+    # A negation is the user choosing to track .slurp/; appending would override it.
+    @pytest.mark.parametrize("existing", [".slurp/", ".slurp", "/.slurp/", "/.slurp",
+                                          "**/.slurp/", "!.slurp/"])
+    def test_gitignore_entry_never_duplicated(self, tmp_path, monkeypatch, existing):
+        self._make_project(tmp_path)
+        original = f"build/\n{existing}\n"
+        (tmp_path / ".gitignore").write_text(original, encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        _runner().invoke(cli, ["init", "--yes"])
+        _runner().invoke(cli, ["init", "--yes"])
+        assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == original
+
+    def test_second_init_does_not_append_again(self, tmp_path, monkeypatch):
+        self._make_project(tmp_path)
+        (tmp_path / ".gitignore").write_text("venv/\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        _runner().invoke(cli, ["init", "--yes"])
+        _runner().invoke(cli, ["init", "--yes"])
+        text = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+        assert text.splitlines().count(".slurp/") == 1
+
+    def test_no_gitignore_is_not_created(self, tmp_path, monkeypatch):
+        self._make_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        result = _runner().invoke(cli, ["init", "--yes"])
+        assert result.exit_code == 0, result.output
+        assert not (tmp_path / ".gitignore").exists()
+
+    def test_cancelled_init_leaves_gitignore_alone(self, tmp_path, monkeypatch):
+        self._make_project(tmp_path)
+        (tmp_path / ".gitignore").write_text("venv/\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        _runner().invoke(cli, ["init"], input="n\n")
+        assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == "venv/\n"
+
     def test_mcp_json_graph_path_is_absolute(self, tmp_path, monkeypatch):
         self._make_project(tmp_path)
         monkeypatch.chdir(tmp_path)
