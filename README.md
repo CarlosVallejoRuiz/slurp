@@ -34,10 +34,29 @@ the header reports scaled tokens. For the MCP server, set it in `.mcp.json`:
 
 ## Benchmark
 
-Tested on a real **PrismaStats** codebase: 2,111 nodes, 28,412 tokens total.
+Measured with `slurp benchmark` on a real **PrismaStats** codebase (graphify graph, 2,111
+nodes). Both sides are the text that would be sent, counted with tiktoken: the subgraph
+slurp prints for each query and budget, and the whole graph printed the same way —
+117,828 tokens with the query's header and scores.
 
 | Query | Budget 2k | Budget 4k | Budget 8k |
 |---|---|---|---|
+| `"auth flow"` | **98.3%** saved | 96.7% saved | 93.3% saved |
+| `"prisma schema"` | 98.3% saved | 96.7% saved | 93.3% saved |
+| `"database pool"` | 98.3% saved | 96.7% saved | 93.3% saved |
+
+**Mean savings: 96.1% · p50: 96.7% · Best case: 98.3% · Worst case: 93.3%**
+
+The output stays under the budget: 1,954–1,963 tokens at 2k, 3,918–3,925 at 4k, 7,847 at 8k.
+On the same project's `slurp index` graph, `slurp eval --retrieval` finds 86.7% of the
+labelled nodes of its 15 questions at `--budget 4000` and all of them at `--budget 16000`.
+
+> **Before v1.1.0 these figures were not honest.** The budget counted a short per-node
+> summary and no relationships, so on this graph `--budget 8000` printed 40,368–41,582
+> tokens while the benchmark reported 8,000; measured on the real text, savings at
+> 2k/4k/8k were 86.1–87.4% / 72.7–75.7% / 59.5–60.6%, not the figures shown then.
+
+---|---|---|---|
 | `"auth flow"` | **97.1%** saved | 96.3% saved | 95.2% saved |
 | `"prisma schema"` | 95.8% saved | 94.2% saved | 93.8% saved |
 | `"database pool"` | 93.1% saved | 89.1% saved | 85.1% saved |
@@ -968,28 +987,31 @@ slurp benchmark \
 ```
 
 ```
-        Benchmark Results — pricing: default ($3/MTok input)
-┏━━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┓
-┃ Query           ┃ Budget ┃ Tokens used ┃ Full graph ┃ Savings ┃ Cost (slurp) ┃ Cost (full) ┃
-┡━━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━━┩
-│ select subgraph │  2,000 │       1,998 │    271,093 │   99.3% │      $0.0060 │     $0.8133 │
-└─────────────────┴────────┴─────────────┴────────────┴─────────┴──────────────┴─────────────┘
+                                        Benchmark Results — pricing: default ($3/MTok input)
+┏━━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━┓
+┃ Query           ┃ Budget ┃ Tokens used ┃ Full graph ┃ Savings ┃ Cost (slurp) ┃ Cost (full) ┃ Nodes sel. ┃ Nodes total ┃ Coverage ┃
+┡━━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━┩
+│ select subgraph │  2,000 │       1,949 │    318,075 │   99.4% │      $0.0058 │     $0.9542 │         69 │        4013 │     1.7% │
+└─────────────────┴────────┴─────────────┴────────────┴─────────┴──────────────┴─────────────┴────────────┴─────────────┴──────────┘
                             Summary
 ┏━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
 ┃ Metric             ┃                                   Value ┃
 ┡━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
-│ Mean savings       │                                   99.3% │
-│ p50 savings        │                                   99.3% │
-│ Mean precision     │                                   2.22% │
-│ Best case          │ 99.3% ('select subgraph', budget 2,000) │
-│ Cost with slurp    │                                 $0.0060 │
-│ Cost without slurp │                                 $0.8133 │
-│ Money saved        │                         $0.8073 (99.3%) │
+│ Mean savings       │                                   99.4% │
+│ p50 savings        │                                   99.4% │
+│ p90 savings        │                                   99.4% │
+│ p95 savings        │                                   99.4% │
+│ Best case          │ 99.4% ('select subgraph', budget 2,000) │
+│ Worst case         │ 99.4% ('select subgraph', budget 2,000) │
+│ Cost with slurp    │                                 $0.0058 │
+│ Cost without slurp │                                 $0.9542 │
+│ Money saved        │                         $0.9484 (99.4%) │
 └────────────────────┴─────────────────────────────────────────┘
+Retrieval quality is not measured here: see `slurp eval --retrieval`.
+
 ```
 
-> One query at one budget, run against slurp's own graph. The real table also carries
-> `Nodes sel.`, `Nodes total` and `Coverage`, elided here for width.
+> One query at one budget, run against slurp's own graph (4,013 nodes) with v1.1.0.
 
 Outputs a per-run table and aggregate stats: mean savings, p50/p90/p95, best/worst case.
 Both sides are measured the same way since v1.1.0: `Tokens used` is the text slurp
