@@ -809,7 +809,7 @@ def benchmark_cmd(
 @click.option("--log/--no-log", "log", default=True, show_default=True,
               help="Append served queries to .slurp/session.log (only if .slurp/ exists).")
 def serve(graph: tuple[str, ...], graph_labels: tuple[str, ...], log: bool) -> None:
-    """Start an MCP stdio server exposing the slurp_query tool."""
+    """Start an MCP stdio server exposing the five slurp tools (query, explain, diff, suggest, impact)."""
     graph_paths = [Path(g) for g in graph]
     if not graph_paths:
         found = _find_graph()

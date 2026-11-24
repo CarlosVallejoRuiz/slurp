@@ -900,6 +900,21 @@ class TestInstructionsMentionEveryTool:
         for name in ("slurp_query", "slurp_explain", "slurp_diff"):
             assert name in instructions
 
+    def test_instructions_name_every_listed_tool(self):
+        instructions = _invoke(_req("initialize", {}))["result"]["instructions"]
+        for tool in _TOOLS:
+            assert tool["name"] in instructions
+
+    def test_stated_tool_count_matches_the_tool_list(self):
+        import re
+
+        words = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+                 "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+        instructions = _invoke(_req("initialize", {}))["result"]["instructions"]
+        stated = re.findall(r"\b(\w+) tools\b", instructions, re.IGNORECASE)
+        assert stated, "instructions should say how many tools there are"
+        assert all(words.get(w.lower()) == len(_TOOLS) for w in stated), stated
+
 
 class TestExplainTool:
     @pytest.fixture(autouse=True)

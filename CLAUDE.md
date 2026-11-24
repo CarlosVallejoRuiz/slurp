@@ -342,8 +342,8 @@ uv sync --extra rust            # solo una
     funcionalidad es correcta y está cubierta por 16 tests, pero su frecuencia
     real es mucho menor de lo que sugería su protagonismo en la documentación.
 
-- **El servidor MCP expone tres herramientas** (`slurp_query`, `slurp_explain`,
-  `slurp_diff`), todas `readOnlyHint` + `idempotentHint` para que el cliente
+- **El servidor MCP expone cinco herramientas** (`slurp_query`, `slurp_explain`,
+  `slurp_diff`, `slurp_suggest`, `slurp_impact`), todas `readOnlyHint` + `idempotentHint` para que el cliente
   pueda auto-aprobarlas.
   - `slurp_explain` usa **el mismo grafo que `slurp_query`**, con la
     comprobación de recarga incluida: las dos no pueden responder desde

@@ -1,4 +1,5 @@
-"""MCP stdio server exposing the slurp_query tool.
+"""MCP stdio server exposing slurp_query, slurp_explain, slurp_diff, slurp_suggest
+and slurp_impact.
 
 Protocol: JSON-RPC 2.0 over newline-delimited stdin/stdout (MCP 2024-11-05).
 No external dependencies — stdlib only for the transport layer.
@@ -35,7 +36,7 @@ _MIN_SCORE = 0.15
 
 _INSTRUCTIONS = (
     "Slurp serves token-budget-aware slices of a codebase knowledge graph. "
-    "Three tools, for three different questions.\n\n"
+    "Five tools, for five different questions.\n\n"
     "slurp_query — 'where is the code that does X?'. Call it before reading "
     "files when you need to orient yourself in an unfamiliar codebase, locate "
     "the code responsible for a feature, or understand how components relate. "
