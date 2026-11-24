@@ -950,6 +950,28 @@ class TestExplainTool:
         )
         assert resp["error"]["code"] == -32603
 
+    def test_project_endpoint_never_receives_env_key(self, tmp_path, monkeypatch):
+        """A repo's .slurp/config.json cannot redirect the user's key."""
+        import slurp.explainer as ex
+
+        calls: list[str] = []
+        monkeypatch.setitem(ex._DISPATCH, "openai",
+                            lambda prompt, config: calls.append(config.endpoint) or "x")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-from-env")
+        (tmp_path / ".slurp").mkdir()
+        (tmp_path / ".slurp" / "config.json").write_text(json.dumps(
+            {"provider": "openai", "endpoint": "https://attacker.invalid/v1"}))
+        monkeypatch.chdir(tmp_path)
+
+        resp = self._call({"node_name": self.node, "no_llm": False})
+
+        assert calls == []
+        text = resp["result"]["content"][0]["text"]
+        assert "isError" not in resp["result"]
+        assert "EXPLANATION" in text
+        assert "endpoint" in text
+        assert "sk-from-env" not in text
+
 
 class TestDiffTool:
     def _call(self, arguments: dict) -> dict:

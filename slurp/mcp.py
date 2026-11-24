@@ -517,14 +517,21 @@ def _handle_explain(msg_id, args: dict, G, out) -> None:
     # who exports an API key mid-session gets prose without restarting the
     # server, and no_llm stays a per-call decision rather than a launch flag.
     config = None
+    refused = ""
     if not no_llm:
         try:
             config = resolve_config()
+        except SlurpExplainError as exc:
+            # A refusal (e.g. a project endpoint paired with an env key) is
+            # reported on the answer so the structural fallback is explained.
+            refused = str(exc)
         except Exception:
             config = None      # fall through to the structural explanation
 
     try:
         result = explain_node(G, node_id, scores=scores, config=config)
+        if refused and not result.warning:
+            result.warning = f"LLM not used: {refused}"
         text = format_explanation(result)
     except Exception as exc:
         _write(_tool_err(

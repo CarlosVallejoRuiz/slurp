@@ -811,7 +811,7 @@ def eval_cmd(
 
     try:
         config = resolve_config(provider, model, endpoint, Path(config_dir))
-    except ValueError as exc:
+    except (ValueError, SlurpExplainError) as exc:
         raise click.ClickException(str(exc)) from None
     if config.provider in ("structural", ""):
         raise click.ClickException(
@@ -989,7 +989,7 @@ def config_set(key: str, value: str, config_dir: str) -> None:
               help="Directory holding config.json.")
 def config_show(config_dir: str) -> None:
     """Show the saved configuration and what slurp would use right now."""
-    from slurp.explainer import config_path, read_config, resolve_config
+    from slurp.explainer import SlurpExplainError, config_path, read_config, resolve_config
 
     path = config_path(Path(config_dir))
     saved = read_config(Path(config_dir))
@@ -1005,7 +1005,12 @@ def config_show(config_dir: str) -> None:
         table.add_row("(empty)", "no config file yet")
     _echo_rich(table)
 
-    resolved = resolve_config(config_dir=Path(config_dir))
+    try:
+        resolved = resolve_config(config_dir=Path(config_dir))
+    except SlurpExplainError as exc:
+        # `show` exists to diagnose the config, so a refusal is reported, not raised.
+        click.echo(f"\nEffective provider: none — {exc}")
+        return
     click.echo(f"\nEffective provider: {resolved.provider}")
     click.echo(f"Effective model:    {resolved.model or '(none)'}")
     if resolved.endpoint:

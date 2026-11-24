@@ -33,6 +33,16 @@ OLLAMA_DEFAULT_HOST = "http://localhost:11434"
 
 PROVIDERS = ("anthropic", "openai", "ollama", "openai-compatible")
 
+# Environment variable each provider reads its API key from.
+_ENV_KEY_VARS: dict[str, str] = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "openai-compatible": "SLURP_LLM_API_KEY",
+}
+
+# Providers whose call sends the API key to config.endpoint. See resolve_config.
+_SENDS_KEY_TO_ENDPOINT = frozenset({"openai", "openai-compatible"})
+
 DEFAULT_MODELS: dict[str, str] = {
     "anthropic": "claude-sonnet-5",
     "openai": "gpt-4o-mini",
@@ -212,6 +222,11 @@ def resolve_config(
 
     Returns:
         A fully resolved LLMConfig.
+
+    Raises:
+        SlurpExplainError: If the endpoint comes from the project config while
+            the API key comes from the environment, for a provider that would
+            send that key to that endpoint.
     """
     environ = os.environ if env is None else env
     saved = read_config(config_dir)
@@ -223,14 +238,31 @@ def resolve_config(
         or saved.get("endpoint")
         or environ.get("SLURP_LLM_ENDPOINT")
     )
+    endpoint_from_project = not endpoint and bool(saved.get("endpoint"))
 
     api_key = saved.get("api_key")
-    if chosen == "anthropic":
-        api_key = api_key or environ.get("ANTHROPIC_API_KEY")
-    elif chosen == "openai":
-        api_key = api_key or environ.get("OPENAI_API_KEY")
-    elif chosen == "openai-compatible":
-        api_key = api_key or environ.get("SLURP_LLM_API_KEY")
+    env_key_var = _ENV_KEY_VARS.get(chosen)
+    key_from_env = False
+    if not api_key and env_key_var and environ.get(env_key_var):
+        api_key = environ[env_key_var]
+        key_from_env = True
+
+    # DECISION: a key from the user's environment is never sent to an endpoint
+    # read from the project config. .slurp/config.json can be committed by any
+    # repository the user clones, so its endpoint is not something the user
+    # chose; pairing it with OPENAI_API_KEY would hand that key to whoever wrote
+    # the file. The user opts in by naming the endpoint themselves (--endpoint,
+    # SLURP_LLM_ENDPOINT) or by storing a key in the same config. Anthropic is
+    # not in the set only because _call_anthropic ignores `endpoint` today —
+    # wiring a base_url there must add it.
+    if endpoint_from_project and key_from_env and chosen in _SENDS_KEY_TO_ENDPOINT:
+        raise SlurpExplainError(
+            f"Refusing to send {env_key_var} from your environment to the endpoint "
+            f"{chosen_endpoint} set in {config_path(config_dir)}. A project config "
+            "can come from any repository you clone. If you trust this endpoint, "
+            "pass --endpoint or set SLURP_LLM_ENDPOINT; or store a key for it "
+            "with `slurp config set api_key <key>`."
+        )
 
     temperature = saved.get("temperature", 0.3)
     try:

@@ -438,6 +438,107 @@ class TestResolveConfig:
                               check_ollama=False).temperature == 0.3
 
 
+def _project_config(config_dir: Path, **values: str) -> Path:
+    """Write a project-level config.json the way a cloned repo would ship it."""
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.json").write_text(json.dumps(values), encoding="utf-8")
+    return config_dir
+
+
+class TestEndpointKeyIsolation:
+    """A key from the user's environment never travels to a project endpoint.
+
+    The project config is whatever a cloned repository ships in .slurp/, so an
+    endpoint read from it is not something the user chose.
+    """
+
+    @pytest.mark.parametrize(("provider", "env_var"), [
+        ("openai", "OPENAI_API_KEY"),
+        ("openai-compatible", "SLURP_LLM_API_KEY"),
+    ])
+    def test_env_key_refused_for_project_endpoint(self, tmp_path, provider, env_var):
+        cfg = _project_config(tmp_path / ".slurp", provider=provider,
+                              endpoint="https://attacker.invalid/v1")
+        with pytest.raises(SlurpExplainError, match="endpoint"):
+            resolve_config(config_dir=cfg, env={env_var: "sk-from-env"},
+                           check_ollama=False)
+
+    def test_autodetected_provider_is_also_refused(self, tmp_path):
+        # No provider saved: OPENAI_API_KEY picks openai, the endpoint still
+        # comes from the project.
+        cfg = _project_config(tmp_path / ".slurp", endpoint="https://attacker.invalid/v1")
+        with pytest.raises(SlurpExplainError):
+            resolve_config(config_dir=cfg, env={"OPENAI_API_KEY": "sk-from-env"},
+                           check_ollama=False)
+
+    def test_error_never_echoes_the_key(self, tmp_path):
+        cfg = _project_config(tmp_path / ".slurp", provider="openai",
+                              endpoint="https://attacker.invalid/v1")
+        with pytest.raises(SlurpExplainError) as info:
+            resolve_config(config_dir=cfg, env={"OPENAI_API_KEY": "sk-from-env"},
+                           check_ollama=False)
+        assert "sk-from-env" not in str(info.value)
+
+    def test_project_endpoint_with_project_key_is_allowed(self, tmp_path):
+        cfg = _project_config(tmp_path / ".slurp", provider="openai",
+                              endpoint="https://proxy.example/v1", api_key="sk-project")
+        config = resolve_config(config_dir=cfg, env={"OPENAI_API_KEY": "sk-from-env"},
+                                check_ollama=False)
+        assert (config.endpoint, config.api_key) == ("https://proxy.example/v1", "sk-project")
+
+    def test_endpoint_flag_with_env_key_is_allowed(self, tmp_path):
+        cfg = _project_config(tmp_path / ".slurp", provider="openai",
+                              endpoint="https://attacker.invalid/v1")
+        config = resolve_config(endpoint="https://mine.example/v1", config_dir=cfg,
+                                env={"OPENAI_API_KEY": "sk-from-env"}, check_ollama=False)
+        assert (config.endpoint, config.api_key) == ("https://mine.example/v1", "sk-from-env")
+
+    def test_env_endpoint_with_env_key_is_allowed(self, tmp_path):
+        config = resolve_config(
+            "openai-compatible", config_dir=tmp_path / "none",
+            env={"SLURP_LLM_ENDPOINT": "http://localhost:1234/v1",
+                 "SLURP_LLM_API_KEY": "sk-from-env"},
+            check_ollama=False,
+        )
+        assert (config.endpoint, config.api_key) == ("http://localhost:1234/v1", "sk-from-env")
+
+    def test_anthropic_ignores_endpoint_so_is_not_blocked(self, tmp_path):
+        cfg = _project_config(tmp_path / ".slurp", provider="anthropic",
+                              endpoint="https://attacker.invalid/v1")
+        config = resolve_config(config_dir=cfg, env={"ANTHROPIC_API_KEY": "k"},
+                                check_ollama=False)
+        assert config.api_key == "k"
+
+    def test_cli_explain_refuses_and_makes_no_call(self, tmp_path, monkeypatch):
+        import slurp.explainer as ex
+
+        calls: list[str] = []
+        monkeypatch.setitem(ex._DISPATCH, "openai",
+                            lambda prompt, config: calls.append(config.endpoint) or "x")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-from-env")
+        graph = tmp_path / "graph.json"
+        graph.write_text(json.dumps({"nodes": [{"id": "a", "label": "alpha"}],
+                                     "links": []}), encoding="utf-8")
+        cfg = _project_config(tmp_path / ".slurp", provider="openai",
+                              endpoint="https://attacker.invalid/v1")
+
+        res = CliRunner().invoke(cli, ["explain", "alpha", "--graph", str(graph),
+                                       "--config-dir", str(cfg)])
+
+        assert res.exit_code != 0
+        assert calls == []
+        assert "sk-from-env" not in res.output
+
+    def test_config_show_reports_instead_of_crashing(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-from-env")
+        cfg = _project_config(tmp_path / ".slurp", provider="openai",
+                              endpoint="https://attacker.invalid/v1")
+        res = CliRunner().invoke(cli, ["config", "show", "--config-dir", str(cfg)])
+        assert res.exit_code == 0, res.output
+        assert "Traceback" not in res.output
+        assert "sk-from-env" not in res.output
+
+
 class TestConfigFile:
     def test_write_then_read(self, tmp_path):
         write_config("provider", "anthropic", tmp_path)
