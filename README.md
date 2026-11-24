@@ -4,7 +4,7 @@
 
 # slurp
 
-![tests](https://img.shields.io/badge/tests-2273%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-2335%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 ![pypi](https://img.shields.io/badge/PyPI-slurp--graph-orange)
@@ -1417,6 +1417,7 @@ Pass a custom path with `--ignore-file path/to/.slurpignore`.
 - ✅ **v1.0.3** — MCP gains `slurp_explain` and `slurp_diff`
 - ✅ **v1.0.4** — `--suggest`: follow-up queries read off the subgraph's frontier, plus the `slurp_suggest` MCP tool
 - ✅ **v1.0.5** — `slurp impact`: blast radius of editing a file before you edit it, no second snapshot needed, plus the `slurp_impact` MCP tool
+- ✅ **v1.0.6** — Security patch: an environment API key is never sent to an endpoint from a project's `.slurp/config.json`; `config.json` is written 0600 and `slurp init` adds `.slurp/` to `.gitignore`; `--inject-code` stays inside the project root; `slurp index` asks before replacing a graph graphify wrote (`--force` to skip); the viz works offline (vis-network vendored) and graph text can no longer break its `<script>`; a damaged `audit.jsonl` line is skipped with a warning
 
 ---
 
