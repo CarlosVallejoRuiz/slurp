@@ -129,6 +129,33 @@ def _resolve_node_type(attrs: dict) -> str:
     return "default"
 
 
+def _script_json(value: object) -> str:
+    """Serialise *value* as JSON that is inert inside an inline <script>.
+
+    DECISION: the HTML parser ends a script at the first `</script`, wherever
+    it sits — inside a JS string included. Node labels and descriptions come
+    from the graph (docstrings, docs pages), so a literal `</script>` there ended
+    the script early: the page broke, and whatever followed ran as markup. Every
+    `<` is written as `\\u003c`, which is the same character to JSON and JS but
+    invisible to the HTML parser. That also neutralises `<!--`, which can make
+    the parser skip a later `</script>`, and the `<<<NAME>>>` template
+    placeholders, which build_html would otherwise substitute inside the data.
+    U+2028/U+2029 are escaped too: older JS engines reject them in strings.
+
+    Args:
+        value: JSON-serialisable data.
+
+    Returns:
+        A JSON string safe to place inside <script>…</script>.
+    """
+    return (
+        json.dumps(value, ensure_ascii=False)
+        .replace("<", "\\u003c")
+        .replace(" ", "\\u2028")
+        .replace(" ", "\\u2029")
+    )
+
+
 def _esc_html(text: str) -> str:
     return (
         str(text)
@@ -241,14 +268,14 @@ def build_html(
         .replace("<<<SAVED_TOKENS>>>",   f"{saved:,}")
         .replace("<<<SAVED_PCT>>>",      str(saved_pct))
         .replace("<<<TOP_BADGE>>>",      top_badge)
-        .replace("<<<PALETTE_JSON>>>",   json.dumps(palette))
-        .replace("<<<LEGEND_JSON>>>",    json.dumps(legend, ensure_ascii=False))
-        .replace("<<<PROJECTS_JSON>>>",  json.dumps(projects, ensure_ascii=False))
+        .replace("<<<PALETTE_JSON>>>",   _script_json(palette))
+        .replace("<<<LEGEND_JSON>>>",    _script_json(legend))
+        .replace("<<<PROJECTS_JSON>>>",  _script_json(projects))
         .replace("<<<INLINE_MAX>>>",     str(_INLINE_LABEL_MAX))
         .replace("<<<IMPORT_SIZE>>>",    str(_IMPORT_SIZE))
         .replace("<<<QUIET_SCORE>>>",    str(_QUIET_LABEL_SCORE))
-        .replace("<<<NODES_JSON>>>",     json.dumps(nodes, ensure_ascii=False))
-        .replace("<<<EDGES_JSON>>>",     json.dumps(edges, ensure_ascii=False))
+        .replace("<<<NODES_JSON>>>",     _script_json(nodes))
+        .replace("<<<EDGES_JSON>>>",     _script_json(edges))
     )
 
 

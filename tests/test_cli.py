@@ -2197,3 +2197,53 @@ class TestIndexKeepsForeignGraphs:
         result = _runner().invoke(cli, ["init", "--yes"])
         assert result.exit_code == 0, result.output
         assert out.read_bytes() == before
+
+
+# ---------------------------------------------------------------------------
+# viz: graph data embedded in <script> must not be able to end the script
+# ---------------------------------------------------------------------------
+
+_VIZ_STATS = {"nodes_selected": 2, "nodes_total": 2, "tokens_used": 10,
+              "tokens_budget": 100, "coverage_pct": 100.0}
+
+
+def _viz_data(html: str, var: str) -> object:
+    """Parse the JSON assigned to `var NAME = ...;` back out of the page."""
+    line = next(ln for ln in html.splitlines() if ln.startswith(f"var {var} "))
+    return json.loads(line.split("=", 1)[1].strip().rstrip(";"))
+
+
+class TestVizEmbeddingIsInert:
+    PAYLOAD = "x</script><script>window.__pwned=1</script>"
+
+    def _html(self, **attrs) -> str:
+        G = nx.DiGraph()
+        G.add_node("a", label=attrs.get("label", "alpha"),
+                   description=attrs.get("description", ""))
+        G.add_node("b", label="beta")
+        G.add_edge("a", "b", relation=attrs.get("relation", "calls"))
+        return build_html(G, _VIZ_STATS, {"a": 0.9, "b": 0.5}, "q")
+
+    def test_description_cannot_close_the_script(self):
+        html = self._html(description=self.PAYLOAD)
+        assert "</script><script>window.__pwned" not in html
+        assert html.count("</script>") == html.count("<script")
+
+    def test_label_and_relation_cannot_close_the_script(self):
+        html = self._html(label=self.PAYLOAD, relation=self.PAYLOAD)
+        assert "window.__pwned=1</script>" not in html
+
+    def test_html_comment_opener_is_neutralised(self):
+        assert "<!--" not in self._html(description="<!-- <script>")
+
+    def test_escaped_data_round_trips_unchanged(self):
+        html = self._html(label="a<b>c", description=self.PAYLOAD, relation="</rel>")
+        nodes = {n["id"]: n for n in _viz_data(html, "RN")}
+        assert nodes["a"]["description"] == self.PAYLOAD
+        assert nodes["a"]["label"] == "a<b>c"
+        assert _viz_data(html, "RE")[0]["label"] == "</rel>"
+
+    def test_template_placeholder_in_data_stays_literal(self):
+        html = self._html(label="<<<EDGES_JSON>>>")
+        nodes = {n["id"]: n for n in _viz_data(html, "RN")}
+        assert nodes["a"]["label"] == "<<<EDGES_JSON>>>"
