@@ -259,7 +259,7 @@ slurp "prisma models" --backend openai
 | `--explain` | off | Print per-node score breakdown: final / structural / semantic. |
 | `--no-audit` | off | Skip writing to `.slurp/audit.jsonl`. |
 | `--neighbor-decay` | `0.7` | Score multiplier applied to neighbors of each selected node. |
-| `--min-score` | `0.15` | Minimum relevance score; nodes below this are excluded before selection. |
+| `--min-score` | `0.15` | Minimum relevance score; nodes below this are excluded before selection. The same default applies to `export`, `benchmark`, `eval`, `diff --budget`, the MCP server and the library. On `slurp index` graphs every node is code and gets the +0.3 code boost, so 0.15 filters nothing there — the budget is the limit; on graphify graphs it keeps unrelated documents and concepts out. |
 | `--viz` | off | Open an interactive graph visualization in the browser. |
 | `--viz-output PATH` | — | Save visualization HTML to file (without opening browser). |
 | `--ignore-file` | `.slurpignore` | Path to node exclusion rules. |
@@ -1019,7 +1019,7 @@ Quality/token baseline: 0.000012
 | `--output`, `-o` | — | Write full results, including both answers, as JSON. |
 | `--dry-run` | off | List the questions and exit without calling any LLM. |
 | `--retrieval` | off | No LLM: for each question, the share of its `relevant_nodes` inside the selected subgraph (recall) and 1/rank of the best one by score (MRR). Same selection settings as `slurp QUERY`; questions whose nodes are not in the graph are reported, not scored. |
-| `--min-score` | CLI default | Minimum score for `--retrieval`. |
+| `--min-score` | `0.15` | Minimum score for `--retrieval` (the shared default). |
 
 Each question costs **three LLM calls** (answer with slurp, answer from the full graph,
 judge). The built-in set of 15 questions is therefore 45 calls; budget accordingly. The

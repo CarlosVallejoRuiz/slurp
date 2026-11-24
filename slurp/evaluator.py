@@ -14,7 +14,7 @@ from pathlib import Path
 
 import networkx as nx
 
-from slurp.budget import build_context, count_tokens, select_subgraph
+from slurp.budget import DEFAULT_MIN_SCORE, build_context, count_tokens, select_subgraph
 from slurp.explainer import LLMConfig, SlurpExplainError, _call_llm
 from slurp.formatter import format_subgraph
 from slurp.scorer import score_nodes
@@ -244,12 +244,13 @@ def parse_judge_response(raw: str) -> tuple[float, float, str]:
 # ---------------------------------------------------------------------------
 
 def build_slurp_context(
-    G: nx.DiGraph, question: str, budget: int, model: str = "cl100k_base"
+    G: nx.DiGraph, question: str, budget: int, model: str = "cl100k_base",
+    min_score: float = DEFAULT_MIN_SCORE,
 ) -> tuple[str, int]:
-    """Budgeted subgraph context for one question."""
+    """Budgeted subgraph context for one question, selected as a query would be."""
     scores = score_nodes(G, question)
     text, _subgraph, _stats = build_context(G, scores, budget=budget, model=model,
-                                            query=question)
+                                            min_score=min_score, query=question)
     return text, count_tokens(text, model=model)
 
 
@@ -348,9 +349,9 @@ def run_eval(
 # Retrieval-only evaluation (no LLM)
 # ---------------------------------------------------------------------------
 
-# DECISION: same selection settings as `slurp QUERY` and the MCP server, so the
-# metric describes the subgraph users actually get.
-RETRIEVAL_MIN_SCORE = 0.15
+# Same selection settings as `slurp QUERY` and the MCP server, so the metric
+# describes the subgraph users actually get. Kept as an alias of the shared one.
+RETRIEVAL_MIN_SCORE = DEFAULT_MIN_SCORE
 
 
 @dataclass
@@ -428,7 +429,7 @@ def run_retrieval_eval(
     G: nx.DiGraph,
     questions: list[EvalQuestion],
     budget: int = 4000,
-    min_score: float = RETRIEVAL_MIN_SCORE,
+    min_score: float = DEFAULT_MIN_SCORE,
     model: str = "cl100k_base",
 ) -> RetrievalSuite:
     """Score retrieval against each question's relevant_nodes, with no LLM.

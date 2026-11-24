@@ -12,7 +12,13 @@ from pathlib import Path
 from typing import TextIO
 
 from slurp import __version__
-from slurp.budget import BudgetTooSmallError, build_context, clear_node_token_cache, select_subgraph
+from slurp.budget import (
+    DEFAULT_MIN_SCORE,
+    BudgetTooSmallError,
+    build_context,
+    clear_node_token_cache,
+    select_subgraph,
+)
 from slurp.diff import diff_graphs, format_diff
 from slurp.explainer import (
     SlurpExplainError,
@@ -28,10 +34,9 @@ from slurp.scorer import clear_pagerank_cache, score_nodes
 
 _PROTOCOL_VERSION = "2024-11-05"
 
-# DECISION: min_score mirrors the CLI default (see cli.py --min-score) so the
+# The one default every entry point shares (see budget.DEFAULT_MIN_SCORE), so the
 # same query returns the same subgraph through MCP and through the terminal.
-# The library default is 0.0, which would select hundreds of irrelevant nodes.
-_MIN_SCORE = 0.15
+_MIN_SCORE = DEFAULT_MIN_SCORE
 
 _INSTRUCTIONS = (
     "Slurp serves token-budget-aware slices of a codebase knowledge graph. "

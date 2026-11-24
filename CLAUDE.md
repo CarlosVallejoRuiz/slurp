@@ -986,7 +986,7 @@ Punto de entrada para un proyecto nuevo. No requiere flags. Secuencia:
 | `lru_cache` en tiktoken | Evita recarga de vocab en cada nodo |
 | `links` tiene prioridad sobre `edges` | Compatibilidad con formato real de graphify |
 | Boost +0.3 para file_type=code | Docs compiten injustamente con código en queries técnicas |
-| `min_score=0.15` default | Evita seleccionar 400+ nodos en grafos grandes |
+| `DEFAULT_MIN_SCORE = 0.15` en todas partes (CLI, MCP, benchmark, eval, diff, librería) | Una medida describe lo que recibe el usuario. En grafos de `slurp index` no filtra (boost +0,3 a todo nodo código); hacerlo filtrar bajó el recall de 1,000 a 0,733 en PrismaStats — medido en v1.1.0 #13 — así que el boost no se toca |
 | El presupuesto mide el texto final | La suma de piezas no coincide con el texto; solo medir garantiza ≤ budget |
 | Freeze física al acabar la pasada de estabilización | Nodos quietos = grafo legible, y sin CPU ocupada sin fin en grafos medianos |
 | `max_nodes=50` en viz | Mantiene visualizador legible independiente del budget |

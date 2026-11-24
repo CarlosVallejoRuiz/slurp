@@ -18,7 +18,13 @@ from slurp._graphutils import _LANGUAGE_BY_EXT
 from slurp.audit import log_query, read_audit, top_nodes_from_audit
 # Imported at module level because the --price-model choices are built at decoration time.
 from slurp.benchmark import MODEL_PRICES_PER_MTok
-from slurp.budget import BudgetTooSmallError, build_context, count_tokens, fit_to_budget
+from slurp.budget import (
+    DEFAULT_MIN_SCORE,
+    BudgetTooSmallError,
+    build_context,
+    count_tokens,
+    fit_to_budget,
+)
 from slurp.explainer import PROVIDERS as _EXPLAIN_PROVIDERS
 from slurp.formatter import format_subgraph
 from slurp.ignore import apply_ignore, load_ignore
@@ -362,7 +368,7 @@ def cli(ctx: click.Context) -> None:
               help="How many suggestions --suggest may show.")
 @click.option("--neighbor-decay", "neighbor_decay", default=0.7,
               show_default=True, help="Score decay factor for neighbor nodes.")
-@click.option("--min-score", "min_score", default=0.15, show_default=True,
+@click.option("--min-score", "min_score", default=DEFAULT_MIN_SCORE, show_default=True,
               help="Minimum relevance score threshold; nodes below this are excluded.")
 @click.option("--viz", is_flag=True, default=False,
               help="Open an interactive graph visualisation in the browser.")
@@ -708,7 +714,7 @@ def _build_diff_panel(
               help="Write output to file instead of stdout.")
 @click.option("--model", "-m", default="cl100k_base", show_default=True,
               help="Tiktoken encoding model for token counting.")
-@click.option("--min-score", "min_score", default=0.15, show_default=True,
+@click.option("--min-score", "min_score", default=DEFAULT_MIN_SCORE, show_default=True,
               help="Minimum relevance score threshold.")
 @click.option("--neighbor-decay", "neighbor_decay", default=0.7, show_default=True,
               help="Score decay factor for neighbor nodes.")
@@ -775,8 +781,8 @@ def export_cmd(
               help="Tiktoken encoding model for token counting.")
 @click.option("--output", "-o", type=click.Path(), default=None,
               help="Save raw results to JSON file.")
-@click.option("--min-score", "min_score", default=0.0, show_default=True,
-              help="Minimum score filter (0.0 = include all nodes).")
+@click.option("--min-score", "min_score", default=DEFAULT_MIN_SCORE, show_default=True,
+              help="Minimum relevance score threshold, as in a query.")
 @click.option("--backend", default="tfidf", show_default=True,
               type=_BACKEND,
               help="Scoring backend: 'tfidf', or 'openai' for real embeddings.")
@@ -898,7 +904,6 @@ def eval_cmd(
 ) -> None:
     """Measure whether answers are better with slurp than with the full graph."""
     from slurp.evaluator import (
-        RETRIEVAL_MIN_SCORE,
         default_questions,
         load_eval_questions,
         run_eval,
@@ -935,7 +940,7 @@ def eval_cmd(
         try:
             suite = run_retrieval_eval(
                 G, questions, budget=budget,
-                min_score=RETRIEVAL_MIN_SCORE if min_score is None else min_score)
+                min_score=DEFAULT_MIN_SCORE if min_score is None else min_score)
         except BudgetTooSmallError as exc:
             raise click.ClickException(str(exc)) from None
         if not suite.scored:

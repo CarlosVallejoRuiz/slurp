@@ -10,7 +10,7 @@ import networkx as nx
 from rich.console import Console
 from rich.table import Table
 
-from slurp.budget import BudgetTooSmallError, build_context, count_tokens
+from slurp.budget import DEFAULT_MIN_SCORE, BudgetTooSmallError, build_context, count_tokens
 from slurp.scorer import score_nodes
 
 # DECISION: input-token list prices in USD per million tokens. This is a static
@@ -132,7 +132,7 @@ def run_benchmark(
     queries: list[str],
     budgets: list[int],
     model: str = "cl100k_base",
-    min_score: float = 0.0,
+    min_score: float = DEFAULT_MIN_SCORE,
     neighbor_decay: float = 0.7,
     relevance_threshold: float = 0.3,
     backend: str = "tfidf",

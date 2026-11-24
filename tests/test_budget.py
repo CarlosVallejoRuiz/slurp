@@ -266,7 +266,7 @@ class TestSelectionOrder:
         # With room for exactly two nodes, the boosted neighbour takes the second.
         for b in range(120, 800, 4):
             try:
-                _, sub, _ = build_context(G, scores, b)
+                _, sub, _ = build_context(G, scores, b, min_score=0.0)
             except BudgetTooSmallError:
                 continue
             if sub.number_of_nodes() == 2:
@@ -486,3 +486,57 @@ class TestTrimmedToEmptyIsNeverSilent:
         assert res.exit_code == 0, res.output
         assert "too small" in res.stdout and "--budget" in res.stdout
         assert count_tokens(res.stdout.rstrip("\n")) <= 400
+
+
+# ---------------------------------------------------------------------------
+# One default min_score everywhere
+# ---------------------------------------------------------------------------
+
+class TestOneDefaultMinScore:
+    def test_every_entry_point_uses_the_same_default(self):
+        import inspect
+
+        from slurp import benchmark, budget, cli, evaluator, mcp
+
+        expected = budget.DEFAULT_MIN_SCORE
+        assert expected == 0.15
+
+        def click_default(command, name="min_score"):
+            return next(p.default for p in command.params if p.name == name)
+
+        assert click_default(cli.run) == expected
+        assert click_default(cli.export_cmd) == expected
+        assert click_default(cli.benchmark_cmd) == expected
+        assert mcp._MIN_SCORE == expected
+        for fn in (budget.select_subgraph, budget.build_context, benchmark.run_benchmark,
+                   evaluator.run_retrieval_eval, evaluator.build_slurp_context):
+            assert inspect.signature(fn).parameters["min_score"].default == expected, fn
+
+    def test_diff_budget_uses_the_default(self, monkeypatch):
+        import slurp.cli as cli_mod
+
+        seen = {}
+        real = cli_mod.build_context
+
+        def spy(*args, **kwargs):
+            seen["min_score"] = kwargs.get("min_score", "default")
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(cli_mod, "build_context", spy)
+        import json
+
+        from click.testing import CliRunner
+
+        def graph(path, extra):
+            nodes = [{"id": "a", "label": "alpha", "type": "function"}] + extra
+            path.write_text(json.dumps({"nodes": nodes, "links": []}))
+            return str(path)
+
+        import tempfile
+
+        d = Path(tempfile.mkdtemp())
+        old = graph(d / "old.json", [])
+        new = graph(d / "new.json", [{"id": "b", "label": "beta", "type": "function"}])
+        res = CliRunner().invoke(cli_mod.cli, ["diff", old, new, "--budget", "2000"])
+        assert res.exit_code == 0, res.output
+        assert seen["min_score"] == "default"  # not overridden: the library default applies

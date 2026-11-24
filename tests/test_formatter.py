@@ -407,7 +407,8 @@ class TestIntegration:
         from slurp.scorer import score_nodes
 
         scores = score_nodes(sample_graph, "authentication jwt")
-        subG, stats = select_subgraph(sample_graph, scores, budget=10_000)
+        # min_score=0.0: these test a generous budget, not the default threshold.
+        subG, stats = select_subgraph(sample_graph, scores, budget=10_000, min_score=0.0)
         out = format_subgraph(
             subG, stats, format="markdown", scores=scores, query="authentication jwt"
         )
@@ -422,7 +423,8 @@ class TestIntegration:
         from slurp.scorer import score_nodes
 
         scores = score_nodes(sample_graph, "payment stripe")
-        subG, stats = select_subgraph(sample_graph, scores, budget=10_000)
+        # min_score=0.0: these test a generous budget, not the default threshold.
+        subG, stats = select_subgraph(sample_graph, scores, budget=10_000, min_score=0.0)
         parsed = json.loads(
             format_subgraph(subG, stats, format="json", scores=scores)
         )
@@ -437,7 +439,8 @@ class TestIntegration:
         from slurp.scorer import score_nodes
 
         scores = score_nodes(sample_graph, "database pool connection")
-        subG, stats = select_subgraph(sample_graph, scores, budget=10_000)
+        # min_score=0.0: these test a generous budget, not the default threshold.
+        subG, stats = select_subgraph(sample_graph, scores, budget=10_000, min_score=0.0)
         out = format_subgraph(subG, stats, format="yaml", scores=scores)
 
         assert out.startswith("stats:")

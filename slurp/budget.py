@@ -35,6 +35,19 @@ def count_tokens(text: str, model: str = "cl100k_base") -> int:
     return len(_get_encoding(model).encode(text))
 
 
+# DECISION: one default threshold for every entry point — CLI, MCP, benchmark,
+# eval and the library — so a measurement describes what users get. Until
+# v1.1.0 the CLI and MCP used 0.15 while benchmark, eval and the library used
+# 0.0. Note what it does and does not do: the +0.3 boost for file_type "code"
+# lifts every node of a `slurp index` graph to >= 0.3, so there 0.15 filters
+# nothing; in graphify graphs it keeps unrelated documents and concepts out.
+# Making it bite on code graphs was measured (slurp eval --retrieval): recall
+# on PrismaStats fell from 1.000 to 0.733, or stayed exactly as is when
+# neighbours were allowed back in. With the budget bounding the real text, the
+# budget is the binding limit, so the boost was left alone.
+DEFAULT_MIN_SCORE = 0.15
+
+
 class BudgetTooSmallError(ValueError):
     """The budget cannot hold even the header and its warning."""
 
@@ -240,7 +253,7 @@ def build_context(
     budget: int,
     model: str = "cl100k_base",
     neighbor_decay: float = 0.7,
-    min_score: float = 0.0,
+    min_score: float = DEFAULT_MIN_SCORE,
     *,
     format: str = "markdown",
     query: str = "",
@@ -376,7 +389,7 @@ def select_subgraph(
     budget: int,
     model: str = "cl100k_base",
     neighbor_decay: float = 0.7,
-    min_score: float = 0.0,
+    min_score: float = DEFAULT_MIN_SCORE,
     *,
     format: str = "markdown",
     query: str = "",
