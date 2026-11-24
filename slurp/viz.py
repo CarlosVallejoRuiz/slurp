@@ -651,7 +651,11 @@ var net = new vis.Network(
     layout:{improvedLayout:true}
   }
 );
-net.once('stabilized', function(){ net.setOptions({physics:{enabled:false}}); });
+// Freeze when the bounded stabilisation pass ends, not at natural rest:
+// 'stabilized' took 3.5 s for 476 nodes and never came within 30 s for 745,
+// whose main thread ran 29 s of script in those 30 s. The layout is already
+// settled for reading when the 500-iteration pass ends.
+net.once('stabilizationIterationsDone', function(){ net.setOptions({physics:{enabled:false}}); });
 
 /* ---- reveal held-back labels on hover ---- */
 net.on("hoverNode", function(p){

@@ -2299,3 +2299,26 @@ class TestVizIsSelfContained:
     def test_library_precedes_the_code_that_uses_it(self):
         html = self._html()
         assert html.index("@version 9.1.9") < html.index("new vis.Network(")
+
+
+class TestVizFreezesAfterStabilisation:
+    """Physics stops after the fixed stabilisation pass, not at natural rest.
+
+    'stabilized' fires only when the simulation comes to rest on its own: 3.5 s
+    for 476 nodes and never within 30 s for 745, with the main thread busy the
+    whole time. 'stabilizationIterationsDone' fires when the bounded pass ends.
+    """
+
+    def _html(self) -> str:
+        G = nx.DiGraph()
+        G.add_node("a", label="alpha")
+        return build_html(G, _VIZ_STATS, {"a": 1.0}, "q")
+
+    def test_freeze_is_tied_to_the_bounded_pass(self):
+        html = self._html()
+        handler = html.split("net.once('stabilizationIterationsDone'", 1)
+        assert len(handler) == 2
+        assert "physics:{enabled:false}" in handler[1].split("});", 1)[0]
+
+    def test_natural_rest_no_longer_gates_the_freeze(self):
+        assert "net.once('stabilized'" not in self._html()

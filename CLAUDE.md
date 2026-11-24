@@ -739,7 +739,9 @@ def build_html(
 - Nodos coloreados por tipo, tamaño proporcional a score
 - Panel lateral con label, tipo, score, descripción, archivo, conexiones
 - Header con query, nodes selected/total, tokens used/budget, coverage%, savings badge
-- Física: estabilización 500 iteraciones, freeze después de stabilize
+- Física: estabilización 500 iteraciones y freeze en `stabilizationIterationsDone`
+  (no en `stabilized`: con 745 nodos el reposo natural no llegaba en 30 s y el hilo
+  principal ejecutaba 29 s de script; ahora congela a los 3,3 s)
 - Nodos aislados con opacity 0.4
 - Modo diff: verde/rojo/amarillo/gris, tamaños compactos (12-28px), font 11px
 
@@ -955,7 +957,7 @@ Punto de entrada para un proyecto nuevo. No requiere flags. Secuencia:
 | `links` tiene prioridad sobre `edges` | Compatibilidad con formato real de graphify |
 | Boost +0.3 para file_type=code | Docs compiten injustamente con código en queries técnicas |
 | `min_score=0.15` default | Evita seleccionar 400+ nodos en grafos grandes |
-| Freeze física tras stabilize | Nodos quietos = grafo legible |
+| Freeze física al acabar la pasada de estabilización | Nodos quietos = grafo legible, y sin CPU ocupada sin fin en grafos medianos |
 | `max_nodes=50` en viz | Mantiene visualizador legible independiente del budget |
 | vis-network vendorizado inline | Viz offline y sin código de un CDN; +476 KB por HTML |
 
