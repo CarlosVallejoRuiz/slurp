@@ -15,6 +15,23 @@ A knowledge graph is a bowl of ramen — thousands of nodes tangled together. Yo
 
 ---
 
+## Counting tokens
+
+slurp counts with tiktoken (`cl100k_base`), and `--budget` bounds that count on the
+final output. Claude does not tokenize like tiktoken: measured in this project with
+Anthropic's `messages.count_tokens`, Claude's count on slurp's output was about
+**1.56×** the cl100k_base count. That is one measurement on one kind of text — an
+estimate, not a guarantee. To budget in estimated Claude tokens, scale every count:
+
+```bash
+slurp "auth flow" --budget 4000 --token-factor 1.56   # or: export SLURP_TOKEN_FACTOR=1.56
+```
+
+Counts round up, so the output stays at or under the budget in the scaled unit, and
+the header reports scaled tokens. For the MCP server, set it in `.mcp.json`:
+`"env": {"SLURP_TOKEN_FACTOR": "1.56"}` — it is read on every call. The default is
+1.0, which changes nothing.
+
 ## Benchmark
 
 Tested on a real **PrismaStats** codebase: 2,111 nodes, 28,412 tokens total.
@@ -260,6 +277,7 @@ slurp "prisma models" --backend openai
 | `--no-audit` | off | Skip writing to `.slurp/audit.jsonl`. |
 | `--neighbor-decay` | `0.7` | Score multiplier applied to neighbors of each selected node. |
 | `--min-score` | `0.15` | Minimum relevance score; nodes below this are excluded before selection. The same default applies to `export`, `benchmark`, `eval`, `diff --budget`, the MCP server and the library. On `slurp index` graphs every node is code and gets the +0.3 code boost, so 0.15 filters nothing there — the budget is the limit; on graphify graphs it keeps unrelated documents and concepts out. |
+| `--token-factor` | `1.0` | Multiply every token count, for a reader that does not tokenize like tiktoken. Also `$SLURP_TOKEN_FACTOR`; the flag wins. See *Counting tokens* below. |
 | `--viz` | off | Open an interactive graph visualization in the browser. |
 | `--viz-output PATH` | — | Save visualization HTML to file (without opening browser). |
 | `--ignore-file` | `.slurpignore` | Path to node exclusion rules. |

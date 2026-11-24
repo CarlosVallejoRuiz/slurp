@@ -246,12 +246,14 @@ def parse_judge_response(raw: str) -> tuple[float, float, str]:
 def build_slurp_context(
     G: nx.DiGraph, question: str, budget: int, model: str = "cl100k_base",
     min_score: float = DEFAULT_MIN_SCORE,
+    token_factor: float = 1.0,
 ) -> tuple[str, int]:
     """Budgeted subgraph context for one question, selected as a query would be."""
     scores = score_nodes(G, question)
-    text, _subgraph, _stats = build_context(G, scores, budget=budget, model=model,
-                                            min_score=min_score, query=question)
-    return text, count_tokens(text, model=model)
+    text, _subgraph, stats = build_context(G, scores, budget=budget, model=model,
+                                           min_score=min_score, query=question,
+                                           token_factor=token_factor)
+    return text, stats["tokens_used"]
 
 
 def build_baseline_context(
@@ -282,6 +284,7 @@ def run_eval(
     graph_path: Path | None = None,
     model: str = "cl100k_base",
     on_question: Callable[[EvalResult], None] | None = None,
+    token_factor: float = 1.0,
 ) -> EvalSuite:
     """Answer every question twice and have a judge score both answers.
 
@@ -301,13 +304,17 @@ def run_eval(
     # The baseline context is the same for every question, so it is built and
     # counted once instead of once per question.
     baseline_context, baseline_tokens = build_baseline_context(G, model=model)
+    if token_factor != 1.0:
+        import math
+
+        baseline_tokens = math.ceil(baseline_tokens * token_factor)
 
     results: list[EvalResult] = []
     for question in questions:
         result = EvalResult(question_id=question.id, question=question.question)
         try:
             slurp_context, slurp_tokens = build_slurp_context(
-                G, question.question, budget, model=model
+                G, question.question, budget, model=model, token_factor=token_factor
             )
             result.tokens_with_slurp = slurp_tokens
             result.tokens_without_slurp = baseline_tokens
@@ -431,6 +438,7 @@ def run_retrieval_eval(
     budget: int = 4000,
     min_score: float = DEFAULT_MIN_SCORE,
     model: str = "cl100k_base",
+    token_factor: float = 1.0,
 ) -> RetrievalSuite:
     """Score retrieval against each question's relevant_nodes, with no LLM.
 
@@ -462,7 +470,8 @@ def run_retrieval_eval(
             order = sorted(scores, key=lambda n: (-scores[n], n))
             position = {n: i + 1 for i, n in enumerate(order)}
             subgraph, _ = select_subgraph(G, scores, budget=budget, model=model,
-                                          min_score=min_score, query=question)
+                                          min_score=min_score, query=question,
+                                          token_factor=token_factor)
             result.found = [n for n in relevant if n in subgraph]
             result.first_rank = min(position[n] for n in relevant if n in position)
             result.subgraph_nodes = subgraph.number_of_nodes()

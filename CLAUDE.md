@@ -692,6 +692,12 @@ relaciones: `--budget 8000` daba 19k–42k tokens reales.
   `set` cuando la selección es pequeña y el orden de las relaciones cambiaba entre
   procesos (aleatorización de hashes).
 - Coste medido: +3–7 ms de mediana por query en caliente (PrismaStats, slurp).
+- **Factor de tokens** (`token_factor`, `--token-factor`, `$SLURP_TOKEN_FACTOR`, por
+  defecto 1,0, rango 0,1–10): multiplica toda medida (piezas, cabecera, texto final),
+  redondeando hacia arriba. Medido aquí contra `messages.count_tokens` de Anthropic:
+  ~1,56× cl100k_base en la salida de slurp — una estimación, no una garantía. El MCP lo
+  lee por llamada. Con 1,0 la salida es byte a byte la de siempre (la clave
+  `token_factor` solo aparece en stats si ≠ 1,0).
 
 ### `slurp/formatter.py`
 

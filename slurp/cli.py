@@ -24,6 +24,7 @@ from slurp.budget import (
     build_context,
     count_tokens,
     fit_to_budget,
+    resolve_token_factor,
 )
 from slurp.explainer import PROVIDERS as _EXPLAIN_PROVIDERS
 from slurp.formatter import format_subgraph
@@ -384,6 +385,9 @@ def cli(ctx: click.Context) -> None:
               help="Append source code blocks for each selected node (≤30 nodes required).")
 @click.option("--project-root", "project_root", type=click.Path(), default=None,
               help="Root directory for resolving source_file paths (default: graph.json directory).")
+@click.option("--token-factor", "token_factor", type=float, default=None,
+              help="Multiply token counts (e.g. 1.56 to estimate Claude tokens). "
+                   "Default: $SLURP_TOKEN_FACTOR, else 1.0.")
 def run(
     query: str,
     graph: tuple[str, ...],
@@ -403,8 +407,10 @@ def run(
     backend: str,
     inject_code_flag: bool,
     project_root: str | None,
+    token_factor: float | None,
 ) -> None:
     """Run a query against the graph."""
+    factor = _token_factor(token_factor)
     graph_paths = [Path(g) for g in graph]
     if not graph_paths:
         found = _find_graph()
@@ -468,7 +474,7 @@ def run(
         result, subG, stats = build_context(
             G, scores, budget=budget, model=model,
             neighbor_decay=neighbor_decay, min_score=min_score,
-            format=fmt, query=query,
+            format=fmt, query=query, token_factor=factor,
         )
     except BudgetTooSmallError as exc:
         raise click.ClickException(str(exc)) from None
@@ -491,7 +497,8 @@ def run(
                 injected, budget,
                 lambda sub, st: format_subgraph(sub, st, format=fmt, scores=scores, query=query),
                 _item_values(injected, scores), G.number_of_nodes(), model,
-                item_cost=lambda item: count_tokens(item_text(injected, item, fmt), model))
+                item_cost=lambda item: count_tokens(item_text(injected, item, fmt), model),
+                token_factor=factor)
 
     click.echo(result)
 
@@ -522,8 +529,17 @@ def run(
         from slurp.viz import build_html
         # The badge compares two measured texts: what was printed, and the whole
         # graph printed the same way.
-        viz_stats = {**stats, "tokens_full": full_graph_tokens(G, scores, query, fmt, model)}
+        viz_stats = {**stats, "tokens_full": full_graph_tokens(G, scores, query, fmt, model,
+                                                                token_factor=factor)}
         _deliver_viz(build_html(subG, viz_stats, scores, query), viz, viz_output)
+
+
+def _token_factor(flag: float | None) -> float:
+    """--token-factor, else $SLURP_TOKEN_FACTOR, else 1.0 — as a clean CLI error."""
+    try:
+        return resolve_token_factor(flag)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from None
 
 
 def _item_values(G, scores: dict[str, float]) -> dict[tuple, float]:
@@ -636,7 +652,8 @@ def diff_cmd(
             query = " ".join(query_terms) or "diff"
             scores = score_nodes(sub, query)
             try:
-                text, _subG, _stats = build_context(sub, scores, budget=budget, query=query)
+                text, _subG, _stats = build_context(sub, scores, budget=budget, query=query,
+                                                    token_factor=_token_factor(None))
             except BudgetTooSmallError as exc:
                 raise click.ClickException(str(exc)) from None
             click.echo("\n## Token-Budgeted Affected Subgraph\n")
@@ -727,6 +744,9 @@ def _build_diff_panel(
 @click.option("--backend", default="tfidf", show_default=True,
               type=_BACKEND,
               help="Scoring backend: 'tfidf', or 'openai' for real embeddings.")
+@click.option("--token-factor", "token_factor", type=float, default=None,
+              help="Multiply token counts (e.g. 1.56 to estimate Claude tokens). "
+                   "Default: $SLURP_TOKEN_FACTOR, else 1.0.")
 def export_cmd(
     query: str,
     graph: str | None,
@@ -738,8 +758,10 @@ def export_cmd(
     neighbor_decay: float,
     ignore_file: str,
     backend: str,
+    token_factor: float | None,
 ) -> None:
     """Export a context block ready to paste into a Claude/ChatGPT/CLAUDE.md system prompt."""
+    factor = _token_factor(token_factor)
     from slurp.exporter import export_context
 
     graph_path = Path(graph) if graph else _find_graph()
@@ -761,6 +783,7 @@ def export_cmd(
             G, scores, budget=budget, model=model,
             neighbor_decay=neighbor_decay, min_score=min_score, query=query,
             render=lambda sub, st: export_context(sub, st, query, format=fmt, scores=scores),
+            token_factor=factor,
         )
     except BudgetTooSmallError as exc:
         raise click.ClickException(str(exc)) from None
@@ -793,6 +816,9 @@ def export_cmd(
 @click.option("--price-model", "model_price", default="default", show_default=True,
               type=click.Choice(sorted(MODEL_PRICES_PER_MTok)),
               help="Model whose input-token price is used for cost estimates.")
+@click.option("--token-factor", "token_factor", type=float, default=None,
+              help="Multiply token counts (e.g. 1.56 to estimate Claude tokens). "
+                   "Default: $SLURP_TOKEN_FACTOR, else 1.0.")
 def benchmark_cmd(
     graph: str | None,
     queries: tuple[str, ...],
@@ -802,8 +828,10 @@ def benchmark_cmd(
     min_score: float,
     backend: str,
     model_price: str,
+    token_factor: float | None,
 ) -> None:
     """Measure token savings of slurp vs injecting the full graph."""
+    factor = _token_factor(token_factor)
     from slurp.benchmark import format_benchmark, run_benchmark
 
     graph_path = Path(graph) if graph else _find_graph()
@@ -825,6 +853,7 @@ def benchmark_cmd(
         min_score=min_score,
         backend=backend,
         model_price=model_price,
+        token_factor=factor,
     )
 
     click.echo(format_benchmark(result))
@@ -891,6 +920,9 @@ def serve(graph: tuple[str, ...], graph_labels: tuple[str, ...], log: bool) -> N
               help="No LLM: measure recall and MRR of each question's relevant_nodes.")
 @click.option("--min-score", "min_score", default=None, type=float,
               help="Minimum score for --retrieval (default: the CLI query default).")
+@click.option("--token-factor", "token_factor", type=float, default=None,
+              help="Multiply token counts (e.g. 1.56 to estimate Claude tokens). "
+                   "Default: $SLURP_TOKEN_FACTOR, else 1.0.")
 @click.option("--config-dir", "config_dir", default=".slurp", show_default=True,
               help="Directory holding config.json.")
 def eval_cmd(
@@ -904,9 +936,11 @@ def eval_cmd(
     dry_run: bool,
     retrieval: bool,
     min_score: float | None,
+    token_factor: float | None,
     config_dir: str,
 ) -> None:
     """Measure whether answers are better with slurp than with the full graph."""
+    factor = _token_factor(token_factor)
     from slurp.evaluator import (
         default_questions,
         load_eval_questions,
@@ -944,7 +978,8 @@ def eval_cmd(
         try:
             suite = run_retrieval_eval(
                 G, questions, budget=budget,
-                min_score=DEFAULT_MIN_SCORE if min_score is None else min_score)
+                min_score=DEFAULT_MIN_SCORE if min_score is None else min_score,
+                token_factor=factor)
         except BudgetTooSmallError as exc:
             raise click.ClickException(str(exc)) from None
         if not suite.scored:
@@ -985,6 +1020,7 @@ def eval_cmd(
         task = progress.add_task("eval", total=len(questions))
         suite = run_eval(
             G, questions, config, budget=budget, graph_path=graph_path,
+            token_factor=factor,
             on_question=lambda _r: progress.advance(task),
         )
     click.echo(buf.getvalue(), nl=False)

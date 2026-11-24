@@ -9,7 +9,8 @@ relationships, so `--budget 8000` produced 19k–42k tokens of output.
 import functools
 import heapq
 import math
-from collections.abc import Callable
+import os
+from collections.abc import Callable, Mapping
 
 import networkx as nx
 import tiktoken
@@ -52,6 +53,50 @@ class BudgetTooSmallError(ValueError):
     """The budget cannot hold even the header and its warning."""
 
 
+# DECISION: a configurable factor scales every count, because the model reading
+# the output may not tokenize like tiktoken. Measured in this project against
+# Anthropic's token counter (messages.count_tokens), Claude's tokenizer produced
+# about 1.56x the cl100k_base count on slurp's output. That is one measurement
+# on one kind of text — an estimate, not a guarantee — so the default stays 1.0
+# and users who budget for Claude can opt into ~1.56. Counts round up, so with a
+# factor the text stays at or under the budget in the scaled unit.
+TOKEN_FACTOR_ENV = "SLURP_TOKEN_FACTOR"
+_MIN_FACTOR, _MAX_FACTOR = 0.1, 10.0
+
+
+def _check_factor(factor: float) -> float:
+    if not (_MIN_FACTOR <= factor <= _MAX_FACTOR):
+        raise ValueError(f"token factor must be between {_MIN_FACTOR} and {_MAX_FACTOR}, "
+                         f"got {factor}")
+    return factor
+
+
+def resolve_token_factor(flag: float | None = None, env: Mapping[str, str] | None = None) -> float:
+    """The token factor in force: the flag, else $SLURP_TOKEN_FACTOR, else 1.0.
+
+    Raises:
+        ValueError: If the value is not a number in [0.1, 10].
+    """
+    if flag is not None:
+        return _check_factor(float(flag))
+    raw = (os.environ if env is None else env).get(TOKEN_FACTOR_ENV, "").strip()
+    if not raw:
+        return 1.0
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError(f"{TOKEN_FACTOR_ENV}={raw!r} is not a number; use e.g. "
+                         f"{TOKEN_FACTOR_ENV}=1.56") from None
+    try:
+        return _check_factor(value)
+    except ValueError as exc:
+        raise ValueError(f"{TOKEN_FACTOR_ENV}: {exc}") from None
+
+
+def _scaled(raw: int, factor: float) -> int:
+    return raw if factor == 1.0 else math.ceil(raw * factor)
+
+
 # DECISION: relationships implied by the rest of the output weigh half. A
 # `contains` edge repeats the file path printed under each node, and
 # `imports_from` points at an import placeholder; a `calls` edge is information
@@ -91,13 +136,13 @@ def clear_node_token_cache() -> None:
     _item_cost_cache.clear()
 
 
-def _item_cost(G: nx.DiGraph, item: tuple, fmt: str, model: str) -> int:
+def _item_cost(G: nx.DiGraph, item: tuple, fmt: str, model: str, factor: float = 1.0) -> int:
     key = (item, fmt, model)
     cost = _item_cost_cache.get(key)
     if cost is None:
         cost = count_tokens(item_text(G, item, fmt), model)
         _item_cost_cache[key] = cost
-    return cost
+    return _scaled(cost, factor)
 
 
 def _edge_weight(G: nx.DiGraph, u: str, v: str) -> float:
@@ -121,7 +166,7 @@ def _assemble(G: nx.DiGraph, nodes: list[str], edges: list[tuple[str, str]]) -> 
 
 
 def _measure(sub: nx.DiGraph, render: Renderer, budget: int, nodes_total: int,
-             model: str, warning: str = "") -> tuple[str, dict, int, bool]:
+             model: str, warning: str = "", factor: float = 1.0) -> tuple[str, dict, int, bool]:
     """Render *sub* with stats that state its own true token count.
 
     Returns:
@@ -138,10 +183,12 @@ def _measure(sub: nx.DiGraph, render: Renderer, budget: int, nodes_total: int,
     }
     if warning:
         stats["warning"] = warning
+    if factor != 1.0:
+        stats["token_factor"] = factor
     text, tokens = "", 0
     for _ in range(_FIXPOINT_ROUNDS):
         text = render(sub, stats)
-        tokens = count_tokens(text, model)
+        tokens = _scaled(count_tokens(text, model), factor)
         if tokens == stats["tokens_used"]:
             return text, stats, tokens, True
         stats = {**stats, "tokens_used": tokens}
@@ -163,6 +210,7 @@ def fit_to_budget(
     model: str = "cl100k_base",
     costs: dict[tuple, int] | None = None,
     item_cost: Callable[[tuple], int] | None = None,
+    token_factor: float = 1.0,
 ) -> tuple[str, nx.DiGraph, dict]:
     """Trim *sub* until its rendered text measures at most *budget* tokens.
 
@@ -180,6 +228,7 @@ def fit_to_budget(
         costs: Estimated cost per item, to size each trimming step.
         item_cost: Computes a missing cost. With neither, one item goes per
             round — slower, never too many.
+        token_factor: Multiplies every count (see resolve_token_factor).
 
     Returns:
         (text, subgraph, stats). The text measures <= budget. If trimming
@@ -201,7 +250,8 @@ def fit_to_budget(
         if not nodes:
             break  # trimmed to nothing (or given nothing): handled below
         current = _assemble(sub, nodes, edges)
-        text, stats, tokens, settled = _measure(current, render, budget, nodes_total, model)
+        text, stats, tokens, settled = _measure(current, render, budget, nodes_total, model,
+                                                factor=token_factor)
         if settled and tokens <= budget:
             return text, current, stats
         excess = max(1, tokens - budget)
@@ -236,13 +286,15 @@ def fit_to_budget(
     # Nothing fits. Say what would: the most valuable node alone, measured.
     empty = nx.DiGraph()
     if not original_nodes:
-        text, stats, _, _ = _measure(empty, render, budget, nodes_total, model)
+        text, stats, _, _ = _measure(empty, render, budget, nodes_total, model,
+                                     factor=token_factor)
         return text, empty, stats
     top = max(original_nodes, key=lambda n: (values.get(("n", n), 0.0), n))
-    _, _, alone, _ = _measure(_assemble(sub, [top], []), render, budget, nodes_total, model)
+    _, _, alone, _ = _measure(_assemble(sub, [top], []), render, budget, nodes_total, model,
+                              factor=token_factor)
     needed = alone + 1
     text, stats, _, _ = _measure(empty, render, budget, nodes_total, model,
-                                 _too_small_warning(budget, needed))
+                                 _too_small_warning(budget, needed), factor=token_factor)
     stats["min_budget"] = needed
     return text, empty, stats
 
@@ -258,6 +310,7 @@ def build_context(
     format: str = "markdown",
     query: str = "",
     render: Renderer | None = None,
+    token_factor: float = 1.0,
 ) -> tuple[str, nx.DiGraph, dict]:
     """Select a subgraph and return the text that fits *budget*, measured.
 
@@ -286,6 +339,8 @@ def build_context(
         query: The query, which the markdown header prints.
         render: Overrides the final rendering, for callers that wrap the
             formatted subgraph (exporter). Defaults to format_subgraph.
+        token_factor: Multiplies every token count, for a reader whose
+            tokenizer differs from tiktoken (see resolve_token_factor).
 
     Returns:
         (text, subgraph, stats). count_tokens(text) <= budget, and stats report
@@ -299,12 +354,14 @@ def build_context(
         def render(sub: nx.DiGraph, stats: dict) -> str:
             return format_subgraph(sub, stats, format, scores=scores, query=query)
 
+    _check_factor(token_factor)
     nodes_total = G.number_of_nodes()
     empty = nx.DiGraph()
 
     # 1. The smallest output this call can return.
     widest = _too_small_warning(budget, 10 ** 7)
-    floor_text, _, floor_tokens, _ = _measure(empty, render, budget, nodes_total, model, widest)
+    floor_text, _, floor_tokens, _ = _measure(empty, render, budget, nodes_total, model, widest,
+                                              factor=token_factor)
     if budget < floor_tokens:
         raise BudgetTooSmallError(
             f"--budget {budget:,} is below the {floor_tokens:,} tokens the header "
@@ -312,7 +369,7 @@ def build_context(
             f"{floor_tokens:,} or more.")
 
     # 2. Greedy selection against the room the header leaves.
-    _, _, overhead, _ = _measure(empty, render, budget, nodes_total, model)
+    _, _, overhead, _ = _measure(empty, render, budget, nodes_total, model, factor=token_factor)
     room = math.floor((budget - overhead) * (1 - _SELECTION_MARGIN))
 
     candidates = {n for n in G.nodes if scores.get(n, 0.0) >= min_score}
@@ -335,7 +392,7 @@ def build_context(
         neg_value, _kind, item = heapq.heappop(heap)
         cost = costs.get(item)
         if cost is None:
-            cost = costs[item] = _item_cost(G, item, format, model)
+            cost = costs[item] = _item_cost(G, item, format, model, token_factor)
         if item[0] == "e":
             if cost <= room - used:
                 chosen_edges.append((item[1], item[2]))
@@ -374,11 +431,12 @@ def build_context(
 
     # 3. Measure the real text and trim until it fits.
     text, sub, stats = fit_to_budget(_assemble(G, selected, chosen_edges), budget,
-                                     render, values, nodes_total, model, costs)
-    if sub.number_of_nodes() == 0 and top_cost is not None:
+                                     render, values, nodes_total, model, costs,
+                                     token_factor=token_factor)
+    if sub.number_of_nodes() == 0 and top_cost is not None and "min_budget" not in stats:
         needed = math.ceil((overhead + top_cost) / (1 - _SELECTION_MARGIN)) + 1
         text, stats, _, _ = _measure(empty, render, budget, nodes_total, model,
-                                     _too_small_warning(budget, needed))
+                                     _too_small_warning(budget, needed), factor=token_factor)
         stats["min_budget"] = needed
     return text, sub, stats
 
@@ -393,15 +451,16 @@ def full_graph_tokens(
     query: str = "",
     format: str = "markdown",
     model: str = "cl100k_base",
+    token_factor: float = 1.0,
 ) -> int:
     """Tokens of the whole graph sent exactly the way an answer is sent.
 
     The honest baseline for "tokens saved": same formatter, same header with
     the same query, same scores, every node and relationship.
     """
-    text, _, _ = build_context(G, scores, _UNBOUNDED, model, min_score=0.0,
-                               format=format, query=query)
-    return count_tokens(text, model)
+    _, _, stats = build_context(G, scores, _UNBOUNDED, model, min_score=0.0,
+                                format=format, query=query, token_factor=token_factor)
+    return stats["tokens_used"]
 
 
 def select_subgraph(
@@ -415,6 +474,7 @@ def select_subgraph(
     format: str = "markdown",
     query: str = "",
     render: Renderer | None = None,
+    token_factor: float = 1.0,
 ) -> tuple[nx.DiGraph, dict]:
     """Like build_context, returning only (subgraph, stats).
 
@@ -423,5 +483,6 @@ def select_subgraph(
     used here. Callers that need the text should call build_context.
     """
     _, sub, stats = build_context(G, scores, budget, model, neighbor_decay, min_score,
-                                  format=format, query=query, render=render)
+                                  format=format, query=query, render=render,
+                                  token_factor=token_factor)
     return sub, stats

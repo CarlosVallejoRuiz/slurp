@@ -540,3 +540,82 @@ class TestOneDefaultMinScore:
         res = CliRunner().invoke(cli_mod.cli, ["diff", old, new, "--budget", "2000"])
         assert res.exit_code == 0, res.output
         assert seen["min_score"] == "default"  # not overridden: the library default applies
+
+
+# ---------------------------------------------------------------------------
+# Configurable token factor (another tokenizer, estimated)
+# ---------------------------------------------------------------------------
+
+class TestTokenFactor:
+    def test_default_factor_changes_nothing(self):
+        G = _random_graph(random.Random(2), 40)
+        scores = {n: 0.5 for n in G.nodes}
+        a = build_context(G, scores, 2000, query="auth")
+        b = build_context(G, scores, 2000, query="auth", token_factor=1.0)
+        assert a[0] == b[0]
+
+    @pytest.mark.parametrize("factor", [1.56, 2.0, 0.8])
+    def test_scaled_count_fits_and_is_reported(self, factor):
+        import math
+
+        G = _random_graph(random.Random(4), 60)
+        scores = {n: 0.5 for n in G.nodes}
+        text, sub, stats = build_context(G, scores, 3000, query="auth", token_factor=factor)
+        scaled = math.ceil(count_tokens(text) * factor)
+        assert scaled <= 3000
+        assert stats["tokens_used"] == scaled
+        assert stats["token_factor"] == factor
+
+    def test_bigger_factor_selects_less(self):
+        G = _random_graph(random.Random(4), 60)
+        scores = {n: 0.5 for n in G.nodes}
+        one = build_context(G, scores, 3000, query="auth")[1].number_of_nodes()
+        more = build_context(G, scores, 3000, query="auth", token_factor=1.56)[1].number_of_nodes()
+        assert more <= one
+
+    @pytest.mark.parametrize("bad", [0, -1.0, 50])
+    def test_invalid_factor_is_rejected(self, bad):
+        G = _line(3)
+        with pytest.raises(ValueError, match="token factor"):
+            build_context(G, _decreasing(G), 2000, token_factor=bad)
+
+    def test_env_var_is_the_default_and_the_flag_wins(self, tmp_path, monkeypatch):
+        import math
+
+        from click.testing import CliRunner
+
+        from slurp.cli import cli
+
+        graph = str(_graph_file(tmp_path))
+        base = ["auth", "--graph", graph, "--budget", "1500", "--no-audit"]
+        monkeypatch.setenv("SLURP_TOKEN_FACTOR", "1.56")
+        env_run = CliRunner().invoke(cli, base)
+        assert env_run.exit_code == 0, env_run.output
+        assert math.ceil(count_tokens(env_run.stdout.rstrip("\n")) * 1.56) <= 1500
+        flag_run = CliRunner().invoke(cli, [*base, "--token-factor", "1.0"])
+        assert count_tokens(flag_run.stdout.rstrip("\n")) > count_tokens(env_run.stdout.rstrip("\n"))
+
+    def test_bad_env_value_is_a_clear_error(self, tmp_path, monkeypatch):
+        from click.testing import CliRunner
+
+        from slurp.cli import cli
+
+        monkeypatch.setenv("SLURP_TOKEN_FACTOR", "fast")
+        res = CliRunner().invoke(cli, ["auth", "--graph", str(_graph_file(tmp_path)), "--no-audit"])
+        assert res.exit_code != 0 and "SLURP_TOKEN_FACTOR" in res.output
+
+    def test_mcp_reads_the_env_var(self, tmp_path, monkeypatch):
+        import io
+        import json
+        import math
+
+        from slurp.loader import load_graph
+        from slurp.mcp import _handle
+
+        monkeypatch.setenv("SLURP_TOKEN_FACTOR", "2.0")
+        out = io.StringIO()
+        _handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                 "params": {"name": "slurp_query", "arguments": {"query": "auth", "budget": 1500}}},
+                load_graph(_graph_file(tmp_path)), out, session_log=False)
+        text = json.loads(out.getvalue())["result"]["content"][0]["text"]
+        assert math.ceil(count_tokens(text) * 2.0) <= 1500

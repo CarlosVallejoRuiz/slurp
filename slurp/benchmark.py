@@ -113,7 +113,8 @@ def _percentile(data: list[float], p: float) -> float:
     return s[lo] + (idx - lo) * (s[hi] - s[lo])
 
 
-def _full_graph_tokens(G: nx.DiGraph, scores: dict[str, float], query: str, model: str) -> int:
+def _full_graph_tokens(G: nx.DiGraph, scores: dict[str, float], query: str, model: str,
+                       token_factor: float = 1.0) -> int:
     """Tokens of the whole graph sent the same way slurp's answer is sent.
 
     DECISION: the baseline is measured by the same pipeline as the subgraph —
@@ -122,7 +123,7 @@ def _full_graph_tokens(G: nx.DiGraph, scores: dict[str, float], query: str, mode
     query in its header, so a subgraph holding the whole graph came out larger
     than "the whole graph".
     """
-    return full_graph_tokens(G, scores, query, model=model)
+    return full_graph_tokens(G, scores, query, model=model, token_factor=token_factor)
 
 
 def run_benchmark(
@@ -134,6 +135,7 @@ def run_benchmark(
     neighbor_decay: float = 0.7,
     backend: str = "tfidf",
     model_price: str = "default",
+    token_factor: float = 1.0,
 ) -> BenchmarkResult:
     """Run a battery of queries across multiple budgets and measure token savings.
 
@@ -162,13 +164,14 @@ def run_benchmark(
 
     for query in queries:
         scores = score_nodes(G, query, backend=backend)
-        tokens_full = _full_graph_tokens(G, scores, query, model)
+        tokens_full = _full_graph_tokens(G, scores, query, model, token_factor)
 
         for budget in budgets:
             try:
                 _text, subG, stats = build_context(
                     G, scores, budget=budget, model=model,
                     neighbor_decay=neighbor_decay, min_score=min_score, query=query,
+                    token_factor=token_factor,
                 )
             except BudgetTooSmallError as exc:
                 rows.append(QueryBudgetResult(

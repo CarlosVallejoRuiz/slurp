@@ -17,6 +17,7 @@ from slurp.budget import (
     BudgetTooSmallError,
     build_context,
     clear_node_token_cache,
+    resolve_token_factor,
     select_subgraph,
 )
 from slurp.diff import diff_graphs, format_diff
@@ -588,7 +589,7 @@ def _handle_suggest(msg_id, args: dict, G, out) -> None:
     try:
         scores = score_nodes(G, query)
         subG, _stats = select_subgraph(G, scores, budget=budget, min_score=_MIN_SCORE,
-                                       query=query)
+                                       query=query, token_factor=resolve_token_factor())
         text = format_suggestions(suggest_queries(G, query, scores, subG))
     except BudgetTooSmallError as exc:
         _write(_err(msg_id, -32602, str(exc)), out)
@@ -793,8 +794,10 @@ def _handle(msg: dict, G, out, session_log: bool = True, state: "GraphState | No
         # Report it as a tool error instead so the session survives.
         try:
             scores = score_nodes(G, query)
+            # Read per call, like the LLM config: export SLURP_TOKEN_FACTOR in the
+            # server's environment (.mcp.json "env") to budget in Claude tokens.
             text, subG, stats = build_context(G, scores, budget=budget, min_score=_MIN_SCORE,
-                                              query=query)
+                                              query=query, token_factor=resolve_token_factor())
         except BudgetTooSmallError as exc:
             # The caller's budget argument cannot work: an invalid parameter.
             _write(_err(msg_id, -32602, str(exc)), out)
