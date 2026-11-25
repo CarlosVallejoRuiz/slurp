@@ -594,6 +594,44 @@ uv sync --extra rust            # solo una
 5. **Compatibilidad graphify primero.** `graph.json` de graphify es el formato de entrada principal. Todo cambio debe mantener compatibilidad con él.
 6. **Documentar decisiones no obvias** con comentario `# DECISION:` en el código.
 7. **Type hints en todas las funciones públicas.** Sin excepción.
+8. **Toda salida de ejemplo de README y USAGE sale de una ejecución real**, con su versión
+   y su comando. Ver «Salidas de ejemplo en README y USAGE».
+
+---
+
+## Salidas de ejemplo en README y USAGE
+
+**Una salida de ejemplo se pega de una ejecución real; nunca se escribe ni se retoca a
+mano.** Hasta v1.2.0 había ejemplos inventados — `slurp index` con "312 nodes", una
+federación de `services/auth` que no existe, el `--explain`, el `audit`, el `export` y el
+diagrama de USAGE con nodos (`authenticate_user`) que PrismaStats no tiene, `Edges: 4823`
+en un grafo de 3.421 — y otros de versiones antiguas sin decirlo.
+
+- **Encima de cada bloque, un marcador** con id, versión y comando, invisible en GitHub:
+  `<!-- example: impact · slurp v1.2.0 · slurp impact lib/supabase/admin.ts --graph graph.json -->`.
+  El texto visible dice sobre qué grafo se ejecutó. Las rutas pueden ser marcadores
+  (`/path/to/prismastats`); todo lo demás, literal.
+- **Recortar sí, reescribir no.** Lo omitido se marca con `…`, `- …` o `... texto ...` en una
+  línea propia. Nada de reenvolver líneas largas, quitar filas de una tabla sin marcarlo o
+  añadir líneas que la salida no tiene (el `}` final de `--inject-code`, que corta a 100
+  líneas).
+- **Lo que no puede ejecutarse no se muestra, se describe.** Una salida de LLM sin clave
+  (`slurp explain` con proveedor) o un proyecto que no existe no tienen ejemplo.
+- **Una salida antigua que se conserva a propósito lo dice** en el texto y en el marcador
+  (`historical: slurp v1.1.0`): el benchmark sobre el grafo de slurp y el `slurp eval` de
+  v0.9.5. El script no los reejecuta.
+- **`scripts/readme_examples.py --prismastats PATH`, antes de cada release.** Reejecuta cada
+  ejemplo con el slurp del checkout sobre entradas fijas — PrismaStats en `5d345dc` con su
+  grafo de graphify (2.111 nodos), el código de slurp en `v1.2.0` (y `v1.1.0` para el diff)
+  —, normaliza rutas temporales, marcas de tiempo y duraciones, y exige que cada línea
+  documentada siga saliendo, en orden. Avisa de `CHANGED`, de bloques con pinta de salida
+  sin marcador (`UNMARKED`) y de marcadores sin ejemplo. Si cambia, `--write DIR` deja las
+  salidas nuevas listas para pegar. No forma parte de la suite: necesita PrismaStats, los
+  tags, un virtualenv sin gramáticas (el ejemplo del fallback) y ~20 s.
+- Un ejemplo nuevo = una entrada en `EXAMPLES` del script + el marcador en el doc.
+- **Pendiente en el código:** en v1.2.0 la sugerencia de riesgo de `--suggest` desempata por
+  orden de set (`Badge` o `badge.tsx` en PrismaStats según el proceso); el script fija
+  `PYTHONHASHSEED=0` hasta que el desempate sea determinista.
 
 ---
 
@@ -694,6 +732,7 @@ No va en el paquete; `tests/test_latency_script.py` lo mantiene ejecutable.
 ├── .github/workflows/publish.yml ← publicación en PyPI por OIDC
 ├── scripts/latency.py         ← reproduce las cifras de README › Performance (no va en el paquete)
 ├── scripts/retrieval.py       ← recall/MRR por grupo (ajuste/validación), formato y presupuesto
+├── scripts/readme_examples.py ← reejecuta las salidas de ejemplo de README y USAGE (no va en el paquete)
 ├── README.md
 ├── USAGE.md
 ├── pyproject.toml

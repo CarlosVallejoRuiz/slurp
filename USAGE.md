@@ -67,7 +67,7 @@ Then run `uv tool install slurp-graph`.
 ```bash
 cd /path/to/your-project
 slurp index .
-# → generates graphify-out/graph.json
+# generates graphify-out/graph.json
 ```
 
 Supports Python, TypeScript/JS, and Go out of the box — no LLM, no API key, no external tools.
@@ -113,6 +113,11 @@ Save `.mcp.json` at your project root and restart Claude Code. Done.
 
 ### How it works internally
 
+The figures below come from a real `slurp_query("auth flow", budget=4000)` call to
+`slurp serve` on PrismaStats with v1.2.0, and the saving from `slurp benchmark` on the
+same graph:
+
+<!-- example: usage-diagram · slurp v1.2.0 · slurp_query("auth flow", budget=4000) over slurp serve; the saving from slurp benchmark -->
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                                                         │
@@ -136,14 +141,15 @@ Save `.mcp.json` at your project root and restart Claude Code. Done.
                        ▼
 ┌─────────────────────────────────────────────────────────┐
 │   Slurp scores all 2111 graph nodes,                    │
-│   selects the 5 most relevant in 847 tokens             │
-│   (97.1% fewer tokens than injecting the full graph)    │
+│   selects the 96 most relevant in 3,927 tokens          │
+│   (96.7% fewer tokens than injecting the full graph)    │
 └──────────────────────┬──────────────────────────────────┘
                        │
                        ▼
 ┌─────────────────────────────────────────────────────────┐
-│   Returns to Claude: authenticate_user, JWTMiddleware,  │
-│   hash_password, UserModel, their relationships/scores  │
+│   Returns to Claude: createAdminClient(), AuthResult,   │
+│   lib/auth/actions.ts, requireAdmin() and the rest,     │
+│   with their relationships and scores                   │
 └──────────────────────┬──────────────────────────────────┘
                        │
                        ▼
@@ -197,19 +203,28 @@ slurp "auth flow" --backend openai
 slurp "auth flow" --ignore-file .slurpignore
 ```
 
-**`--explain` output on PrismaStats:**
+**`--explain` on PrismaStats** — real output with v1.2.0 of `slurp "auth flow" --explain`;
+the score breakdown prints after the subgraph, first and last rows shown:
 
+<!-- example: usage-explain · slurp v1.2.0 · slurp "auth flow" --explain -->
 ```
- Score Breakdown
- ┌──────┬───────────────────────┬────────┬────────────┬──────────┬──────────┬──────────────────────┐
- │ Rank │ Label                 │  Final │ Structural │ Semantic │ Type     │ File                 │
- ├──────┼───────────────────────┼────────┼────────────┼──────────┼──────────┼──────────────────────┤
- │    1 │ authenticate_user     │ 0.9412 │     0.3821 │   0.9127 │ function │ src/auth/service.py  │
- │    2 │ JWTMiddleware         │ 0.8731 │     0.4112 │   0.8250 │ class    │ src/middleware/jwt   │
- │    3 │ hash_password         │ 0.7144 │     0.2934 │   0.7012 │ function │ src/auth/utils.py    │
- │    4 │ UserModel             │ 0.5823 │     0.5102 │   0.4811 │ class    │ src/models/user.py   │
- │    5 │ DatabasePool          │ 0.4102 │     0.6341 │   0.1822 │ class    │ src/db/pool.py       │
- └──────┴───────────────────────┴────────┴────────────┴──────────┴──────────┴──────────────────────┘
+                                          Score Breakdown
+┏━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Rank  ┃ Label                 ┃  Final ┃ Structural ┃ Semantic ┃ Type    ┃ File                  ┃
+┡━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━┩
+│ 1     │ createAdminClient()   │ 0.7000 │     1.0000 │   0.0000 │ code    │ lib/supabase/admin.ts │
+│ 2     │ AuthResult            │ 0.6918 │     0.0147 │   0.6431 │ code    │ lib/auth/actions.ts   │
+│ 3     │ lib/auth/actions.ts   │ 0.6911 │     0.0132 │   0.6431 │ code    │ AGENTS.md             │
+│ 4     │ requireAdmin()        │ 0.4338 │     0.3345 │   0.0000 │ code    │ lib/supabase/admin-a… │
+│ 5     │ Supabase (PostgreSQL  │ 0.3921 │     0.0156 │   0.6431 │ concept │ docs/documento-tecni… │
+│       │ + Auth + Storage +    │        │            │          │         │                       │
+│       │ RLS)                  │        │            │          │         │                       │
+│ 6     │ createClient()        │ 0.3691 │     0.1728 │   0.0000 │ code    │ lib/supabase/server.… │
+│ 7     │ cn()                  │ 0.3527 │     0.1318 │   0.0000 │ code    │ lib/utils.ts          │
+│ 8     │ computedHash          │ 0.3523 │     0.1308 │   0.0000 │ code    │ skills-lock.json      │
+…
+│ 96    │ page.tsx              │ 0.3053 │     0.0132 │   0.0000 │ code    │ app/dashboard/pizarr… │
+└───────┴───────────────────────┴────────┴────────────┴──────────┴─────────┴───────────────────────┘
 ```
 
 **Main flags:**
@@ -242,10 +257,11 @@ Graph summary.
 slurp stats --graph graphify-out/graph.json
 ```
 
+<!-- example: usage-stats · slurp v1.2.0 · slurp stats --graph graphify-out/graph.json -->
 ```
 Graph: graphify-out/graph.json
 Nodes: 2111
-Edges: 4823
+Edges: 3421
 ```
 
 Useful for verifying that graphify generated the graph correctly before starting.
@@ -261,24 +277,34 @@ slurp audit
 slurp audit --top-nodes 20
 ```
 
-```
- Query History (last 20 of 47)
- ┌───┬─────────────────────┬──────────────────────────┬───────┬────────┐
- │ # │ Timestamp           │ Query                    │ Nodes │ Tokens │
- ├───┼─────────────────────┼──────────────────────────┼───────┼────────┤
- │ 1 │ 2026-06-07 09:14:22 │ auth flow                │ 5     │    847 │
- │ 2 │ 2026-06-07 09:31:05 │ prisma schema validation │ 7     │  1,124 │
- │ 3 │ 2026-06-07 10:02:41 │ database pool connection │ 9     │  1,893 │
- └───┴─────────────────────┴──────────────────────────┴───────┴────────┘
+Real output with v1.2.0 on PrismaStats, after three queries at `--budget 4000`
+(`auth flow`, `prisma schema validation`, `database pool connection`):
 
- Top 10 Most Selected Nodes
- ┌──────┬──────────────────────┬────────────────┐
- │ Rank │ Node                 │ Times Selected │
- ├──────┼──────────────────────┼────────────────┤
- │    1 │ authenticate_user    │             31 │
- │    2 │ UserModel            │             28 │
- │    3 │ DatabasePool         │             19 │
- └──────┴──────────────────────┴────────────────┘
+<!-- example: usage-audit · slurp v1.2.0 · slurp audit, after three queries at --budget 4000 on PrismaStats -->
+```
+                       Query History (last 3 of 3)
+┏━━━━━━┳━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━┳━━━━━━━━┓
+┃ #    ┃ Timestamp           ┃ Query                    ┃ Nodes ┃ Tokens ┃
+┡━━━━━━╇━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━╇━━━━━━━━┩
+│ 1    │ 2026-11-25T20:24:15 │ auth flow                │    96 │  3,927 │
+│ 2    │ 2026-11-25T20:24:15 │ prisma schema validation │   108 │  3,924 │
+│ 3    │ 2026-11-25T20:24:15 │ database pool connection │   104 │  3,927 │
+└──────┴─────────────────────┴──────────────────────────┴───────┴────────┘
+                   Top 10 Most Selected Nodes
+┏━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┓
+┃ Rank  ┃ Node                                ┃ Times Selected ┃
+┡━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━┩
+│ 1     │ supabase_admin_createadminclient    │              3 │
+│ 2     │ supabase_admin_actions_requireadmin │              3 │
+│ 3     │ supabase_server_createclient        │              3 │
+│ 4     │ lib_utils_cn                        │              3 │
+│ 5     │ skills_lock_seo_computedhash        │              3 │
+│ 6     │ skills_lock_seo_source              │              3 │
+│ 7     │ skills_lock_seo_sourcetype          │              3 │
+│ 8     │ ndarray                             │              3 │
+│ 9     │ supabase_server                     │              3 │
+│ 10    │ supabase_admin                      │              3 │
+└───────┴─────────────────────────────────────┴────────────────┘
 ```
 
 Every query is recorded in `.slurp/audit.jsonl` (append-only). Useful for understanding which parts of the codebase the AI agent visits most.
@@ -319,17 +345,23 @@ slurp export "auth flow" --format chatgpt
 slurp export "auth flow" --format claudemd --output context.md
 ```
 
-**`--format claudemd` output:**
+**`--format claudemd` output** — real, v1.2.0, on PrismaStats, first nodes shown:
 
+<!-- example: usage-export · slurp v1.2.0 · slurp export "auth flow" --format claudemd -->
 ```markdown
 ## Codebase Context
 
-<!-- slurp-graph · query: "auth flow" | nodes: 5/2111 | tokens: 847/4,000 | coverage: 21.2% -->
+<!-- slurp-graph · query: "auth flow" | nodes: 97/2111 | tokens: 3,927/4,000 | coverage: 4.6% -->
 
 ## Relevant Nodes
 
-### authenticate_user (function) · score: 0.94
-...
+### createAdminClient() · score: 0.70
+→ File: lib/supabase/admin.ts
+
+### AuthResult · score: 0.69
+→ File: lib/auth/actions.ts
+
+…
 ```
 
 ---
@@ -353,10 +385,11 @@ REM Windows CMD — no line continuation, write it on one line
 slurp benchmark --graph graphify-out/graph.json --queries "auth flow" --queries "prisma schema" --budget 2000 --budget 4000
 ```
 
-**Summary output** (the first command, v1.1.0, on a 2,111-node graphify graph of a
+**Summary output** (the first command, v1.2.0, on a 2,111-node graphify graph of a
 Next.js codebase; a per-run table with tokens, full graph, savings, cost, nodes and
 coverage for each query × budget comes first):
 
+<!-- example: usage-benchmark · slurp v1.2.0 · slurp benchmark (the first command above) -->
 ```
                          Summary
 ┏━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
@@ -408,6 +441,7 @@ slurp index . --force
 
 **Example output on PrismaStats** (real output, v1.2.0; the paths are placeholders):
 
+<!-- example: index · slurp v1.2.0 · slurp index /path/to/prismastats -->
 ```
 Indexing /path/to/prismastats ...
 ✓ 1582 nodes · 1852 edges · 185 files
