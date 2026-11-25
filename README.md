@@ -56,15 +56,6 @@ labelled nodes of its 15 questions at `--budget 4000` and all of them at `--budg
 > tokens while the benchmark reported 8,000; measured on the real text, savings at
 > 2k/4k/8k were 86.1–87.4% / 72.7–75.7% / 59.5–60.6%, not the figures shown then.
 
----|---|---|---|
-| `"auth flow"` | **97.1%** saved | 96.3% saved | 95.2% saved |
-| `"prisma schema"` | 95.8% saved | 94.2% saved | 93.8% saved |
-| `"database pool"` | 93.1% saved | 89.1% saved | 85.1% saved |
-
-**Mean savings: 93.3% · p50: 94.2% · Best case: 97.1%**
-
-Even the worst case — `"database pool"` at budget 8k — injects 85% fewer tokens than the full graph.
-
 ### Choosing a budget
 
 The default, 4000, was checked against the alternatives with `slurp eval --retrieval`
@@ -771,9 +762,9 @@ a review checklist, or your AI assistant:
 
 ## Summary
 - **✅ Low impact change**
-- **Impact score:** 0.0048 (🟢 low)
-- 1 nodes added · 2 removed · 0 modified
-- 2 edges added · 13 removed
+- **Impact score:** 0.1184 (🟢 low) — 1 production caller reached
+- 1 nodes added · 1 removed · 0 modified
+- 2 edges added · 17 removed
 - 2 nodes in risk neighborhood
 
 ## Added Nodes (1)
@@ -781,41 +772,45 @@ a review checklist, or your AI assistant:
 ### choose_subgraph (function)
 → File: slurp/budget.py
 
-## Removed Nodes (2)
+## Removed Nodes (1)
 
 ### slurp.budget.select_subgraph
-
-### slurp.formatter._format_yaml
 
 ## Affected Edges
 
 **Added (2):**
 - slurp.budget → contains → slurp.budget.choose_subgraph
-- slurp.budget.choose_subgraph → calls → slurp.budget._node_token_cost
+- slurp.budget.choose_subgraph → calls → slurp.budget.build_context
 
-**Removed (13):**
-- slurp.benchmark.run_benchmark → slurp.budget.select_subgraph
+**Removed (17):**
 - slurp.budget → slurp.budget.select_subgraph
-- slurp.budget.select_subgraph → slurp.budget._node_token_cost
-- slurp.cli.diff_cmd → slurp.budget.select_subgraph
-- slurp.cli.export_cmd → slurp.budget.select_subgraph
-- slurp.cli.run → slurp.budget.select_subgraph
-- slurp.evaluator.build_slurp_context → slurp.budget.select_subgraph
+- slurp.budget.select_subgraph → slurp.budget.build_context
+- slurp.mcp._handle_suggest → slurp.budget.select_subgraph
+- tests.test_audit.TestAuditIntegration.test_pipeline_log_then_read → slurp.budget.select_subgraph
+- tests.test_budget.TestBudgetGuarantee.test_random_graphs_budgets_and_formats → slurp.budget.select_subgraph
+- …
+
+## Nodes at Risk
+Direct neighbors of changed nodes:
+
+- build_context (function) · centrality: 0.0058
+- budget (module) · centrality: 0.0031
 
 ## What to review
 Most connected nodes in the blast radius — review these first:
 
-1. cli (module) · centrality: 0.0326 · slurp/cli.py
-2. mcp (module) · centrality: 0.0203 · slurp/mcp.py
-3. run (function) · centrality: 0.0155 · slurp/cli.py
-4. evaluator (module) · centrality: 0.0128 · slurp/evaluator.py
-5. suggester (module) · centrality: 0.0128 · slurp/suggester.py
+1. _runner (function) · centrality: 0.0222 · tests/test_cli.py
+2. load_graph (function) · centrality: 0.0126 · slurp/loader.py
+3. diff_graphs (function) · centrality: 0.0107 · slurp/diff.py
+4. score_nodes (function) · centrality: 0.0103 · slurp/scorer.py
+5. cli (module) · centrality: 0.0092 · slurp/cli.py
 ```
 
-> The change above is a rename of `select_subgraph`: one node added, two removed, and
-> **thirteen edges gone** — every caller of the old name. The impact *score* stays low
-> because it is a share of the whole graph, not a severity verdict; the thirteen removed
-> edges are the number that matters.
+> The change above renames `select_subgraph` in slurp v1.1.0 without touching its
+> callers: seventeen edges go, but fifteen of them are tests and one is the module that
+> contains it, so one production caller is left broken (`mcp._handle_suggest`) and the
+> score is low. Until v1.0.7 the same kind of rename scored 0.0048 whatever it broke:
+> the score was a share of the whole graph. Since v1.1.0 it counts callers — see below.
 
 The run finishes with a colour-coded summary panel and, if you did not pass
 `--viz`, the exact command to see the full picture:
@@ -823,9 +818,9 @@ The run finishes with a colour-coded summary panel and, if you did not pass
 ```
 ╭─────────────────────────── Impact Summary ───────────────────────────╮
 │                                                                      │
-│  ✅ Low impact change  (impact score 0.0048)                         │
+│  ✅ Low impact change  (impact score 0.1184)                         │
 │                                                                      │
-│  +1 added  -2 removed  ~0 modified                                   │
+│  +1 added  -1 removed  ~0 modified                                   │
 │                                                                      │
 │  See the full blast radius:                                          │
 │    slurp diff old.json new.json --viz                                │
@@ -1105,7 +1100,8 @@ slurp eval --retrieval        # recall + MRR of relevant_nodes — no LLM, no co
 slurp eval --retrieval --format json   # same, budgeted and measured as JSON
 ```
 
-Real run against a 1,796-node Next.js codebase, 15 questions, budget 4,000:
+Real run with v0.9.5 against a 1,796-node Next.js codebase, 15 questions, budget 4,000
+(before v1.1.0, so the slurp context was larger than the budget — see the note below):
 
 ```
 slurp win rate:         46.7% (7/15)
@@ -1144,9 +1140,10 @@ Each question costs **three LLM calls** (answer with slurp, answer from the full
 judge). The built-in set of 15 questions is therefore 45 calls; budget accordingly. The
 baseline context is built once and reused across questions.
 
-> `--budget` caps the *node selection*, not the rendered prompt. Budget 4,000 produced a
-> 12,865-token context on the graph above, because the serializer adds the relationships
-> section and headers on top of the selected nodes.
+> In that v0.9.5 run, `--budget` capped the *node selection*, not the rendered prompt:
+> budget 4,000 produced a 12,865-token context. Since v1.1.0 the budget bounds the text
+> sent, so the same command sends at most 4,000 tokens per question; the run has not
+> been repeated since.
 
 ---
 
@@ -1562,6 +1559,53 @@ Pass a custom path with `--ignore-file path/to/.slurpignore`.
 - ✅ **v1.0.5** — `slurp impact`: blast radius of editing a file before you edit it, no second snapshot needed, plus the `slurp_impact` MCP tool
 - ✅ **v1.0.6** — Security patch: an environment API key is never sent to an endpoint from a project's `.slurp/config.json`; `config.json` is written 0600 and `slurp init` adds `.slurp/` to `.gitignore`; `--inject-code` stays inside the project root; `slurp index` asks before replacing a graph graphify wrote (`--force` to skip); the viz works offline (vis-network vendored) and graph text can no longer break its `<script>`; a damaged `audit.jsonl` line is skipped with a warning
 - ✅ **v1.0.7** — `slurp index --smart` always produces the graph a full index builds (it records the build commit, stays incremental for edits inside function bodies, and runs a full index when files, definitions or imports change); risk is `UNKNOWN`, never "safe", for the eleven languages without a call graph; `--backend anthropic` is refused (Anthropic has no embeddings endpoint); the viz stops its physics as soon as the layout settles; projects inside a `build/` or `vendor/` folder index normally, and an empty index says why
+- ✅ **v1.1.0** — The token budget bounds the text actually sent, measured; `slurp eval --retrieval` scores recall and MRR with no LLM and reports the tokens each answer costs; `--token-factor` for models that do not tokenize like tiktoken; one `--min-score` default everywhere; `slurp diff` rates impact by the callers a change reaches; the closing tip says why nodes are missing; savings are measured or not shown; releases go to PyPI by trusted publishing
+
+### Upgrading to v1.1.0
+
+What changes if you already use slurp:
+
+- **The same `--budget` sends less context than before.** Until v1.0.7 the budget counted
+  a short summary per node and none of the relationships, so the printed text was
+  several times the budget: on a 2,111-node graphify graph `--budget 4000` printed about
+  29,000–32,000 tokens and `--budget 8000` 40,368–41,582. The budget is now an upper
+  bound on the text printed — nodes, relationships and header, measured in the format
+  you asked for — so `--budget 4000` prints at most 4,000 tokens (3,918–3,925 on that
+  graph), with fewer nodes: the quickstart's `"player stats"` went from 402 nodes to 135.
+  If you relied on the larger context, raise `--budget`; `slurp eval --retrieval` with
+  your own questions shows where recall stops improving. A budget too small for even the
+  header is now an error that names the minimum (`-32602` from the MCP server).
+- **The default budget stays 4000**, for `slurp QUERY` and for the MCP server's
+  `slurp_query`. It was measured against 6000, 8000 and 12000 and kept: in markdown,
+  which both send by default, recall was the same at 4000, 6000 and 8000. JSON and YAML spend
+  more tokens per node; with `--format json` or `yaml` use about 6000 for the same
+  recall. See [Choosing a budget](#choosing-a-budget).
+- **`--backend anthropic` is retired.** The CLI has refused it since v1.0.7; now the
+  library does too: `score_nodes(G, query, backend="anthropic")` raises `ValueError`
+  instead of calling an endpoint that does not exist. Anthropic offers no embedding
+  model. Use `tfidf` (the default) or `openai`.
+- **`slurp diff`'s `impact_score` is on a new scale.** It was the mean degree centrality
+  of the touched nodes, which on a real graph never exceeded ~0.03: deleting a function
+  with 97 callers scored 0.0012, "low". It is now `1 − e^(−D/k)`, where D counts the
+  distinct production callers the change reaches (tests and containing modules
+  excluded), banded like `slurp impact` and `slurp explain`: 6+ callers high (≥ 0.5),
+  2–5 medium (≥ ~0.17), 0–1 low; the 97-caller deletion scores 1.00. A script or CI
+  gate comparing `impact_score` with a fixed number needs a new threshold. `GraphDiff`
+  also carries `dependents` (the callers counted), `unknown_nodes` and `risk_reason`,
+  and a low score that rests on a language with no call graph is reported as unknown.
+
+Also visible:
+
+- `--min-score` defaults to 0.15 everywhere: the library (`build_context`,
+  `select_subgraph`), `slurp benchmark` and `slurp eval` used 0.0.
+- JSON and YAML output carry `nodes_over_budget`, `nodes_below_min_score` and
+  `min_score` in their stats; the markdown tip prints one line for each cause and no
+  longer calls left-out nodes "connected".
+- `slurp audit`, `slurp session` and `slurp advisor` show no savings, `session.log` no
+  longer writes `savings_pct`, and `SimilarQuery.savings_pct` is gone: they divided by a
+  fixed cost per node. `slurp benchmark` measures savings, and drops its "precision" row.
+- `slurp index` skips `_vendor/` directories and `*.min.js` files, and writes no
+  `_`-prefixed attributes, so re-indexed graphs can shrink.
 
 ---
 

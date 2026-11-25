@@ -347,28 +347,31 @@ REM Windows CMD — no line continuation, write it on one line
 slurp benchmark --graph graphify-out/graph.json --queries "auth flow" --queries "prisma schema" --budget 2000 --budget 4000
 ```
 
-**Summary output:**
+**Summary output** (the first command, v1.1.0, on a 2,111-node graphify graph of a
+Next.js codebase; a per-run table with tokens, full graph, savings, cost, nodes and
+coverage for each query × budget comes first):
 
 ```
- Benchmark Results
- ┌──────────────────┬────────┬─────────────┬────────────┬─────────┬───────────┐
- │ Query            │ Budget │ Tokens used │ Full graph │ Savings │ Precision │
- ├──────────────────┼────────┼─────────────┼────────────┼─────────┼───────────┤
- │ auth flow        │  2,000 │         812 │     28,412 │  97.1%  │    94.3%  │
- │ auth flow        │  4,000 │       1,036 │     28,412 │  96.3%  │    97.1%  │
- │ prisma schema    │  2,000 │       1,176 │     28,412 │  95.8%  │    91.2%  │
- │ database pool    │  8,000 │       4,172 │     28,412 │  85.1%  │    88.7%  │
- └──────────────────┴────────┴─────────────┴────────────┴─────────┴───────────┘
-
- Summary
- ┌──────────────────┬────────┐
- │ Mean savings     │ 93.3%  │
- │ p50 savings      │ 94.2%  │
- │ p90 savings      │ 96.8%  │
- │ Mean precision   │ 92.4%  │
- │ Best case        │ 97.1%  │
- └──────────────────┴────────┘
+                         Summary
+┏━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Metric             ┃                             Value ┃
+┡━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ Mean savings       │                             96.1% │
+│ p50 savings        │                             96.7% │
+│ p90 savings        │                             98.3% │
+│ p95 savings        │                             98.3% │
+│ Best case          │ 98.3% ('auth flow', budget 2,000) │
+│ Worst case         │ 93.3% ('auth flow', budget 8,000) │
+│ Cost with slurp    │                           $0.1236 │
+│ Cost without slurp │                           $3.1813 │
+│ Money saved        │                   $3.0577 (96.1%) │
+└────────────────────┴───────────────────────────────────┘
+Retrieval quality is not measured here: see `slurp eval --retrieval`.
 ```
+
+Both sides are measured text: what slurp prints, and the whole graph printed the same
+way. Before v1.1.0 this table also showed a "precision" (the scorer agreeing with
+itself) and savings against an under-counted slurp output.
 
 Run this before relying on automatic mode to confirm slurp performs well on your specific codebase.
 
