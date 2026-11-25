@@ -772,6 +772,7 @@ No va en el paquete; `tests/test_latency_script.py` lo mantiene ejecutable.
 │   ├── injector.py        ← extrae código fuente real para --inject-code (v0.5.0)
 │   ├── indexer.py         ← indexador estático autónomo (v0.6.0)
 │   ├── smart.py           ← re-indexado incremental (--smart), equivalente a un índice completo
+│   ├── graphfile.py       ← write_graph: única escritura de graph.json, atómica (v1.2.1)
 │   ├── advisor.py         ← recomienda budget óptimo desde el historial de queries
 │   ├── federation.py      ← mergea varios grafos en uno (--graph repetido)
 │   ├── explainer.py       ← explica un nodo en lenguaje natural (LLM + fallback estructural)
@@ -796,6 +797,7 @@ No va en el paquete; `tests/test_latency_script.py` lo mantiene ejecutable.
     ├── test_injector.py
     ├── test_indexer.py
     ├── test_smart.py
+    ├── test_graphfile.py
     ├── test_advisor.py
     ├── test_federation.py
     ├── test_explainer.py
@@ -1084,6 +1086,27 @@ slurp serve --graph graph.json
   }
 }
 ```
+
+---
+
+### `slurp/graphfile.py`
+
+**Una sola escritura de `graph.json`** (v1.2.1, #84): `write_graph(path, data)`. La usan
+todos los escritores — `slurp index` (`_run`, que también sirve a `--watch`), `--smart`
+(`smart_reindex`) y `slurp init`. Hasta v1.2.0 cada uno hacía `write_text`, que trunca el
+fichero vivo: el servidor MCP podía cargar un grafo a medias.
+- Fichero temporal **en el mismo directorio** (`.graph.json.<pid>.<hex>.tmp`, `O_EXCL`) →
+  `flush` + `fsync` → `os.replace`. Si algo falla, el grafo anterior queda intacto y el
+  temporal se borra.
+- Mismos bytes que antes (`json.dumps(indent=2)`). Un destino enlazado se escribe a través
+  del enlace (`realpath`), como hacía `write_text`; un grafo existente conserva sus permisos
+  y uno nuevo recibe los del umask (no el 0600 de `tempfile`).
+- **Windows**: `os.replace` da `PermissionError` si otro proceso tiene el fichero abierto; se
+  reintenta con esperas crecientes (`_REPLACE_RETRY_DELAYS_S`, ~1,9 s en total). En POSIX un
+  `PermissionError` es un problema real y sale al momento.
+- Sin compare-and-swap ni lock: van en la v1.3 (`docs/design/mcp-autonomo.md` §2.3), que
+  amplía esta misma función. `TestEveryWriterIsAtomic` comprueba que cada escritor pasa
+  por `os.replace`.
 
 ---
 

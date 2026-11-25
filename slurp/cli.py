@@ -1680,8 +1680,7 @@ def index_cmd(
     No graphify or LLM required. Supports Python (ast), TypeScript/JS
     (tree-sitter or regex), and Go (regex).
     """
-    import json as _json
-
+    from slurp.graphfile import write_graph
     from slurp.indexer import (
         _INDEXED_EXTENSIONS,
         format_parser_summary,
@@ -1703,8 +1702,7 @@ def index_cmd(
         n_nodes = len(graph["nodes"])
         n_edges = len(graph["links"])
         files_processed = len({n["source_file"] for n in graph["nodes"] if n.get("source_file")})
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(_json.dumps(graph, indent=2), encoding="utf-8")
+        write_graph(out, graph)
         click.echo(f"✓ {n_nodes} nodes · {n_edges} edges · {files_processed} files")
         if not n_nodes:
             _explain_empty_graph(root)
@@ -1874,12 +1872,13 @@ def init(yes: bool) -> None:
             graph = index_project(root, ignore, on_file=lambda _p: progress.advance(task))
         from slurp.smart import head_commit
 
+        from slurp.graphfile import write_graph
+
         graph["built_at_commit"] = head_commit(root)
 
         n_nodes = len(graph["nodes"])
         n_edges = len(graph["links"])
-        graph_path.parent.mkdir(parents=True, exist_ok=True)
-        graph_path.write_text(_json.dumps(graph, indent=2), encoding="utf-8")
+        write_graph(graph_path, graph)
 
     # --- Step 2: .mcp.json --------------------------------------------------
     existing_cfg: dict | None = None

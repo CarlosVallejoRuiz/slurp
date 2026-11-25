@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
 
+from slurp.graphfile import write_graph
 from slurp.ignore import SlurpIgnore
 from slurp.indexer import (
     _INDEXED_EXTENSIONS,
@@ -369,8 +370,7 @@ def smart_reindex(
     rebuilt["built_at_commit"] = head_commit(root)
 
     if not dry_run:
-        graph_path.parent.mkdir(parents=True, exist_ok=True)
-        graph_path.write_text(json.dumps(rebuilt, indent=2), encoding="utf-8")
+        write_graph(graph_path, rebuilt)
 
     elapsed_ms = (perf_counter() - start) * 1000
     per_file_ms = parse_ms / len(modified) if modified else 0.0
