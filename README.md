@@ -4,7 +4,7 @@
 
 # slurp
 
-![tests](https://img.shields.io/badge/tests-2694%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-2738%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 ![pypi](https://img.shields.io/badge/PyPI-slurp--graph-orange)
@@ -1779,6 +1779,48 @@ Pass a custom path with `--ignore-file path/to/.slurpignore`.
 - ✅ **v1.1.0** — The token budget bounds the text actually sent, measured; `slurp eval --retrieval` scores recall and MRR with no LLM and reports the tokens each answer costs; `--token-factor` for models that do not tokenize like tiktoken; one `--min-score` default everywhere; `slurp diff` rates impact by the callers a change reaches; the closing tip says why nodes are missing; savings are measured or not shown; releases go to PyPI by trusted publishing
 - ✅ **v1.1.1** — Maintenance: `slurp index` skips the build output of web frameworks (`.next/`, `.nuxt/`, `.svelte-kit/`, `.turbo/`, `.vercel/`, `.output/`, and `out/` when it holds a Next.js static export) and prunes skipped directories instead of walking them (PrismaStats: 4.9 s → 0.5 s, 214 fewer nodes of compiled `.next/` code); `slurp diff` reads a deleted node's risk neighbourhood from the old graph, where it still exists; `slurp config set` adds `.slurp/` to `.gitignore` as `slurp init` does; `scripts/latency.py` reproduces the Performance figures; the sdist ships only the package, its docs and the MIT `LICENSE`, which the wheel now carries too
 - ✅ **v1.2.0** — Better selection, measured: test code and import nodes no longer take places in a subgraph (`--include-tests` / `--include-imports` let them back), and a node lends its neighbour boost to at most ten neighbours, so a hub's callers no longer fill the budget — recall at `--budget 4000` in markdown 0.867 → 0.967 on PrismaStats and 0.688 → 0.875 on slurp's own graph; risk bands in `slurp explain`, `slurp impact` and `slurp diff` count production callers only, with tests shown apart; `_is_test` follows each language's test-runner conventions; `scripts/retrieval.py` measures recall on a fixed tuning/held-out split of the questions
+- ✅ **v1.2.1** — Fixes: `slurp index --smart` no longer runs a full index on every run when `.slurpignore` excludes a whole file; every command that writes `graph.json` replaces it atomically, so the MCP server never loads half a graph; `slurp impact`'s AFFECTED FILES list counts the files its headline counts; `--suggest` gives the same suggestions in every run; `--inject-code` says when it cuts a block at 100 lines; `slurp index` treats graphs written by v1.3 as its own
+
+### Upgrading to v1.2.1
+
+A maintenance release: no change to scoring, selection or the budget, and no dependency
+changes.
+
+- **`slurp index --smart` no longer runs a full index every time a `.slurpignore` rule
+  excludes a whole file.** It took every file on disk that no node of the graph came from
+  for a new one, so with `file:b.py` two `--smart` runs in a row both printed `1 added and
+  0 removed or renamed files … Full index needed`. Such a file now counts only if a full
+  index would give it a node; the same goes for files excluded by `type:` or `id:` rules
+  and Python files that do not parse.
+- **Every command that writes `graph.json` replaces it atomically** — `slurp index`,
+  `--smart`, `--watch` and `slurp init`. The new graph is written next to the old one,
+  flushed to disk and moved into place, so a reader such as `slurp serve` sees the old
+  graph or the new one, never half of one. A symlinked `graph.json` is written through, as
+  before, and an existing one keeps its permissions. On Windows, a graph another process
+  holds open is retried for about two seconds.
+- **`slurp impact`: the AFFECTED FILES list counts the files the headline counts.** On
+  PrismaStats, `slurp impact lib/supabase/admin.ts` said "affects 69 files" over a list
+  that added up to 34: the headline (and `affected_files` in `--output json`) took the
+  files of every production dependent within `--hops`, direct or transitive, while the
+  list took direct dependents only. 69 was right. The list — in the MCP tool
+  `slurp_impact` too — now shows those same files, and each file's count adds its direct
+  and transitive dependents. **For CI on
+  `--output json`: `affected_files` keeps its meaning and its values**; the per-file counts
+  are new, as `dependents_per_file`. The risk is still rated on direct dependents.
+- **`--suggest` gives the same suggestions in every run.** When two frontier nodes had as
+  many dependants, the risk suggestion went to whichever a set yielded first, which
+  changed with the process's hash seed (`Badge` or `badge.tsx` on PrismaStats). A tie now
+  goes to a definition over the file node that holds it, then to the smallest node id.
+- **`--inject-code` says when it cuts a block,** with a line under it:
+  `… cut at 100 lines; the block continues at line 1240 of lib/supabase/admin-actions.ts`.
+- **`slurp index` treats graphs written by v1.3 as its own.** v1.3 will add a top-level
+  `slurp` key (a manifest of the files it indexed) to `graph.json`. v1.2.1 re-indexes such
+  a graph without asking whether to replace another tool's; v1.2.0 and earlier take it for
+  graphify's and ask (`--force` skips the question). The manifest is lost in the rewrite,
+  and v1.3 rebuilds it with one full index.
+- The docs no longer say that the MCP tools' `readOnlyHint` lets clients auto-approve
+  them: Claude Code uses it to run read-only calls in parallel and to retry them, not to
+  skip the approval; Codex does count it.
 
 ### Upgrading to v1.2.0
 
