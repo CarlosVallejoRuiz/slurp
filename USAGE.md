@@ -257,13 +257,13 @@ slurp audit --top-nodes 20
 
 ```
  Query History (last 20 of 47)
- ┌───┬─────────────────────┬──────────────────────────┬───────┬────────┬─────────┐
- │ # │ Timestamp           │ Query                    │ Nodes │ Tokens │ Savings │
- ├───┼─────────────────────┼──────────────────────────┼───────┼────────┼─────────┤
- │ 1 │ 2026-06-07 09:14:22 │ auth flow                │ 5     │    847 │     97% │
- │ 2 │ 2026-06-07 09:31:05 │ prisma schema validation │ 7     │   1124 │     96% │
- │ 3 │ 2026-06-07 10:02:41 │ database pool connection │ 9     │   1893 │     93% │
- └───┴─────────────────────┴──────────────────────────┴───────┴────────┴─────────┘
+ ┌───┬─────────────────────┬──────────────────────────┬───────┬────────┐
+ │ # │ Timestamp           │ Query                    │ Nodes │ Tokens │
+ ├───┼─────────────────────┼──────────────────────────┼───────┼────────┤
+ │ 1 │ 2026-06-07 09:14:22 │ auth flow                │ 5     │    847 │
+ │ 2 │ 2026-06-07 09:31:05 │ prisma schema validation │ 7     │  1,124 │
+ │ 3 │ 2026-06-07 10:02:41 │ database pool connection │ 9     │  1,893 │
+ └───┴─────────────────────┴──────────────────────────┴───────┴────────┘
 
  Top 10 Most Selected Nodes
  ┌──────┬──────────────────────┬────────────────┐
@@ -467,7 +467,7 @@ It filters out nodes with a relevance score below 0.15 before the greedy selecti
 
 **In automatic mode, how do I know which nodes slurp selected?**
 
-Every query is recorded in `.slurp/audit.jsonl`. Run `slurp audit` to see the full history with selected nodes, tokens used, and estimated savings. To see the exact reasoning for a specific query, replay it in manual mode with `--explain`.
+Every query is recorded in `.slurp/audit.jsonl`. Run `slurp audit` to see the full history with selected nodes and tokens used (measured savings are `slurp benchmark`'s job). To see the exact reasoning for a specific query, replay it in manual mode with `--explain`.
 
 ---
 

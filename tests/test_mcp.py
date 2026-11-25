@@ -533,8 +533,7 @@ class TestLogSession:
     def test_entry_has_all_required_keys(self, tmp_path):
         log_session("auth flow", 4000, self.STATS, log_dir=tmp_path)
         entry = json.loads((tmp_path / SESSION_LOG_FILE).read_text(encoding="utf-8"))
-        for key in ("ts", "query", "budget", "nodes", "tokens", "savings_pct"):
-            assert key in entry
+        assert set(entry) == {"ts", "query", "budget", "nodes", "tokens"}
 
     def test_entry_records_query_and_budget(self, tmp_path):
         log_session("auth flow", 4000, self.STATS, log_dir=tmp_path)
@@ -548,23 +547,12 @@ class TestLogSession:
         assert entry["nodes"] == 28
         assert entry["tokens"] == 260
 
-    def test_savings_pct_uses_the_50_token_baseline(self, tmp_path):
-        # baseline = 100 nodes * 50 = 5000; used 260 -> 94.8% saved
+    def test_records_no_savings_figure(self, tmp_path):
+        # The benchmark's method needs the whole graph printed and counted
+        # (70-700 ms a call); the server does not pay that, so it claims nothing.
         log_session("q", 4000, self.STATS, log_dir=tmp_path)
         entry = json.loads((tmp_path / SESSION_LOG_FILE).read_text(encoding="utf-8"))
-        assert entry["savings_pct"] == pytest.approx(94.8)
-
-    def test_savings_pct_is_zero_for_empty_graph(self, tmp_path):
-        log_session("q", 4000, {"nodes_total": 0, "tokens_used": 0,
-                                "nodes_selected": 0}, log_dir=tmp_path)
-        entry = json.loads((tmp_path / SESSION_LOG_FILE).read_text(encoding="utf-8"))
-        assert entry["savings_pct"] == 0.0
-
-    def test_savings_pct_never_negative(self, tmp_path):
-        log_session("q", 4000, {"nodes_total": 1, "tokens_used": 9999,
-                                "nodes_selected": 1}, log_dir=tmp_path)
-        entry = json.loads((tmp_path / SESSION_LOG_FILE).read_text(encoding="utf-8"))
-        assert entry["savings_pct"] == 0.0
+        assert "savings_pct" not in entry
 
     def test_timestamp_is_iso_seconds(self, tmp_path):
         log_session("q", 4000, self.STATS, log_dir=tmp_path)

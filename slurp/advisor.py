@@ -25,10 +25,6 @@ SIMILARITY_THRESHOLD = 0.3
 # would pay for one outlier every time.
 BUDGET_PERCENTILE = 75
 
-# Tokens per node when estimating what the full graph would have cost. Matches
-# the baseline used by the visualiser, so savings figures agree across commands.
-_BASELINE_TOKENS_PER_NODE = 50
-
 _CONFIDENCE_HIGH = 10
 
 
@@ -41,7 +37,6 @@ class SimilarQuery:
     tokens_used: int
     nodes_selected: int
     nodes_total: int
-    savings_pct: float
 
 
 @dataclass
@@ -143,20 +138,6 @@ def query_similarities(query: str, history: list[str]) -> list[float]:
     ]
 
 
-def _entry_savings_pct(tokens_used: int, nodes_total: int) -> float:
-    """Percentage saved versus injecting the whole graph.
-
-    The audit log records outcomes, not the full-graph token count, so the
-    baseline is estimated at _BASELINE_TOKENS_PER_NODE per node rather than
-    re-serialising a graph that may no longer exist.
-    """
-    baseline = nodes_total * _BASELINE_TOKENS_PER_NODE
-    if baseline <= 0:
-        return 0.0
-    saved = max(0, baseline - tokens_used)
-    return round(saved / baseline * 100, 1)
-
-
 def find_similar_queries(
     query: str,
     entries: list[dict],
@@ -192,9 +173,6 @@ def find_similar_queries(
             tokens_used=entry["tokens_used"],
             nodes_selected=int(entry.get("nodes_selected") or 0),
             nodes_total=int(entry.get("nodes_total") or 0),
-            savings_pct=_entry_savings_pct(
-                entry["tokens_used"], int(entry.get("nodes_total") or 0)
-            ),
         )
         for entry, score in zip(usable, scores, strict=True)
         if score >= threshold
@@ -351,11 +329,14 @@ def format_advice(advice: BudgetAdvice, graph_path: Path | None = None) -> str:
         lines.append("\nSimilar past queries:")
         shown = advice.similar[:_MAX_SIMILAR_SHOWN]
         width = max(len(f'"{m.query}"') for m in shown)
+        # DECISION: measured figures only. Savings need the whole graph printed
+        # and counted, as `slurp benchmark` does; the audit log does not hold
+        # that, and until v1.1.0 this line guessed it with a fixed cost per node.
         for m in shown:
             label = f'"{m.query}"'.ljust(width)
             lines.append(
                 f"  {label} → {m.tokens_used:,} tokens · "
-                f"{m.savings_pct}% savings"
+                f"{m.nodes_selected} {'node' if m.nodes_selected == 1 else 'nodes'}"
             )
         if advice.similar_count > len(shown):
             lines.append(f"  … and {advice.similar_count - len(shown)} more")

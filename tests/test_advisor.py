@@ -140,18 +140,12 @@ class TestSimilarity:
         widened = find_similar_queries("auth flow", entries, threshold=0.0)
         assert [m.query for m in widened] == ["login validation"]
 
-    def test_savings_pct_derived_from_nodes_total(self):
-        # baseline = 100 nodes * 50 tokens = 5000; used 1000 → 80% saved
+    def test_carries_no_savings_figure(self):
+        # The audit log has no full-graph measurement to compare against.
         matches = find_similar_queries(
             "auth flow", [_entry("auth flow login", 1000, nodes_total=100)]
         )
-        assert matches[0].savings_pct == 80.0
-
-    def test_savings_pct_zero_when_nodes_total_missing(self):
-        matches = find_similar_queries(
-            "auth flow", [_entry("auth flow login", 1000, nodes_total=0)]
-        )
-        assert matches[0].savings_pct == 0.0
+        assert not hasattr(matches[0], "savings_pct")
 
 
 class TestOptimalBudget:
@@ -291,11 +285,11 @@ class TestOutputFormat:
         assert "tokens" in out
         assert any(f"{c}," in out for c in "123456789")
 
-    def test_lists_similar_queries_with_savings(self, audit_dir):
+    def test_lists_similar_queries_with_measured_figures_only(self, audit_dir):
         out = format_advice(self._advice(audit_dir), Path("graph.json"))
         assert "Similar past queries:" in out
-        assert "→" in out
-        assert "% savings" in out
+        assert "→" in out and "nodes" in out
+        assert "savings" not in out
 
     def test_caps_the_similar_list(self, audit_dir):
         out = format_advice(self._advice(audit_dir, n=12), Path("graph.json"))

@@ -1448,8 +1448,9 @@ def _build_session_table(entries: list[dict], log_path: Path) -> Table:
     table.add_column("Budget", justify="right")
     table.add_column("Nodes", justify="right")
     table.add_column("Tokens", justify="right")
-    table.add_column("Savings", justify="right")
 
+    # No savings: see log_session. A savings_pct left by a pre-1.1.0 log was a
+    # fixed-cost-per-node guess and is not shown.
     for e in entries:
         table.add_row(
             str(e.get("ts", "")),
@@ -1457,7 +1458,6 @@ def _build_session_table(entries: list[dict], log_path: Path) -> Table:
             f"{e.get('budget', 0):,}",
             str(e.get("nodes", 0)),
             f"{e.get('tokens', 0):,}",
-            f"{e.get('savings_pct', 0)}%",
         )
     return table
 
@@ -1472,8 +1472,7 @@ def _format_session_line(line: str) -> str:
         return line.rstrip("\n")
     return (
         f"{e.get('ts', '')}  {e.get('query', '')!r}  "
-        f"{e.get('nodes', 0)} nodes · {e.get('tokens', 0):,} tokens · "
-        f"{e.get('savings_pct', 0)}% saved"
+        f"{e.get('nodes', 0)} nodes · {e.get('tokens', 0):,} tokens"
     )
 
 
@@ -1900,19 +1899,17 @@ def audit(top_n: int, audit_dir: str) -> None:
     queries_table.add_column("Query")
     queries_table.add_column("Nodes", justify="right")
     queries_table.add_column("Tokens", justify="right")
-    queries_table.add_column("Savings", justify="right")
 
+    # DECISION: no savings column. Savings are what `slurp benchmark` measures —
+    # the whole graph printed the same way and counted — and the audit log has
+    # no such measurement. Until v1.1.0 this column guessed a fixed cost per node.
     for i, entry in enumerate(recent, 1):
-        baseline = entry.get("nodes_total", 0) * 50
-        used = entry.get("tokens_used", 0)
-        savings_pct = round(max(0, baseline - used) / baseline * 100) if baseline > 0 else 0
         queries_table.add_row(
             str(i),
             entry.get("timestamp", ""),
             entry.get("query", ""),
             str(entry.get("nodes_selected", "")),
-            str(used),
-            f"{savings_pct}%",
+            f"{entry.get('tokens_used', 0):,}",
         )
 
     _echo_rich(queries_table)

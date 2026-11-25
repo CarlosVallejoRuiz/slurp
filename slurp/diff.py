@@ -487,11 +487,14 @@ def build_diff_viz_graph(
 
     n_total = G_new.number_of_nodes()
     n_shown = viz_G.number_of_nodes()
+    # No token figures: a diff view has no budget and sends no text, so the viz
+    # shows neither a token count nor a savings badge (as for `slurp impact`).
+    # Until v1.1.0 both were made up from a fixed cost per node.
     stats = {
         "nodes_selected": n_shown,
         "nodes_total": max(1, n_total),
-        "tokens_used": n_shown * 50,
-        "tokens_budget": max(1, n_total) * 50,
+        "tokens_used": 0,
+        "tokens_budget": 0,
         "coverage_pct": round(n_shown / max(1, n_total) * 100, 1),
     }
 

@@ -740,6 +740,16 @@ def read_audit(audit_dir=Path(".slurp")) -> list[dict]
 def top_nodes_from_audit(audit_dir=Path(".slurp"), n=10) -> list[tuple]
 ```
 
+**Ahorro: el método del benchmark o nada** (v1.1.0, #57). Ahorro = `(tokens_full −
+tokens_used) / tokens_full`, con `tokens_full` = el grafo entero impreso igual
+(`budget.full_graph_tokens`). Solo `slurp benchmark` y el badge de `--viz` lo miden.
+`slurp audit`, `slurp session` (y `session.log`) y `slurp advisor` no tienen ese dato y
+**no muestran ahorro**: medirlo cuesta 70–700 ms por consulta frente a 4–7 ms de la
+consulta (PrismaStats y slurp, markdown y JSON). Hasta v1.0.7 los tres lo inventaban
+con un coste fijo por nodo, igual que el viz de `slurp diff` sus contadores de tokens
+(ahora 0 → el viz no los pinta). `TestOneSavingsMethod` (test_benchmark) falla si
+reaparece cualquier forma de coste fijo por nodo en `slurp/*.py`.
+
 ---
 
 ### `slurp/diff.py`

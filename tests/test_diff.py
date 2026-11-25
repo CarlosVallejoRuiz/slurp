@@ -457,6 +457,18 @@ class TestBuildDiffVizGraph:
         _, _, stats = build_diff_viz_graph(G_old, G_new, diff, hops=2)
         assert stats["nodes_total"] == G_new.number_of_nodes()
 
+    def test_stats_claim_no_token_figures(self, graphs):
+        # A diff view has no budget and sends no text: the old figures were
+        # a fixed cost per node, shown in the viz as "X / Y tokens".
+        from slurp.viz import build_html
+
+        G_old, G_new = graphs
+        diff = diff_graphs(G_old, G_new)
+        viz_G, scores, stats = build_diff_viz_graph(G_old, G_new, diff, hops=2)
+        assert stats["tokens_used"] == 0 and stats["tokens_budget"] == 0
+        html = build_html(viz_G, stats, scores, "diff")
+        assert " tokens</span>" not in html and "Saved" not in html
+
     def test_empty_diff_no_affected_nodes(self, graphs):
         G_old, _ = graphs
         diff = diff_graphs(G_old, G_old)

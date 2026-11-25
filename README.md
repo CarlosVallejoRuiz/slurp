@@ -410,16 +410,16 @@ slurp audit --audit-dir /custom/.slurp
 ```
 
 ```
-                           Query History (last 5 of 5)
-┏━━━━━━┳━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━┳━━━━━━━━┳━━━━━━━━━┓
-┃ #    ┃ Timestamp           ┃ Query                 ┃ Nodes ┃ Tokens ┃ Savings ┃
-┡━━━━━━╇━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━╇━━━━━━━━╇━━━━━━━━━┩
-│ 1    │ 2026-09-15T09:01:07 │ budget selection      │   131 │   2999 │     98% │
-│ 2    │ 2026-09-15T09:01:07 │ graph loader          │   139 │   2999 │     98% │
-│ 3    │ 2026-09-15T09:01:07 │ mcp server            │   130 │   3000 │     98% │
-│ 4    │ 2026-09-15T09:01:08 │ token counting        │   135 │   3000 │     98% │
-│ 5    │ 2026-09-15T09:01:08 │ call graph extraction │   143 │   2995 │     98% │
-└──────┴─────────────────────┴───────────────────────┴───────┴────────┴─────────┘
+                      Query History (last 5 of 5)
+┏━━━━━━┳━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━┳━━━━━━━━┓
+┃ #    ┃ Timestamp           ┃ Query                 ┃ Nodes ┃ Tokens ┃
+┡━━━━━━╇━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━╇━━━━━━━━┩
+│ 1    │ 2026-11-25T09:56:26 │ budget selection      │    96 │  2,947 │
+│ 2    │ 2026-11-25T09:56:26 │ graph loader          │    89 │  2,940 │
+│ 3    │ 2026-11-25T09:56:26 │ mcp server            │    65 │  2,937 │
+│ 4    │ 2026-11-25T09:56:26 │ token counting        │   104 │  2,947 │
+│ 5    │ 2026-11-25T09:56:27 │ call graph extraction │    99 │  2,933 │
+└──────┴─────────────────────┴───────────────────────┴───────┴────────┘
                         Top 10 Most Selected Nodes
 ┏━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┓
 ┃ Rank  ┃ Node                                    ┃ Times Selected ┃
@@ -433,6 +433,10 @@ slurp audit --audit-dir /custom/.slurp
 ```
 
 Every query is appended as a JSON line (unless `--no-audit` is passed). Useful for tracking which parts of your codebase an AI agent visits most.
+
+There is no savings column: savings are what [`slurp benchmark`](#slurp-benchmark)
+measures — the whole graph printed the same way and counted — and the log does not
+hold that measurement. Until v1.1.0 the column guessed it from the node count.
 
 ---
 
@@ -454,20 +458,20 @@ slurp advisor "auth flow" --graph graph.json
 │ Based on 5 similar past queries                                  │
 ╰──────────────────────────────────────────────────────────────────╯
 
-Recommended budget:  3,999 tokens
+Recommended budget:  3,918 tokens
 Expected coverage:   93.3% of similar queries' selections
-Estimated cost:      $0.0120  (claude-sonnet-5)
+Estimated cost:      $0.0118  (claude-sonnet-5)
 Confidence:          MEDIUM  (5 similar queries)
 
 Similar past queries:
-  "budget selection"      → 2,999 tokens · 98.4% savings
-  "budget selection heap" → 1,497 tokens · 99.2% savings
-  "budget selection heap" → 2,498 tokens · 98.7% savings
-  "budget selection heap" → 3,999 tokens · 97.9% savings
-  "budget selection heap" → 6,000 tokens · 96.9% savings
+  "budget selection"      → 2,947 tokens · 96 nodes
+  "budget selection heap" → 1,463 tokens · 44 nodes
+  "budget selection heap" → 2,456 tokens · 78 nodes
+  "budget selection heap" → 3,918 tokens · 128 nodes
+  "budget selection heap" → 5,888 tokens · 199 nodes
 
 Run with recommended budget:
-  slurp "budget selection" --graph graph.json --budget 3999
+  slurp "budget selection" --graph graph.json --budget 3918
 ```
 
 ```
@@ -475,21 +479,21 @@ Run with recommended budget:
 │ Based on 12 similar past queries                             │
 ╰──────────────────────────────────────────────────────────────╯
 
-Recommended budget:  2,840 tokens
-Expected coverage:   99.3% of similar queries' selections
-Estimated cost:      $0.0085  (claude-sonnet-5)
+Recommended budget:  2,748 tokens
+Expected coverage:   100.0% of similar queries' selections
+Estimated cost:      $0.0082  (claude-sonnet-5)
 Confidence:          HIGH  (12 similar queries)
 
 Similar past queries:
-  "auth flow cookie" → 2,770 tokens · 97.4% savings
-  "auth flow guard"  → 2,680 tokens · 97.5% savings
-  "auth flow jwt"    → 2,750 tokens · 97.4% savings
-  "auth flow login"  → 2,650 tokens · 97.5% savings
-  "auth flow logout" → 2,620 tokens · 97.5% savings
+  "auth flow callback" → 2,743 tokens · 104 nodes
+  "auth flow cookie"   → 2,743 tokens · 104 nodes
+  "auth flow guard"    → 2,743 tokens · 104 nodes
+  "auth flow jwt"      → 2,744 tokens · 104 nodes
+  "auth flow login"    → 2,739 tokens · 105 nodes
   … and 7 more
 
 Run with recommended budget:
-  slurp "auth flow" --graph graph.json --budget 2840
+  slurp "auth flow" --graph graph.json --budget 2748
 ```
 
 | Flag | Default | Description |
@@ -513,9 +517,10 @@ pay for one outlier every time.
 | `LOW` | fewer than `--min-similar` — still recommends, with a warning |
 | `NONE` | no similar history — falls back to the 4,000-token default |
 
-> Savings percentages are estimated against a baseline of ~50 tokens per node, the same
-> baseline the visualizer uses. The audit log records outcomes, not the full-graph token
-> count, so no historical graph needs to still exist on disk.
+> The advisor shows what each similar query used — tokens and nodes, both recorded when
+> it ran — and no savings: the audit log does not hold the full-graph measurement that
+> [`slurp benchmark`](#slurp-benchmark) compares against. Until v1.1.0 it estimated one
+> from the node count.
 
 ---
 
@@ -966,14 +971,19 @@ slurp session --tail
 | `--log-dir PATH` | `.slurp` | Directory containing `session.log`. |
 
 ```
-             MCP Session Log — last 2 (.slurp/session.log)
-┏━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━━┳━━━━━━━━━┓
-┃ Time                ┃ Query      ┃ Budget ┃ Nodes ┃ Tokens ┃ Savings ┃
-┡━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━━╇━━━━━━━━━┩
-│ 2026-08-15T12:13:58 │ auth flow  │  4,000 │   171 │  4,000 │   94.6% │
-│ 2026-08-15T12:13:58 │ mcp server │  2,000 │    94 │  1,995 │   97.3% │
-└─────────────────────┴────────────┴────────┴───────┴────────┴─────────┘
+        MCP Session Log — last 2 (.slurp/session.log)
+┏━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━━┓
+┃ Time                ┃ Query      ┃ Budget ┃ Nodes ┃ Tokens ┃
+┡━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━━┩
+│ 2026-11-25T09:56:42 │ auth flow  │  4,000 │   119 │  3,919 │
+│ 2026-11-25T09:56:42 │ mcp server │  2,000 │    52 │  1,957 │
+└─────────────────────┴────────────┴────────┴───────┴────────┘
 ```
+
+No savings column, and no `savings_pct` in the log since v1.1.0: measuring the whole
+graph the way [`slurp benchmark`](#slurp-benchmark) does costs 70–700 ms per call,
+against 4–7 ms for the query, so the server does not do it. Older logs keep their
+`savings_pct` field, an estimate from the node count; it is not shown.
 
 Use it to confirm your AI assistant is actually calling slurp. The log is written
 only when `.slurp/` already exists — running any query manually creates it, and

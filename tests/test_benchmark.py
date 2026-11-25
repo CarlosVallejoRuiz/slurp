@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 
 import networkx as nx
 import pytest
@@ -774,3 +775,21 @@ class TestPriceModelCLI:
         ])
         assert result.exit_code == 0, result.output
         assert "pricing: gpt-4o" in result.output
+
+
+class TestOneSavingsMethod:
+    """Savings are the benchmark's measurement or nothing — never an estimate."""
+
+    def test_no_fixed_per_node_token_estimate_in_the_source(self):
+        import slurp
+
+        # "* 50", "50 tokens", "TOKENS_PER_NODE", "tokens per node" — any spelling
+        # of a fixed cost per node standing in for a measurement.
+        pattern = re.compile(r"\*\s*50\b|\b50[ _-]?tokens?\b|tokens?[ _-]per[ _-]node", re.I)
+        offenders = [
+            f"{path.name}:{number}: {line.strip()}"
+            for path in sorted(Path(slurp.__file__).parent.glob("*.py"))
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+            if pattern.search(line)
+        ]
+        assert offenders == []

@@ -268,7 +268,7 @@ def build_html(
     projects = sorted({n["project"] for n in nodes if n["project"]})
 
     # DECISION: the savings badge shows measured figures or nothing. It used to
-    # assume 50 tokens per node for the full graph, and `slurp impact --viz`,
+    # guess the full graph from a fixed cost per node, and `slurp impact --viz`,
     # which has no budget, claimed ~100% saved. Callers that measured the whole
     # graph (stats["tokens_full"], same formatter and query) get the badge; views
     # without a budget get neither a badge nor a token count.

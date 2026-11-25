@@ -355,11 +355,6 @@ class FederatedGraphState(GraphState):
         return True
 
 
-# DECISION: same 50-tokens-per-node baseline the `slurp audit` table uses, so
-# savings_pct means the same thing everywhere in slurp.
-_TOKENS_PER_NODE_BASELINE = 50
-
-
 # ---------------------------------------------------------------------------
 # Session log
 # ---------------------------------------------------------------------------
@@ -391,19 +386,17 @@ def log_session(
     if not log_dir.is_dir():
         return False
 
-    used = stats.get("tokens_used", 0)
-    baseline = stats.get("nodes_total", 0) * _TOKENS_PER_NODE_BASELINE
-    savings_pct = (
-        round(max(0, baseline - used) / baseline * 100, 1) if baseline > 0 else 0.0
-    )
-
+    # DECISION: no savings figure. Savings mean what `slurp benchmark` measures:
+    # the whole graph printed the same way and counted. That costs 70-700 ms a
+    # call against 4-7 ms for the query itself, so the server does not pay it,
+    # and without it there is nothing honest to write. Until v1.1.0 this logged
+    # savings against a fixed per-node guess.
     entry = {
         "ts": datetime.now().isoformat(timespec="seconds"),
         "query": query,
         "budget": budget,
         "nodes": stats.get("nodes_selected", 0),
-        "tokens": used,
-        "savings_pct": savings_pct,
+        "tokens": stats.get("tokens_used", 0),
     }
 
     try:

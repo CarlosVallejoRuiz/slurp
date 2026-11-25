@@ -432,14 +432,18 @@ class TestAuditCommand:
         assert result.exit_code == 0
         assert "Most Selected" in result.output
 
-    def test_audit_table_has_savings_column(
+    def test_audit_table_shows_no_savings(
         self, sample_graph_json, tmp_path, monkeypatch
     ):
+        # The log has no full-graph measurement, so no savings figure: the old
+        # one assumed a fixed cost per node.
         monkeypatch.chdir(tmp_path)
         runner = _runner()
         runner.invoke(cli, ["auth", "--graph", str(sample_graph_json)])
         result = runner.invoke(cli, ["audit"])
-        assert "Savings" in result.output
+        assert result.exit_code == 0
+        assert "Savings" not in result.output and "%" not in result.output
+        assert "Tokens" in result.output
 
     def test_audit_top_nodes_flag(self, sample_graph_json, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -798,7 +802,7 @@ def _make_graph_n(n: int) -> tuple[nx.DiGraph, dict, dict[str, float]]:
     stats = {
         "nodes_selected": n,
         "nodes_total": n * 2,
-        "tokens_used": n * 50,
+        "tokens_used": 1_234,
         "tokens_budget": 4000,
         "coverage_pct": 50.0,
     }
@@ -1940,7 +1944,7 @@ class TestSessionCommand:
         self._write_log(tmp_path / ".slurp", ["auth flow"])
         monkeypatch.chdir(tmp_path)
         result = _runner().invoke(cli, ["session"])
-        for col in ("Time", "Query", "Budget", "Nodes", "Tokens", "Savings"):
+        for col in ("Time", "Query", "Budget", "Nodes", "Tokens"):
             assert col in result.output
 
     def test_shows_the_query_text(self, tmp_path, monkeypatch):
@@ -1949,11 +1953,13 @@ class TestSessionCommand:
         result = _runner().invoke(cli, ["session"])
         assert "auth flow" in result.output
 
-    def test_shows_savings_percentage(self, tmp_path, monkeypatch):
+    def test_shows_no_savings_even_from_old_logs(self, tmp_path, monkeypatch):
+        # Logs written before v1.1.0 carry a savings_pct built on a fixed cost per
+        # node; it is not shown.
         self._write_log(tmp_path / ".slurp", ["auth flow"])
         monkeypatch.chdir(tmp_path)
         result = _runner().invoke(cli, ["session"])
-        assert "94.2%" in result.output
+        assert "Savings" not in result.output and "94.2" not in result.output
 
     # --- --last ------------------------------------------------------------
 
