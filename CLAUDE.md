@@ -499,7 +499,8 @@ uv sync --extra rust            # solo una
   desde los demás según aparecían. A seis módulos de profundidad eso deja de
   ser un atajo. Viven aquí: `_tokenize`, `_display`, `_is_test`,
   `_split_callers`, `_box`, `_RISK_HIGH_MIN`/`_RISK_MEDIUM_MIN`, más
-  `_label`, `_callers`, `_callees` y `_TEST_MARKERS`.
+  `_label`, `_callers`, `_callees` y `_TEST_MARKERS` (sustituido en v1.2, #19, por
+  `_TEST_DIRS`/`_TEST_FILE`/`_RUST_TEST_MODULES`, ver más abajo).
   - **Los tres últimos no estaban en la lista original pero tuvieron que
     moverse**: `_display` depende de `_label`, y `_split_callers` de
     `_callers` y `_TEST_MARKERS`. Dejarlos en `explainer` habría creado un
@@ -509,6 +510,21 @@ uv sync --extra rust            # solo una
     silencio. Ahora hay un solo 6.
   - Conservan el underscore: siguen siendo internos de slurp, solo que con un
     hogar en vez de prestados desde donde tocara.
+  - **`_is_test` por convenciones de los test runners** (v1.2, #19). Hasta v1.1.1
+    bastaba con que la ruta contuviera `test_`, `tests/` o `spec/`, o que el nombre del
+    nodo empezara por `test_`: `latest_results.py`, `contests/`, `lib/respec/` y un
+    `test_connection()` de producción eran tests. Ahora: un directorio de la ruta es
+    `tests`/`test`/`__tests__`/`spec` (comparado entero y sin mayúsculas, por el `Tests/`
+    de SwiftPM) o un proyecto .NET `*.Tests`/`*.UnitTests`; o el nombre del fichero es
+    uno que un runner recoge (`test_*.py`, `*_test.py`, `conftest.py`, `tests.py` de
+    Django, `*.test|spec.{js,ts,…}`, `*_test.go`, `*Test(s|Case).{java,kt,scala,cs,php,
+    swift}`, `Test*.java`, `*Spec|Suite.scala`, `*_spec.{rb,lua}`, `*_test.{rb,exs}`,
+    `*_test|_unittest.{c,cc,cpp}`, `*.Tests.ps1`); o, en Rust, el nodo cuelga de un
+    módulo `tests` (`#[cfg(test)] mod tests` vive dentro del fichero fuente). Lee
+    `source_file` o `file_path` (antes solo el primero); sin fichero nunca es test.
+    `testdata/` de Go no es test. Efecto medido: PrismaStats 14 → 13 nodos test
+    (sale el módulo `scripts/test-hardware-upload.ts`, marcado por el nombre), slurp
+    3.130 → 3.130; `slurp eval --retrieval` idéntico (la selección no lo usaba).
   - Los módulos origen los reimportan, así que `from slurp.scorer import
     _tokenize` y `from slurp.explainer import _split_callers` siguen
     funcionando — los tests no hizo falta tocarlos.

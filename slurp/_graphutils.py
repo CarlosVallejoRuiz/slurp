@@ -35,7 +35,31 @@ def _risk_band(dependents: int) -> str:
     return "LOW"
 
 
-_TEST_MARKERS = ("tests/", "test_", "_test.", ".test.", ".spec.", "spec/")
+# DECISION: test code is recognised by the conventions test runners collect by,
+# never by a substring of the path. Until v1.1.1 any path containing "test_",
+# "tests/" or "spec/" was a test, so latest_results.py, contests/ and lib/respec/
+# were, while a test_connection() in production code was too, by its name alone.
+# Directories that hold tests, compared whole and case-blind (SwiftPM's Tests/).
+_TEST_DIRS = frozenset({"test", "tests", "__tests__", "spec"})
+# .NET test projects: MyApp.Tests/, MyApp.UnitTests/, MyApp.IntegrationTests/.
+_DOTNET_TEST_DIR = re.compile(r"\.(unit|integration|functional)?tests?$", re.IGNORECASE)
+# File names test runners collect, matched against the base name.
+_TEST_FILE = re.compile(r"""
+    ^test_.+\.(py|c|cc|cpp|cxx)$                       # pytest; plain C/C++
+  | ^.+_test\.(py|go|rb|exs|c|cc|cpp|cxx)$           # pytest, go test, Minitest,
+                                                     # ExUnit, GoogleTest
+  | ^.+_unittest\.(c|cc|cpp|cxx)$                    # Chromium-style C++
+  | ^(conftest|tests)\.py$                           # pytest fixtures; Django
+  | ^.+\.(test|spec)\.(js|jsx|ts|tsx|mjs|cjs|mts|cts)$  # Jest, Vitest, Mocha, Jasmine
+  | ^.+_spec\.(rb|lua)$                              # RSpec, busted
+  | ^.+(Test|Tests|TestCase)\.(java|kt|kts|scala|cs|php|swift)$  # JUnit/Surefire,
+                                                     # xUnit, NUnit, PHPUnit, XCTest
+  | ^Test[A-Z][^.]*\.java$                           # Surefire's Test*.java
+  | ^.+(Spec|Suite)\.scala$                          # ScalaTest, specs2
+  | ^.+\.Tests\.ps1$                                 # Pester
+""", re.VERBOSE)
+# Rust keeps unit tests inside the source file, in `#[cfg(test)] mod tests`.
+_RUST_TEST_MODULES = frozenset({"test", "tests"})
 
 # Display name of every language `slurp index` reads, by file extension.
 _LANGUAGE_BY_EXT: dict[str, str] = {
@@ -124,10 +148,25 @@ def _callees(G: nx.DiGraph, node_id: str) -> list[str]:
 
 
 def _is_test(G: nx.DiGraph, node_id: str) -> bool:
-    """Whether a node lives in test code, judged by its file path."""
-    source = str(G.nodes.get(node_id, {}).get("source_file", "")).replace("\\", "/")
-    label = node_id.rsplit(".", 1)[-1]
-    return any(m in source for m in _TEST_MARKERS) or label.startswith("test_")
+    """Whether a node is test code, by its language's test conventions.
+
+    A node is test code when a directory of its file is a test directory
+    (tests/, test/, __tests__/, spec/, a .NET *.Tests project), when its file
+    is named the way a test runner collects it (test_*.py, *_test.go,
+    *.spec.ts, *Test.java, ...), or, in Rust, when it sits inside a `tests`
+    module. A node without a file is never test code.
+    """
+    attrs = G.nodes.get(node_id, {})
+    source = str(attrs.get("source_file") or attrs.get("file_path") or "").replace("\\", "/")
+    if not source:
+        return False
+    *dirs, name = source.split("/")
+    if any(d.lower() in _TEST_DIRS or _DOTNET_TEST_DIR.search(d) for d in dirs):
+        return True
+    if _TEST_FILE.match(name):
+        return True
+    return name.endswith(".rs") and any(
+        part in _RUST_TEST_MODULES for part in str(node_id).split("."))
 
 
 def _split_callers(G: nx.DiGraph, node_id: str) -> tuple[list[str], list[str]]:

@@ -660,7 +660,10 @@ The role is read off the graph: more than ten callers make a **central utility**
 callers with few dependencies a **shared utility**, callers and callees both high an
 **orchestrator**, none of either **isolated**. Callers that live in test files are counted
 separately, so a helper exercised by sixty tests and two modules is not reported as having
-sixty-two dependants.
+sixty-two dependants. A test file is one a test runner would collect: anything under a
+`tests/`, `test/`, `__tests__/` or `spec/` directory (or a .NET `*.Tests` project), a file
+named like `test_*.py`, `*_test.go`, `*.spec.ts` or `*Test.java`, and Rust's
+`mod tests`; `latest_results.py` is not one.
 
 
 | Flag | Default | Description |
