@@ -1151,7 +1151,9 @@ relaciones extraídas por LLM que slurp no puede regenerar. `_is_foreign_graph()
 lo reconoce por la forma de primer nivel: slurp escribe exactamente
 `{nodes, links, built_at_commit}`; graphify añade `directed`/`multigraph`/`graph`/
 `hyperedges` (node-link de networkx). **`built_at_commit` no sirve para distinguirlos:
-graphify también lo escribe.** Un fichero que no parsea cuenta como ajeno. Sin
+graphify también lo escribe.** `_SLURP_GRAPH_KEYS` acepta además `slurp` (v1.2.1, #86): es el
+manifiesto que escribirá la v1.3 (`docs/design/mcp-autonomo.md` §2.1); la v1.2.1 no lo
+escribe, pero reindexa ese grafo como propio en vez de preguntar. Un fichero que no parsea cuenta como ajeno. Sin
 `--force` se pregunta con default *no* (sin TTY lee EOF y aborta); `--smart` sobre un
 grafo ajeno hace un índice completo en vez de fusionar; `slurp init` pregunta lo mismo
 si el usuario rechaza reutilizarlo. Un grafo genérico `{nodes, links}` no se distingue

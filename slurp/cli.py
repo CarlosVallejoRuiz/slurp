@@ -72,10 +72,14 @@ def _find_graph() -> Path | None:
     return None
 
 
-# Exactly the top-level keys `slurp index` writes. graphify's graph.json is
-# networkx node-link data and adds directed/multigraph/graph/hyperedges — it
-# writes built_at_commit as well, so that key alone cannot tell them apart.
-_SLURP_GRAPH_KEYS = frozenset({"nodes", "links", "built_at_commit"})
+# The top-level keys slurp writes. graphify's graph.json is networkx node-link
+# data and adds directed/multigraph/graph/hyperedges — it writes
+# built_at_commit as well, so that key alone cannot tell them apart.
+# DECISION: "slurp" is the manifest v1.3 adds to every graph it writes
+# (docs/design/mcp-autonomo.md §2.1). This version does not write it, but
+# recognises it, so it re-indexes a v1.3 graph as its own instead of asking
+# before replacing it; v1.3 then rebuilds the manifest it lost.
+_SLURP_GRAPH_KEYS = frozenset({"nodes", "links", "built_at_commit", "slurp"})
 
 
 def _is_foreign_graph(path: Path) -> bool:

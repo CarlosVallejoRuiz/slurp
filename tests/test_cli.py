@@ -9,7 +9,7 @@ import pytest
 from click.testing import CliRunner
 
 from slurp import __version__
-from slurp.cli import cli
+from slurp.cli import _is_foreign_graph, cli
 from slurp.viz import _resolve_node_type, build_html
 
 # ---------------------------------------------------------------------------
@@ -2168,6 +2168,29 @@ class TestIndexKeepsForeignGraphs:
         second = _runner().invoke(cli, args)  # no input given: must not prompt
         assert second.exit_code == 0, second.output
         assert "Overwrite" not in second.output
+
+    def test_graph_with_a_v13_manifest_is_slurps_own(self, tmp_path):
+        # v1.3 writes a top-level "slurp" manifest next to nodes/links/built_at_commit
+        # (docs/design/mcp-autonomo.md §2.1). v1.2.1 must recognise that graph as its
+        # own and re-index it without asking, not take it for graphify's.
+        (tmp_path / "a.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+        out = tmp_path / "graphify-out" / "graph.json"
+        out.parent.mkdir()
+        out.write_text(json.dumps({
+            "nodes": [], "links": [], "built_at_commit": None,
+            "slurp": {"format": 1, "slurp_version": "1.3.0", "root": "..",
+                      "files": {"a.py": [0, 0, 0, ""]}},
+        }), encoding="utf-8")
+        assert not _is_foreign_graph(out)
+        result = _runner().invoke(cli, ["index", str(tmp_path), "--ignore-file", "/dev/null"])
+        assert result.exit_code == 0, result.output
+        assert "not written by slurp" not in result.output
+
+    def test_manifest_key_does_not_make_graphifys_graph_slurps(self, tmp_path):
+        out = self._project(tmp_path)
+        out.write_text(json.dumps({**_GRAPHIFY_GRAPH, "slurp": {"format": 1}}),
+                       encoding="utf-8")
+        assert _is_foreign_graph(out)
 
     def test_unreadable_file_is_treated_as_foreign(self, tmp_path):
         out = self._project(tmp_path)
