@@ -69,23 +69,48 @@ Even the worst case — `"database pool"` at budget 8k — injects 85% fewer tok
 
 ## Performance
 
-Measured on the same PrismaStats graph (2,111 nodes, 3,421 edges), 10 hot queries
-through the real MCP handler with `time.perf_counter`:
+Latency of one `slurp_query` call through the MCP server's real handler (`mcp._handle`,
+the function `slurp serve` runs for each request), timed with `time.perf_counter`, at
+`budget: 4000`. Measured for v1.1.0 on an Apple M4, Python 3.12; three runs of each, the
+range shown.
 
-| Optimization | Before | After | Improvement |
+**Original method** (v0.7.0): the PrismaStats graphify graph (2,111 nodes, 3,421 edges),
+ten queries — `auth flow`, `prisma schema`, `database pool`, `player stats`,
+`admin permissions`, `match events`, `dashboard data`, `chat context`,
+`league standings`, `login logout` — run once to warm the caches, then timed; the
+figure is the mean of the ten. v0.7.0 recorded no script or query list, so the queries
+are new; run the same way, the two releases around that change land close to the
+figures published then.
+
+| Version | Mean of 10 hot queries | Published then |
+|---|---|---|
+| v0.6.5 (before the caches and the heap) | 73–86 ms | 86.41 ms |
+| v0.7.0 | 9.9–10.1 ms | 10.69 ms |
+| **v1.1.0** | **11.4–11.6 ms** | — |
+
+**Current method** (v1.1.0): caches cleared, then five queries three times (15 calls).
+*Cold* is the first call, which computes PageRank and costs every node it looks at;
+*warm* is the median and the maximum of the other fourteen.
+
+| Graph | Cold | Warm median | Warm max |
 |---|---|---|---|
-| PageRank cache | 8.32 ms | 0.002 ms | **4000×** |
-| Token count cache | ~50 ms | 0.174 ms | **280×** |
-| Greedy heap (O(n log n)) | 63.78 ms | 10.69 ms | **6×** |
-| End-to-end latency | 86.41 ms | 10.69 ms | **8.1×** |
-| Graph staleness | silent | auto-reload | ✅ |
+| PrismaStats, graphify (2,111 nodes) | 65–71 ms | 11.2–11.7 ms | 21.8–22.7 ms |
+| PrismaStats, `slurp index` (1,796 nodes) | 80–83 ms | 10.4–10.7 ms | 14.2–14.5 ms |
+| slurp itself, `slurp index` (4,165 nodes) | 134–138 ms | 22.0–22.7 ms | 25.6–27.3 ms |
+
+v1.1.0 is about 1.5 ms slower per hot query than v0.7.0 by the original method, and
+does more for it: the budget costs relationships as well as nodes, and the text it
+returns is rendered and counted before it is sent. The per-component timings v0.7.0
+listed (PageRank, token counting, greedy selection) are not repeated: they were not
+re-measured, and the greedy one gave the same 10.69 ms as the whole query.
 
 **PageRank cache** — PageRank depends only on the graph, never on the query, so
 it is computed once per graph object instead of once per query.
 
-**Token count cache** — per-node token costs are memoised across queries, keyed
-by `(node_id, encoding)`. The graph's text does not change between queries, so
-neither does its token cost.
+**Token count cache** — the token cost of every node and relationship, as the
+formatter writes it, is memoised across queries, keyed by item, format and encoding.
+An item's text does not depend on the query (scores are costed at their widest), so
+neither does its cost.
 
 **Greedy heap** — the subgraph selector used to scan every remaining candidate on
 each iteration, which is `O(n²)`. It now uses a lazy max-heap: scores still mutate
