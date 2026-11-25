@@ -566,7 +566,12 @@ clon limpio del tag**, nunca desde el árbol de trabajo, y se sube con `uv publi
 dos ficheros. Los ficheros de la 1.0.7 en `dist/` no se tocan.
 
 **El sdist es una lista blanca** (v1.1.1): `only-include = ["slurp", "README.md",
-"USAGE.md"]`; hatchling añade `pyproject.toml`, `PKG-INFO` y `.gitignore`. Con la lista de
+"USAGE.md", "LICENSE"]`; hatchling añade `pyproject.toml`, `PKG-INFO` y `.gitignore`.
+**Licencia** (#68): `LICENSE` (MIT, © 2026 Juan Carlos Vallejo Ruiz), declarada con PEP 639
+— `license = "MIT"`, `license-files = ["LICENSE"]` — y sin el classifier `License ::`, que
+PEP 639 da por sustituido (subir los dos a la vez puede ser rechazado). El wheel la lleva
+en `.dist-info/licenses/LICENSE`; `test_a_real_build_ships_the_license_in_both_files…`
+construye de verdad con `uv build` y falla si falta en cualquiera de los dos. Con la lista de
 exclusión anterior, los sdists de 1.0.7 y 1.1.0 publicados en PyPI llevan
 `Roadmap slurp.xlsx` (sin seguir en el árbol donde se construyeron), `CLAUDE.md`,
 `.github/` y `.python-version`. Lo vigilan `tests/test_packaging.py` y un paso del job

@@ -5,7 +5,11 @@ untracked spreadsheet, and hatchling put it in the tarball: anything not
 ignored by git went in. The sdist is now a whitelist.
 """
 
+import shutil
+import subprocess
+import tarfile
 import tomllib
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -19,9 +23,43 @@ def _sdist_config() -> dict:
     return data["tool"]["hatch"]["build"]["targets"]["sdist"]
 
 
-def test_the_sdist_is_a_whitelist_of_the_package_and_its_docs():
+def _project() -> dict:
+    return tomllib.loads((_REPO / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+
+
+def test_the_sdist_is_a_whitelist_of_the_package_its_docs_and_license():
     # hatchling always adds pyproject.toml, PKG-INFO and .gitignore.
-    assert _sdist_config()["only-include"] == ["slurp", "README.md", "USAGE.md"]
+    assert _sdist_config()["only-include"] == ["slurp", "README.md", "USAGE.md", "LICENSE"]
+
+
+def test_license_is_the_mit_text_and_declared_as_the_license_file():
+    text = (_REPO / "LICENSE").read_text(encoding="utf-8")
+    assert text.startswith("MIT License\n")
+    assert "Copyright (c) 2026 Juan Carlos Vallejo Ruiz" in text
+    assert "THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND" in text
+    assert _project()["license"] == "MIT"
+    assert _project()["license-files"] == ["LICENSE"]
+    # PEP 639: an SPDX expression supersedes the license classifiers, and
+    # uploads that carry both can be refused.
+    assert not [c for c in _project()["classifiers"] if c.startswith("License ::")]
+
+
+@pytest.mark.skipif(shutil.which("uv") is None, reason="uv not installed")
+def test_a_real_build_ships_the_license_in_both_files_and_nothing_private(tmp_path):
+    # Builds exactly as a release does: the sdist, then the wheel from it.
+    res = subprocess.run(["uv", "build", "--out-dir", str(tmp_path), str(_REPO)],
+                         capture_output=True, text=True, check=False)
+    assert res.returncode == 0, res.stderr
+    version = _project()["version"]
+    with tarfile.open(tmp_path / f"slurp_graph-{version}.tar.gz") as sdist:
+        names = {n.removeprefix(f"slurp_graph-{version}/") for n in sdist.getnames()}
+    assert "LICENSE" in names
+    assert not {n for n in names if n.endswith(".xlsx") or n == "CLAUDE.md"
+                or n.startswith(".github")}
+    with zipfile.ZipFile(tmp_path / f"slurp_graph-{version}-py3-none-any.whl") as wheel:
+        assert f"slurp_graph-{version}.dist-info/licenses/LICENSE" in wheel.namelist()
+        metadata = wheel.read(f"slurp_graph-{version}.dist-info/METADATA").decode()
+    assert "License-Expression: MIT" in metadata and "License-File: LICENSE" in metadata
 
 
 def test_the_wheel_ships_the_package_alone():
@@ -33,3 +71,4 @@ def test_the_wheel_ships_the_package_alone():
 def test_the_release_build_refuses_an_sdist_with_anything_else():
     text = _WORKFLOW.read_text(encoding="utf-8")
     assert "tar -tzf" in text and "unexpected file in the sdist" in text
+    assert "|LICENSE|" in text  # the guard lets the license through

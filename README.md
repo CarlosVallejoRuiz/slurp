@@ -1650,4 +1650,4 @@ Also visible:
 
 ## License
 
-MIT © [Juan Carlos Vallejo Ruiz](https://github.com/CarlosVallejoRuiz)
+[MIT](LICENSE) © [Juan Carlos Vallejo Ruiz](https://github.com/CarlosVallejoRuiz)

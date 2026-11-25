@@ -91,12 +91,12 @@ jobs:
           test -f "dist/slurp_graph-${v}-py3-none-any.whl"
           test "$(ls dist/ | wc -l)" -eq 2
 
-      - name: The sdist holds the package and its docs, nothing else
+      - name: The sdist holds the package, its docs and license, nothing else
         run: |
           v="${TAG#v}"
           tar -tzf "dist/slurp_graph-${v}.tar.gz" | while read -r f; do
             case "${f#slurp_graph-${v}/}" in
-              slurp/*|README.md|USAGE.md|pyproject.toml|PKG-INFO|.gitignore|"") ;;
+              slurp/*|README.md|USAGE.md|LICENSE|pyproject.toml|PKG-INFO|.gitignore|"") ;;
               *) echo "::error::unexpected file in the sdist: $f"; exit 1 ;;
             esac
           done
