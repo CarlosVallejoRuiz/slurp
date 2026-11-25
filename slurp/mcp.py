@@ -103,8 +103,15 @@ _TOOL_DEFINITION = {
         "within a token budget. Returns structured markdown with selected "
         "nodes, their relationships, and token usage statistics."
     ),
-    # DECISION: annotations let clients auto-approve the call — slurp_query
-    # only reads a graph loaded at startup, so it is read-only and idempotent.
+    # DECISION: slurp_query only reads a graph loaded at startup, so it is
+    # read-only and idempotent, and says so. The hints approve nothing in Claude
+    # Code: there readOnlyHint lets a call run in parallel with other read-only
+    # tools, and readOnlyHint/idempotentHint let it be retried after a
+    # reconnection; approval takes a permission rule or "don't ask again".
+    # Codex does count readOnlyHint for approval: with
+    # default_tools_approval_mode = "writes" it only asks about tools not marked
+    # read-only. The MCP spec calls annotations untrusted hints, so no client
+    # has to act on them.
     "annotations": {
         "title": "Slurp graph query",
         "readOnlyHint": True,

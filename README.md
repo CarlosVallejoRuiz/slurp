@@ -1676,8 +1676,11 @@ another; see [Choosing a budget](#choosing-a-budget).
 | `slurp_suggest(query, budget=4000, include_tests=false, include_imports=false)` | *What else should I look at?* | an answer felt incomplete and it wants the queries that would reach what the budget left out |
 | `slurp_impact(file_path, hops=2)` | *What breaks if I edit this file?* | it is about to edit a file and wants the blast radius first — no second snapshot required |
 
-All five are declared `readOnlyHint` and `idempotentHint`, so clients can auto-approve
-them. `slurp_explain` reads the same graph `slurp_query` serves, reload check included, so
+All five are declared `readOnlyHint` and `idempotentHint`. Claude Code uses those hints to
+run the calls in parallel and to retry them after a reconnection, not to approve them: it
+asks before each call unless you answered "don't ask again" for that tool or allow
+`mcp__slurp__*` in your permission settings. Codex does count them: with `default_tools_approval_mode = "writes"`
+it does not ask about read-only tools. `slurp_explain` reads the same graph `slurp_query` serves, reload check included, so
 the two never answer from different snapshots in one session.
 
 A failure inside a tool comes back as `isError: true` with a readable message; it never

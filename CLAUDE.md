@@ -375,8 +375,14 @@ uv sync --extra rust            # solo una
     real es mucho menor de lo que sugería su protagonismo en la documentación.
 
 - **El servidor MCP expone cinco herramientas** (`slurp_query`, `slurp_explain`,
-  `slurp_diff`, `slurp_suggest`, `slurp_impact`), todas `readOnlyHint` + `idempotentHint` para que el cliente
-  pueda auto-aprobarlas.
+  `slurp_diff`, `slurp_suggest`, `slurp_impact`), todas `readOnlyHint` + `idempotentHint`.
+  **Las anotaciones no auto-aprueban en Claude Code** (corregido en v1.2.1, #85; hasta
+  v1.2.0 el `# DECISION` y el README decían lo contrario): allí `readOnlyHint` solo sirve
+  para ejecutar la llamada en paralelo con otras read-only, y `readOnlyHint`/`idempotentHint`
+  para reintentarla tras una reconexión; la aprobación la quita una regla de permiso o "don't
+  ask again". **En Codex sí cuentan para la aprobación**: con
+  `default_tools_approval_mode = "writes"` solo pregunta por las herramientas no marcadas
+  read-only. Ver `docs/design/mcp-autonomo.md` §5.1.
   - `slurp_explain` usa **el mismo grafo que `slurp_query`**, con la
     comprobación de recarga incluida: las dos no pueden responder desde
     snapshots distintos en la misma sesión.
