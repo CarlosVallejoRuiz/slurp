@@ -451,6 +451,17 @@ uv sync --extra rust            # solo una
   - `TestSmartEquivalence` compara `--smart` con un índice completo en 13
     escenarios × con/sin commit, y exige qué camino toma cada uno. Un cambio en
     smart que no lo supere rompe la invariante.
+  - **Un fichero sin nodos en el grafo solo es "añadido" si un índice completo le daría
+    alguno** (v1.2.1, #83). Hasta v1.2.0 se comparaban los ficheros del disco con los
+    `source_file` del grafo: un fichero excluido entero por `file:` en `.slurpignore` (o uno
+    que no parsea) contaba como añadido en cada ejecución y `--smart` hacía siempre un
+    índice completo. `_files_with_nodes()` lo decide sin manifiesto: una regla `file:` lo
+    resuelve sin parsear (`SlurpIgnore.excludes_file`); el resto de ficheros ausentes se
+    parsea y cuenta si le queda algún nodo tras las reglas. Un fichero así tampoco cuenta
+    como cambiado aunque se edite. Queda un caso: un fichero cuyos nodos pierden todos el
+    dedup por id contra otro anterior (`util.ts` y `util.js` con los mismos símbolos) sigue
+    contando como añadido. Lo cierra el manifiesto de la v1.3, que registra los ficheros
+    descubiertos (`docs/design/mcp-autonomo.md` §2.1). `TestFilesWithoutNodes` lo fija.
   - Limitación: si cambia `.slurpignore` entre dos ejecuciones, `--smart` no lo
     detecta; hay que reindexar completo.
 

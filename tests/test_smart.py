@@ -8,6 +8,7 @@ import pytest
 from click.testing import CliRunner
 
 from slurp.cli import cli
+from slurp.ignore import load_ignore
 from slurp.indexer import index_project
 from slurp.smart import (
     get_changed_files,
@@ -593,3 +594,113 @@ class TestChangedFilesSkipBuildOutput:
         (project / "out" / "handler.py").write_text("def h():\n    return 1\n",
                                                    encoding="utf-8")
         assert (project / "out" / "handler.py").resolve() in get_changed_files(project)
+
+
+# ---------------------------------------------------------------------------
+# #83 — a file the graph holds no node for is not "added" when a full index
+# would not give it any either
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def ignored_project(tmp_path: Path) -> Path:
+    """A committed repo with a.py and b.py, and a .slurpignore with `file:b.py`."""
+    root = tmp_path / "ign"
+    _write(root, "a.py", "def keep():\n    return 1\n")
+    _write(root, "b.py", "def dropped():\n    return 2\n")
+    _write(root, ".slurpignore", "file:b.py\n")
+    _init_repo(root)
+    _commit_all(root, "init")
+    return root
+
+
+def _index_with_ignore(root: Path, out: Path, *extra: str):
+    res = CliRunner().invoke(cli, ["index", str(root), "-o", str(out), "--ignore-file",
+                                   str(root / ".slurpignore"), *extra])
+    assert res.exit_code == 0, res.output
+    return res
+
+
+@requires_git
+class TestFilesWithoutNodes:
+    def test_two_smart_runs_without_changes_do_not_reindex(self, ignored_project, tmp_path):
+        # Reproduces #83: both runs printed "1 added and 0 removed or renamed
+        # files … Full index needed", because b.py is on disk and none of the
+        # graph's nodes come from it.
+        graph = tmp_path / "graph.json"
+        _index_with_ignore(ignored_project, graph)
+        assert "b.py" not in _files_in(graph)
+        before = graph.read_bytes()
+        for _ in range(2):
+            res = _index_with_ignore(ignored_project, graph, "--smart")
+            assert "Full index needed" not in res.output, res.output
+            assert "index is up to date" in res.output, res.output
+        assert graph.read_bytes() == before
+
+    def test_smart_reindex_sees_no_change(self, ignored_project, tmp_path):
+        graph = tmp_path / "graph.json"
+        _index_with_ignore(ignored_project, graph)
+        result = smart_reindex(ignored_project, graph,
+                               load_ignore(ignored_project / ".slurpignore"))
+        assert not result.needs_full_index, result.fallback_reason
+        assert result.changed_files == []
+
+    def test_editing_the_ignored_file_changes_nothing(self, ignored_project, tmp_path):
+        graph = tmp_path / "graph.json"
+        _index_with_ignore(ignored_project, graph)
+        before = graph.read_bytes()
+        _write(ignored_project, "b.py", "def dropped():\n    return 3\n\n\ndef more():\n    pass\n")
+        res = _index_with_ignore(ignored_project, graph, "--smart")
+        assert "index is up to date" in res.output, res.output
+        assert graph.read_bytes() == before
+
+    def test_new_ignored_file_matches_a_full_index(self, ignored_project, tmp_path):
+        graph = tmp_path / "graph.json"
+        _index_with_ignore(ignored_project, graph)
+        _write(ignored_project, ".slurpignore", "file:b.py\nfile:gen_*.py\n")
+        _commit_all(ignored_project, "ignore generated files")
+        _index_with_ignore(ignored_project, graph)
+        _write(ignored_project, "gen_models.py", "def generated():\n    return 4\n")
+        res = _index_with_ignore(ignored_project, graph, "--smart")
+        assert "Full index needed" not in res.output, res.output
+        full = tmp_path / "full.json"
+        _index_with_ignore(ignored_project, full)
+        assert _public(_load(graph)) == _public(_load(full))
+
+    def test_file_excluded_by_type_and_id_rules_is_not_added(self, ignored_project, tmp_path):
+        # No `file:` rule names it, but every node it would have is excluded.
+        _write(ignored_project, ".slurpignore", "file:b.py\nid:c*\n")
+        _write(ignored_project, "c.py", "def cee():\n    return 5\n")
+        _commit_all(ignored_project, "c")
+        graph = tmp_path / "graph.json"
+        _index_with_ignore(ignored_project, graph)
+        assert "c.py" not in _files_in(graph)
+        res = _index_with_ignore(ignored_project, graph, "--smart")
+        assert "index is up to date" in res.output, res.output
+
+    def test_file_that_yields_no_nodes_is_not_added(self, ignored_project, tmp_path):
+        # A module that does not parse has no nodes in a full index either.
+        _write(ignored_project, "broken.py", "def broken(:\n")
+        _commit_all(ignored_project, "no nodes")
+        graph = tmp_path / "graph.json"
+        _index_with_ignore(ignored_project, graph)
+        assert "broken.py" not in _files_in(graph)
+        res = _index_with_ignore(ignored_project, graph, "--smart")
+        assert "index is up to date" in res.output, res.output
+
+    def test_new_file_with_nodes_still_runs_a_full_index(self, ignored_project, tmp_path):
+        graph = tmp_path / "graph.json"
+        _index_with_ignore(ignored_project, graph)
+        _write(ignored_project, "c.py", "def cee():\n    return 5\n")
+        res = _index_with_ignore(ignored_project, graph, "--smart")
+        assert "1 added and 0 removed" in res.output, res.output
+        assert "c.py" in _files_in(graph)
+
+    def test_unignoring_a_file_is_still_a_limitation(self, ignored_project, tmp_path):
+        # Documented: --smart does not watch .slurpignore. Dropping the rule
+        # leaves b.py on disk with nodes to give, which now counts as added.
+        graph = tmp_path / "graph.json"
+        _index_with_ignore(ignored_project, graph)
+        _write(ignored_project, ".slurpignore", "")
+        res = _index_with_ignore(ignored_project, graph, "--smart")
+        assert "Full index needed" in res.output, res.output
+        assert "b.py" in _files_in(graph)

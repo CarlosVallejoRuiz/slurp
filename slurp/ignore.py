@@ -28,17 +28,24 @@ class SlurpIgnore:
                 return True
 
         file_path = node_attrs.get("file_path") or node_attrs.get("source_file") or ""
-        if file_path:
-            fname = Path(file_path).name
-            for pattern in self.file_rules:
-                if fnmatch.fnmatch(file_path, pattern) or fnmatch.fnmatch(fname, pattern):
-                    return True
+        if file_path and self.excludes_file(file_path):
+            return True
 
         for pattern in self.id_rules:
             if fnmatch.fnmatch(node_id, pattern):
                 return True
 
         return False
+
+    def excludes_file(self, file_path: str) -> bool:
+        """Returns True if a `file:` rule matches *file_path*, so every node from it goes.
+
+        Args:
+            file_path: The file's path as nodes record it (`source_file`).
+        """
+        fname = Path(file_path).name
+        return any(fnmatch.fnmatch(file_path, pattern) or fnmatch.fnmatch(fname, pattern)
+                   for pattern in self.file_rules)
 
 
 def load_ignore(path: Path) -> SlurpIgnore:

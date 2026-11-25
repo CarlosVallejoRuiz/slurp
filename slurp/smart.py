@@ -205,6 +205,41 @@ def _reindex_files(
     return nodes, edges, (perf_counter() - start) * 1000
 
 
+def _files_with_nodes(
+    keys: list[str],
+    on_disk: dict[str, Path],
+    root: Path,
+    ignore: SlurpIgnore | None,
+) -> list[str]:
+    """The files among *keys* that a full index would give at least one node.
+
+    DECISION (#83): a file on disk that no node of the graph comes from is new
+    only if it would have nodes. One that a `.slurpignore` rule excludes whole,
+    that is empty or that does not parse has none in a full index either, and
+    counting it as added made every --smart run a full index. The graph does
+    not record the files its build saw (the v1.3 manifest will), so this asks
+    the parser again: a `file:` rule settles it without parsing; any other file
+    is parsed, which costs only the files the graph holds no node for.
+
+    Args:
+        keys: Root-relative paths of files on disk with no node in the graph.
+        on_disk: Every indexable file, by root-relative path.
+        root: Project root.
+        ignore: The rules the graph was built with, if any.
+
+    Returns:
+        The keys, in order, of the files with at least one node to give.
+    """
+    found: list[str] = []
+    for key in keys:
+        if ignore is not None and ignore.excludes_file(key):
+            continue
+        nodes, _, _ = _reindex_files([on_disk[key]], root)
+        if any(ignore is None or not ignore.should_ignore(n, n["id"]) for n in nodes):
+            found.append(key)
+    return found
+
+
 def _symbols(nodes: list[dict]) -> list[str]:
     """Every node, minus positional and private attributes, comparably.
 
@@ -285,9 +320,13 @@ def smart_reindex(
     changed = {_rel_key(p) for p in get_changed_files(root, base)}
     changed |= {key for key, path in on_disk.items()
                 if os.stat(path).st_mtime_ns >= graph_mtime}
-    added = sorted(set(on_disk) - in_graph)
+    absent = sorted(set(on_disk) - in_graph)
+    added = _files_with_nodes(absent, on_disk, root, ignore)
     deleted = sorted(in_graph - set(on_disk))
     changed |= set(added) | set(deleted)
+    # A file with no node in the graph and none to give leaves the graph as it
+    # is, however often it is edited.
+    changed -= set(absent) - set(added)
     changed &= set(on_disk) | in_graph
     changed_paths = sorted(root / key for key in changed)
 
