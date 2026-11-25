@@ -107,10 +107,10 @@ _STRUCTURAL_WEIGHT = 0.5
 
 # DECISION: a selected node passes its boost (score x neighbor_decay) to at most
 # its 10 candidate neighbours with the highest own score; the others keep their
-# own. Measured in v1.2 (#64/#65): on PrismaStats createAdminClient (0.839, 98
+# own. Measured in v1.2 (#64/#65): on PrismaStats createAdminClient (0.839, 97
 # callers) lent 0.587 to every caller, above useChatContext (0.510), the node a
 # question asked for, and the callers filled the budget before it; with more
-# budget the 98 hub-to-caller relations, worth the same 0.587, took the room
+# budget the 97 hub-to-caller relations, worth the same 0.587, took the room
 # meant for new nodes (4000 -> 8000 tokens added 14 nodes and 148 relations).
 # The cap removes that cause. 3, 5, 10 and 20 were tried on the tuning group
 # (scripts/retrieval.py): below 10 it cut a boost slurp's own graph needs (a

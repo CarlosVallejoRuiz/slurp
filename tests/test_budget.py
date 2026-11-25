@@ -810,7 +810,7 @@ class TestTestsAndImportsLeftOut:
 def _hub_and_relevant(spokes: int = 30) -> tuple[nx.DiGraph, dict[str, float]]:
     """A hub scored high with many weak spokes, and an unrelated relevant node.
 
-    The shape measured on PrismaStats: createAdminClient (0.839, 98 callers)
+    The shape measured on PrismaStats: createAdminClient (0.839, 97 callers)
     lent 0.587 to every caller, above useChatContext (0.510), and the callers
     filled the budget before it.
     """

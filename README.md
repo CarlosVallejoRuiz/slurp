@@ -4,7 +4,7 @@
 
 # slurp
 
-![tests](https://img.shields.io/badge/tests-2543%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-2694%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 ![pypi](https://img.shields.io/badge/PyPI-slurp--graph-orange)
@@ -47,9 +47,10 @@ slurp prints for each query and budget, and the whole graph printed the same way
 
 **Mean savings: 96.1% · p50: 96.7% · Best case: 98.3% · Worst case: 93.3%**
 
-The output stays under the budget: 1,961–1,967 tokens at 2k, 3,917–3,928 at 4k, 7,842–7,848 at 8k.
-On the same project's `slurp index` graph, `slurp eval --retrieval` finds 86.7% of the
-labelled nodes of its 15 questions at `--budget 4000` and all of them at `--budget 16000`.
+The output stays under the budget: 1,964–1,968 tokens at 2k, 3,926–3,928 at 4k, 7,841–7,847 at 8k
+(re-measured for v1.2; the savings are unchanged).
+On the same project's `slurp index` graph, `slurp eval --retrieval` finds 96.7% of the
+labelled nodes of its 15 questions at `--budget 4000` (86.7% in v1.1.1).
 
 > **Before v1.1.0 these figures were not honest.** The budget counted a short per-node
 > summary and no relationships, so on this graph `--budget 8000` printed 40,368–41,582
@@ -58,28 +59,43 @@ labelled nodes of its 15 questions at `--budget 4000` and all of them at `--budg
 
 ### Choosing a budget
 
-The default, 4000, was checked against the alternatives with `slurp eval --retrieval`
-in v1.1.0, and PrismaStats re-measured in v1.1.1, whose index no longer holds `.next/`:
+The default, 4000, was checked against the alternatives with `slurp eval --retrieval`:
 recall is the share of each question's labelled nodes inside the subgraph, and the
 tokens are the measured text sent (mean per question). PrismaStats is its `slurp index`
 graph (1,582 nodes, 15 built-in questions); slurp is its own graph (4,165 nodes, 16
-questions labelled for this measurement).
+questions labelled for this measurement by the same tool that tuned v1.2 — indicative,
+not an independent ground truth). Measured for v1.2, v1.1.1 in brackets:
 
-| Graph · format | 4000 | 6000 | 8000 | 12000 |
-|---|---|---|---|---|
-| PrismaStats · markdown | **0.867** · 3,920 tok | 0.867 · 5,882 | 0.867 · 7,845 | 1.000 · 11,765 |
-| PrismaStats · JSON | 0.589 · 3,900 | 0.800 · 5,851 | 0.867 · 7,817 | 0.867 · 11,736 |
-| slurp · markdown | **0.688** · 3,924 | 0.688 · 5,883 | 0.688 · 7,845 | 0.688 · 11,764 |
-| slurp · JSON | 0.562 · 3,907 | 0.688 · 5,867 | 0.688 · 7,828 | 0.688 · 11,742 |
+| Graph · format | 4000 | 6000 | 8000 | 12000 | 16000 |
+|---|---|---|---|---|---|
+| PrismaStats · markdown | **0.967** · 3,925 tok (0.867) | 0.967 · 5,885 (0.867) | 0.967 · 7,845 (0.867) | 0.967 · 11,764 (1.000) | 0.967 · 15,686 (1.000) |
+| PrismaStats · JSON | 0.900 · 3,905 (0.589) | 0.967 · 5,866 (0.800) | 0.967 · 7,831 (0.867) | 0.967 · 11,745 (0.867) | 0.967 · 15,661 (0.867) |
+| PrismaStats · YAML | 0.900 · 3,909 (0.800) | 0.967 · 5,862 (0.867) | 0.967 · 7,822 (0.867) | 0.967 · 11,738 (0.867) | 0.967 · 15,652 (0.933) |
+| slurp · markdown | **0.875** · 3,925 (0.688) | 0.875 · 5,885 (0.688) | 0.938 · 7,843 (0.688) | 0.938 · 11,764 (0.688) | 1.000 · 15,685 (0.750) |
+| slurp · JSON | 0.812 · 3,906 (0.562) | 0.875 · 5,874 (0.688) | 0.875 · 7,834 (0.688) | 0.875 · 11,745 (0.688) | 0.938 · 15,667 (0.688) |
+| slurp · YAML | 0.875 · 3,909 (0.625) | 0.875 · 5,866 (0.688) | 0.875 · 7,824 (0.688) | 0.938 · 11,742 (0.688) | 0.938 · 15,658 (0.688) |
 
-In markdown — what `slurp QUERY` prints by default and the only format the MCP server
-sends — recall does not move between 4000 and 8000, so doubling the budget buys nothing
-on these questions. On PrismaStats the room added from 4000 to 6000 goes entirely to
-relationships among the same ~100 nodes; on slurp, the five labelled nodes it misses rank
-168th to 1,238th by score, beyond what even 12000 reaches. JSON spends about twice the
-tokens per node and needs about 6000 on slurp, and 8000 on PrismaStats, to catch up
-(YAML on PrismaStats: 0.800 at 4000, 0.867 from 6000). MRR does not depend on the
-budget: 0.404 and 0.191.
+4000 stays the default: in markdown — what `slurp QUERY` prints by default and the only
+format the MCP server sends — PrismaStats does not move from 4000 to 16000, and slurp
+gains one question at 8000 and another at 16000. JSON and YAML spend more tokens per node
+and catch up at 6000. Two things changed in v1.2: tests and import nodes no longer take
+places (on slurp's own graph three nodes in four are tests), and a node lends its
+neighbour boost to at most ten neighbours, so a hub's callers no longer fill the budget.
+One node is lost on the way: PrismaStats's `dashboard_actions` module (question arch-02),
+which v1.1.1 reached at 12000 only through the hundred callers of `createAdminClient`;
+v1.2 finds the other module of that question from 4000 on.
+
+The v1.2 changes were decided on half of each project's questions, drawn once with a
+fixed seed, and checked on the other half: recall at 4000/8000 in markdown and JSON,
+averaged, went from 0.812 to 1.000 (PrismaStats) and 0.750 to 1.000 (slurp) on the
+tuning half, and from 0.780 to 0.893 and 0.562 to 0.750 on the held-out half.
+`scripts/retrieval.py` reproduces every figure in this section, split included.
+
+MRR does not depend on the budget. Its definition changed in v1.2: a relevant node's rank
+now counts only the nodes slurp can return — tests and imports, left out of selection,
+are left out of the ranking — because that is the order a reader meets them in. By the
+old definition, ranking every node, the scores and the ranks are the same as in v1.1.1;
+see [`slurp eval`](#slurp-eval).
 
 ---
 
@@ -1664,10 +1680,17 @@ What changes if you already use slurp:
 - **Import nodes are never dependants.** `slurp diff` no longer counts the module that
   declared a removed import as a caller, and `slurp impact` no longer counts imports as
   definitions of the file (slurp's `budget.py`: 29 → 19).
-- **`slurp eval --retrieval`'s MRR ranks the nodes slurp can return.** The v1.1.1 figure,
-  which ranked every node, is `mrr_all`. On the 8 tuning questions of slurp's own graph
-  the scores are unchanged, so the whole MRR change there — 0.335 to 0.573 — is the new
-  definition; the recall change — 0.750 to 1.000 at 4000 in markdown — is the selection.
+- **A node lends its neighbour boost to at most ten neighbours,** the most relevant on
+  their own. On PrismaStats `createAdminClient`, with 97 callers, lent its score to all
+  of them, and they filled the budget ahead of the nodes a question asked for.
+- **Recall, measured with `slurp eval --retrieval` at `--budget 4000` in markdown:**
+  PrismaStats 0.867 → 0.967, slurp's own graph 0.688 → 0.875; in JSON 0.589 → 0.900
+  and 0.562 → 0.812. See [Choosing a budget](#choosing-a-budget) for every budget and
+  format, and how the changes were checked on questions they were not tuned on.
+- **`slurp eval --retrieval`'s MRR has a new definition:** a relevant node's rank counts
+  only the nodes slurp can return (tests and imports are left out of selection, so they
+  are left out of the ranking). The scores did not change; the v1.1.1 rank over every
+  node is still reported, as `mrr_all`.
 - `_is_test` follows the conventions of each language's test runner instead of a
   substring of the path: `latest_results.py` is no longer a test, `contests/` and
   `lib/respec/` are not either, and a production `test_connection()` is production.

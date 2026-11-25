@@ -568,9 +568,9 @@ uv sync --extra rust            # solo una
 
 - **El boost de vecino llega como mucho a 10 vecinos** (v1.2, #64/#65, `budget._BOOST_FANOUT`):
   los candidatos con más score propio, desempate por id; los tests e imports no ocupan
-  plaza (no son candidatos). Causa medida: en PrismaStats `createAdminClient` (0,839, 98
+  plaza (no son candidatos). Causa medida: en PrismaStats `createAdminClient` (0,839, 97
   llamadores) prestaba 0,587 a todos, por encima de `useChatContext` (0,510, arch-05), y
-  sus 98 relaciones (valor 0,587) se comían lo que añade un presupuesto mayor (4000 → 8000:
+  sus 97 relaciones `calls` (valor 0,587) se comían lo que añade un presupuesto mayor (4000 → 8000:
   +14 nodos, +148 relaciones; con el tope +68/+82). Alternativas medidas en el grupo de
   ajuste (`scratchpad/v12/hubs-table.md`, 27 variantes): normalizar por grado (A/A'), valor
   de relaciones ×ρ o tope de gasto en relaciones (C; ρ ≤ 0,5 deja 0 relaciones),
@@ -604,7 +604,43 @@ por debajo de la carpeta que abre el editor (`~/Desktop/Slurp/`). Todos los coma
 de este documento (`uv run pytest`, `ruff check`, `uv build`, `git`) se ejecutan
 desde `~/Desktop/Slurp/slurp/`, que es donde vive este CLAUDE.md.
 
-**Estado actual:** v1.1.1 · 2543 tests · `ruff check slurp/` limpio.
+**Estado actual:** v1.1.1 publicada; v1.2 en desarrollo en `main` (sin bump ni tag) ·
+2694 tests · `ruff check .` limpio. #21 vive en la rama `v1.2-21-docstrings` (2722 tests),
+fuera de main: ver "Resultados de v1.2".
+
+**Resultados de v1.2 (fase 1: qué nodos se seleccionan).** Medido con
+`scripts/retrieval.py` (`slurp eval --retrieval` en un proceso por fila) sobre fuentes fijas:
+PrismaStats (copia del árbol en 5d345dc, 1.582 nodos) y slurp (`git archive af2ab66`, 4.165
+nodos). **División fija**: ids ordenados, `random.Random(f"12:{proyecto}")`, primera mitad
+(redondeo arriba) = ajuste; `SPLIT` la fija y un test falla si cambia. Las decisiones se
+tomaron con el grupo de ajuste; la validación se abrió una vez, con B implementado y su
+criterio escrito antes. Las 16 preguntas de slurp las etiquetó Claude Code (orientativas).
+Recall medio de md/json × 4000/8000 (ajuste · validación):
+  | Etapa | PrismaStats | slurp | MRR cand. PS/slurp (ajuste) |
+  | v1.1.1 | 0,812 · 0,780 | 0,750 · 0,562 | 0,410 / 0,573 (todos: 0,410 / 0,335) |
+  | #19 | igual | igual | igual |
+  | #20/#59 | 0,812 · 0,780 | 0,969 · 0,719 | igual (el scorer no cambia) |
+  | B (#64/#65) | 1,000 · 0,893 | 1,000 · 0,750 | igual |
+  | #21 (rama) | 0,984 · 0,857 | 1,000 · 0,875 | 0,273 / 0,569 |
+  - Criterio de B (fijado antes de abrir validación): recall medio de las 8 celdas ≥ el de #20
+    y ninguna celda pierde más de una pregunta. Validación: 0,749 → 0,821, ninguna celda
+    baja → B se queda. Referencia (no cambió la elección): A' d0=25 0,782, D decay=0,6 0,777.
+  - #21: regla fijada con el ajuste antes de medir su validación — entra solo si en ajuste
+    mejora recall o MRR sin empeorar el otro en ningún proyecto. No cumple (PS MRR 0,410 →
+    0,273, PS JSON 4000 0,938). En validación mejora slurp (0,750 → 0,875) y empeora PS
+    (0,893 → 0,857); no cambia la decisión.
+  - Con todas las preguntas, md 4000: PS 0,867 → 0,967, slurp 0,688 → 0,875; JSON 4000
+    0,589 → 0,900 y 0,562 → 0,812. Se pierde una cosa: el módulo `dashboard_actions`
+    (arch-02), que v1.1.1 alcanzaba a 12000 solo a través de los 97 llamadores de
+    `createAdminClient`; PS md se queda en 0,967 de 4000 a 16000 (v1.1.1: 1,000 desde 12000).
+  - `slurp benchmark` (README › Benchmark, grafo graphify): ahorro igual (98,3/96,7/93,3 %).
+  - Latencia (mismo equipo, misma sesión, ruidoso: v1.1.1 osciló 12,3–18,0 ms): método
+    original 16,7–17,3 ms frente a 12,3–18,0 de v1.1.1, sin diferencia medible; grafo de
+    slurp, método actual, mediana en caliente 29,5–30,1 frente a 33,7–34,2 ms y frío 159–161
+    frente a 201–203 ms (hay menos candidatos). El README › Performance no se tocó.
+  - Hallazgo: el índice de PrismaStats incluye `.agents/skills/` (scripts de herramientas de
+    agente vendorizados, con docstrings en inglés). Son los que hunden #21 en PS; también
+    están ya en el grafo de v1.1.1. Pendiente decidir si `slurp index` debe saltarlos.
 
 **⚠️ IMPORTANTE — `uv sync --extra X` desinstala los extras no mencionados.**
 Sincroniza al conjunto exacto de extras que le pases, así que añadir uno con
@@ -657,6 +693,7 @@ No va en el paquete; `tests/test_latency_script.py` lo mantiene ejecutable.
 ├── CLAUDE.md                  ← este fichero
 ├── .github/workflows/publish.yml ← publicación en PyPI por OIDC
 ├── scripts/latency.py         ← reproduce las cifras de README › Performance (no va en el paquete)
+├── scripts/retrieval.py       ← recall/MRR por grupo (ajuste/validación), formato y presupuesto
 ├── README.md
 ├── USAGE.md
 ├── pyproject.toml
@@ -845,6 +882,9 @@ relaciones: `--budget 8000` daba 19k–42k tokens reales.
     rango 11 → 9 pero su score baja 0,4916 → 0,4886 al renormalizarse el PageRank, y en
     los ~57–87 nodos que caben en JSON lo desplazan los vecinos de los hubs (×0,7 del
     top). La nota pasa a ~6000–8000. El grafo de slurp no cambia: sus filas tampoco.
+  - **Remedido en v1.2** (tests/imports fuera, boost a 10 vecinos): md PS 0,967 de 4000 a
+    16000, slurp 0,875 → 0,938 (8000) → 1,000 (16000); JSON y YAML alcanzan a markdown en
+    6000. 4000 sigue por defecto. Tabla en README › Choosing a budget.
 - **Factor de tokens** (`token_factor`, `--token-factor`, `$SLURP_TOKEN_FACTOR`, por
   defecto 1,0, rango 0,1–10): multiplica toda medida (piezas, cabecera, texto final),
   redondeando hacia arriba. Medido aquí contra `messages.count_tokens` de Anthropic:
