@@ -27,3 +27,10 @@ def test_ds_store_is_ignored_everywhere():
     # check-ignore exits 0 when the path is ignored, in any subdirectory.
     assert _git("check-ignore", "-q", ".DS_Store").returncode == 0
     assert _git("check-ignore", "-q", "slurp/.DS_Store").returncode == 0
+
+
+def test_versioned_build_directories_are_ignored():
+    # Releases are built into dist-X.Y.Z/; a path that does not exist yet has no
+    # .gitignore of uv's own beside it, so only the repository's rules apply.
+    assert _git("check-ignore", "-q", "dist-9.9.9/slurp_graph-9.9.9.tar.gz").returncode == 0
+    assert _git("check-ignore", "-q", "dist-9.9.9/").returncode == 0

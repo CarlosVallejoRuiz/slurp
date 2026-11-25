@@ -3,6 +3,8 @@ __pycache__/
 *.py[oc]
 build/
 dist/
+# Release builds: uv build --out-dir dist-X.Y.Z/
+dist-*/
 wheels/
 *.egg-info
 
