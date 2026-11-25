@@ -721,6 +721,13 @@ relaciones: `--budget 8000` daba 19k–42k tokens reales.
   `set` cuando la selección es pequeña y el orden de las relaciones cambiaba entre
   procesos (aleatorización de hashes).
 - Coste medido: +3–7 ms de mediana por query en caliente (PrismaStats, slurp).
+- **Presupuesto por defecto: 4000 en CLI y MCP, revisado en v1.1.0 (#62) y sin
+  cambios.** `slurp eval --retrieval`, PrismaStats `slurp index` (15 preguntas) y slurp
+  (16): en markdown el recall es plano de 4000 a 8000 (0,867 / 0,688); 12000 da 1,000
+  en PrismaStats con el triple de tokens. En JSON 4000 baja a 0,656 / 0,562 y 6000 lo
+  iguala: un nodo cuesta ~2× en JSON. El MCP siempre envía markdown (`slurp_query` no
+  tiene formato). Decisión del autor: 4000 + nota en el README para json/yaml (~6000),
+  sin default dependiente del formato. Tabla en README › Choosing a budget.
 - **Factor de tokens** (`token_factor`, `--token-factor`, `$SLURP_TOKEN_FACTOR`, por
   defecto 1,0, rango 0,1–10): multiplica toda medida (piezas, cabecera, texto final),
   redondeando hacia arriba. Medido aquí contra `messages.count_tokens` de Anthropic:

@@ -65,6 +65,29 @@ labelled nodes of its 15 questions at `--budget 4000` and all of them at `--budg
 
 Even the worst case — `"database pool"` at budget 8k — injects 85% fewer tokens than the full graph.
 
+### Choosing a budget
+
+The default, 4000, was checked against the alternatives with `slurp eval --retrieval`
+in v1.1.0: recall is the share of each question's labelled nodes inside the subgraph,
+and the tokens are the measured text sent (mean per question). PrismaStats is its
+`slurp index` graph (1,796 nodes, 15 built-in questions); slurp is its own graph
+(4,165 nodes, 16 questions labelled for this measurement).
+
+| Graph · format | 4000 | 6000 | 8000 | 12000 |
+|---|---|---|---|---|
+| PrismaStats · markdown | **0.867** · 3,920 tok | 0.867 · 5,882 | 0.867 · 7,843 | 1.000 · 11,763 |
+| PrismaStats · JSON | 0.656 · 3,900 | 0.867 · 5,854 | 0.867 · 7,816 | 0.867 · 11,733 |
+| slurp · markdown | **0.688** · 3,924 | 0.688 · 5,883 | 0.688 · 7,845 | 0.688 · 11,764 |
+| slurp · JSON | 0.562 · 3,907 | 0.688 · 5,867 | 0.688 · 7,828 | 0.688 · 11,742 |
+
+In markdown — what `slurp QUERY` prints by default and the only format the MCP server
+sends — recall does not move between 4000 and 8000, so doubling the budget buys nothing
+on these questions. On PrismaStats the room added from 4000 to 6000 goes entirely to
+relationships among the same ~100 nodes; on slurp, the five labelled nodes it misses rank
+168th to 1,238th by score, beyond what even 12000 reaches. JSON spends about twice the
+tokens per node and needs about 6000 to catch up. MRR does not depend on the budget:
+0.400 and 0.191.
+
 ---
 
 ## Performance
@@ -321,7 +344,7 @@ slurp "prisma models" --backend openai
 |---|---|---|
 | `--graph`, `-g` | auto-discover | Path to `graph.json`. Repeatable — see [federation](#multi-graph-federation). |
 | `--graph-label` | derived from path | Project name for each `--graph`, in the same order. |
-| `--budget`, `-b` | `4000` | Upper bound, in tokens, on the text slurp prints — nodes, relationships, header and all, measured on the final output in the chosen format. If not even one node fits, the output is the header with the budget it would need. |
+| `--budget`, `-b` | `4000` | Upper bound, in tokens, on the text slurp prints — nodes, relationships, header and all, measured on the final output in the chosen format. If not even one node fits, the output is the header with the budget it would need. With `--format json` or `yaml` a node costs more, so use about `6000` for the recall markdown gets at 4000 (see [Choosing a budget](#choosing-a-budget)). |
 | `--format`, `-f` | `markdown` | Output format: `markdown`, `json`, or `yaml`. |
 | `--model`, `-m` | `cl100k_base` | Tiktoken encoding for token counting. |
 | `--explain` | off | Print per-node score breakdown: final / structural / semantic. |
@@ -1448,6 +1471,8 @@ Run slurp as an MCP server so Claude Code (or any MCP-compatible agent) can quer
 
 **Five tools exposed.** Claude Code calls them automatically, each answering a different
 question. The server runs over stdio and returns formatted markdown — no HTTP, no ports.
+`slurp_query` always answers in markdown, with `budget` 4000 unless the client asks for
+another; see [Choosing a budget](#choosing-a-budget).
 
 | Tool | Answers | Claude Code reaches for it when… |
 |---|---|---|

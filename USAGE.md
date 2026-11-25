@@ -217,7 +217,7 @@ slurp "auth flow" --ignore-file .slurpignore
 | Flag | Default | Description |
 |---|---|---|
 | `--graph`, `-g` | auto-discover | Path to `graph.json`. |
-| `--budget`, `-b` | `4000` | Token budget. |
+| `--budget`, `-b` | `4000` | Token budget: an upper bound on the text printed, measured. With `--format json`/`yaml` use about `6000` for the same recall. |
 | `--format`, `-f` | `markdown` | `markdown`, `json`, or `yaml`. |
 | `--explain` | off | Per-node score breakdown (final / structural / semantic). |
 | `--viz` | off | Interactive HTML visualizer in the browser. |
