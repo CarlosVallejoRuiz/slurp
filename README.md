@@ -47,7 +47,7 @@ slurp prints for each query and budget, and the whole graph printed the same way
 
 **Mean savings: 96.1% · p50: 96.7% · Best case: 98.3% · Worst case: 93.3%**
 
-The output stays under the budget: 1,954–1,963 tokens at 2k, 3,918–3,925 at 4k, 7,847 at 8k.
+The output stays under the budget: 1,961–1,967 tokens at 2k, 3,917–3,928 at 4k, 7,842–7,848 at 8k.
 On the same project's `slurp index` graph, `slurp eval --retrieval` finds 86.7% of the
 labelled nodes of its 15 questions at `--budget 4000` and all of them at `--budget 16000`.
 
@@ -59,15 +59,16 @@ labelled nodes of its 15 questions at `--budget 4000` and all of them at `--budg
 ### Choosing a budget
 
 The default, 4000, was checked against the alternatives with `slurp eval --retrieval`
-in v1.1.0: recall is the share of each question's labelled nodes inside the subgraph,
-and the tokens are the measured text sent (mean per question). PrismaStats is its
-`slurp index` graph (1,796 nodes, 15 built-in questions); slurp is its own graph
-(4,165 nodes, 16 questions labelled for this measurement).
+in v1.1.0, and PrismaStats re-measured in v1.1.1, whose index no longer holds `.next/`:
+recall is the share of each question's labelled nodes inside the subgraph, and the
+tokens are the measured text sent (mean per question). PrismaStats is its `slurp index`
+graph (1,582 nodes, 15 built-in questions); slurp is its own graph (4,165 nodes, 16
+questions labelled for this measurement).
 
 | Graph · format | 4000 | 6000 | 8000 | 12000 |
 |---|---|---|---|---|
-| PrismaStats · markdown | **0.867** · 3,920 tok | 0.867 · 5,882 | 0.867 · 7,843 | 1.000 · 11,763 |
-| PrismaStats · JSON | 0.656 · 3,900 | 0.867 · 5,854 | 0.867 · 7,816 | 0.867 · 11,733 |
+| PrismaStats · markdown | **0.867** · 3,920 tok | 0.867 · 5,882 | 0.867 · 7,845 | 1.000 · 11,765 |
+| PrismaStats · JSON | 0.589 · 3,900 | 0.800 · 5,851 | 0.867 · 7,817 | 0.867 · 11,736 |
 | slurp · markdown | **0.688** · 3,924 | 0.688 · 5,883 | 0.688 · 7,845 | 0.688 · 11,764 |
 | slurp · JSON | 0.562 · 3,907 | 0.688 · 5,867 | 0.688 · 7,828 | 0.688 · 11,742 |
 
@@ -76,8 +77,9 @@ sends — recall does not move between 4000 and 8000, so doubling the budget buy
 on these questions. On PrismaStats the room added from 4000 to 6000 goes entirely to
 relationships among the same ~100 nodes; on slurp, the five labelled nodes it misses rank
 168th to 1,238th by score, beyond what even 12000 reaches. JSON spends about twice the
-tokens per node and needs about 6000 to catch up. MRR does not depend on the budget:
-0.400 and 0.191.
+tokens per node and needs about 6000 on slurp, and 8000 on PrismaStats, to catch up
+(YAML on PrismaStats: 0.800 at 4000, 0.867 from 6000). MRR does not depend on the
+budget: 0.404 and 0.191.
 
 ---
 
@@ -351,7 +353,7 @@ slurp "prisma models" --backend openai
 |---|---|---|
 | `--graph`, `-g` | auto-discover | Path to `graph.json`. Repeatable — see [federation](#multi-graph-federation). |
 | `--graph-label` | derived from path | Project name for each `--graph`, in the same order. |
-| `--budget`, `-b` | `4000` | Upper bound, in tokens, on the text slurp prints — nodes, relationships, header and all, measured on the final output in the chosen format. If not even one node fits, the output is the header with the budget it would need. With `--format json` or `yaml` a node costs more, so use about `6000` for the recall markdown gets at 4000 (see [Choosing a budget](#choosing-a-budget)). |
+| `--budget`, `-b` | `4000` | Upper bound, in tokens, on the text slurp prints — nodes, relationships, header and all, measured on the final output in the chosen format. If not even one node fits, the output is the header with the budget it would need. With `--format json` or `yaml` a node costs more, so use about `6000`–`8000` for the recall markdown gets at 4000 (see [Choosing a budget](#choosing-a-budget)). |
 | `--format`, `-f` | `markdown` | Output format: `markdown`, `json`, or `yaml`. |
 | `--model`, `-m` | `cl100k_base` | Tiktoken encoding for token counting. |
 | `--explain` | off | Print per-node score breakdown: final / structural / semantic. |
@@ -1606,7 +1608,7 @@ What changes if you already use slurp:
   several times the budget: on a 2,111-node graphify graph `--budget 4000` printed about
   29,000–32,000 tokens and `--budget 8000` 40,368–41,582. The budget is now an upper
   bound on the text printed — nodes, relationships and header, measured in the format
-  you asked for — so `--budget 4000` prints at most 4,000 tokens (3,918–3,925 on that
+  you asked for — so `--budget 4000` prints at most 4,000 tokens (3,917–3,928 on that
   graph), with fewer nodes: the quickstart's `"player stats"` went from 402 nodes to 135.
   If you relied on the larger context, raise `--budget`; `slurp eval --retrieval` with
   your own questions shows where recall stops improving. A budget too small for even the
@@ -1614,7 +1616,7 @@ What changes if you already use slurp:
 - **The default budget stays 4000**, for `slurp QUERY` and for the MCP server's
   `slurp_query`. It was measured against 6000, 8000 and 12000 and kept: in markdown,
   which both send by default, recall was the same at 4000, 6000 and 8000. JSON and YAML spend
-  more tokens per node; with `--format json` or `yaml` use about 6000 for the same
+  more tokens per node; with `--format json` or `yaml` use about 6000–8000 for the same
   recall. See [Choosing a budget](#choosing-a-budget).
 - **`--backend anthropic` is retired.** The CLI has refused it since v1.0.7; now the
   library does too: `score_nodes(G, query, backend="anthropic")` raises `ValueError`

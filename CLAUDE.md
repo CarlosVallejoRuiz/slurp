@@ -759,8 +759,14 @@ relaciones: `--budget 8000` daba 19k–42k tokens reales.
   (16): en markdown el recall es plano de 4000 a 8000 (0,867 / 0,688); 12000 da 1,000
   en PrismaStats con el triple de tokens. En JSON 4000 baja a 0,656 / 0,562 y 6000 lo
   iguala: un nodo cuesta ~2× en JSON. El MCP siempre envía markdown (`slurp_query` no
-  tiene formato). Decisión del autor: 4000 + nota en el README para json/yaml (~6000),
-  sin default dependiente del formato. Tabla en README › Choosing a budget.
+  tiene formato). Decisión del autor: 4000 + nota en el README para json/yaml, sin
+  default dependiente del formato. Tabla en README › Choosing a budget.
+  - **Remedido en v1.1.1** sobre PrismaStats sin `.next/` (1.582 nodos): markdown igual
+    (0,867 hasta 8000, 1,000 desde 12000), MRR 0,400 → 0,404; JSON baja a 0,589 a 4000 y
+    0,800 a 6000 (iguala a 8000). Un solo nodo: `getDashboardData` (arch-04) sube de
+    rango 11 → 9 pero su score baja 0,4916 → 0,4886 al renormalizarse el PageRank, y en
+    los ~57–87 nodos que caben en JSON lo desplazan los vecinos de los hubs (×0,7 del
+    top). La nota pasa a ~6000–8000. El grafo de slurp no cambia: sus filas tampoco.
 - **Factor de tokens** (`token_factor`, `--token-factor`, `$SLURP_TOKEN_FACTOR`, por
   defecto 1,0, rango 0,1–10): multiplica toda medida (piezas, cabecera, texto final),
   redondeando hacia arriba. Medido aquí contra `messages.count_tokens` de Anthropic:
