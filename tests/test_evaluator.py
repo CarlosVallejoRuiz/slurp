@@ -565,6 +565,57 @@ class TestRetrievalEval:
         ev.run_retrieval_eval(_retrieval_graph(), [_q("a", "login user", ["auth.login"])])
         assert seen == ["login user"]
 
+    @pytest.mark.parametrize("fmt", ["markdown", "json", "yaml"])
+    def test_reports_the_real_tokens_of_the_text_in_the_format_asked(self, fmt):
+        from slurp.budget import build_context, count_tokens
+        from slurp.evaluator import run_retrieval_eval
+        from slurp.scorer import score_nodes
+
+        G = _retrieval_graph()
+        qs = [_q("a", "login user", ["auth.login"]), _q("b", "charge card", ["billing.charge"])]
+        suite = run_retrieval_eval(G, qs, budget=400, format=fmt)
+        assert suite.format == fmt
+        for q, r in zip(qs, suite.results, strict=True):
+            text, sub, _ = build_context(G, score_nodes(G, q.question), budget=400,
+                                         format=fmt, query=q.question)
+            assert r.tokens_used == count_tokens(text) <= 400
+            assert r.subgraph_nodes == sub.number_of_nodes()
+        tokens = [r.tokens_used for r in suite.results]
+        assert suite.max_tokens == max(tokens)
+        assert suite.mean_tokens == pytest.approx(sum(tokens) / len(tokens), abs=0.1)
+        d = suite.to_dict()
+        assert d["format"] == fmt and d["max_tokens"] == max(tokens)
+        assert [r["tokens_used"] for r in d["results"]] == tokens
+
+    def test_token_figures_leave_out_unscorable_questions(self):
+        from slurp.evaluator import run_retrieval_eval
+
+        suite = run_retrieval_eval(_retrieval_graph(), [
+            _q("a", "login", ["auth.login"]), _q("gone", "x", ["does.not.exist"])])
+        assert suite.results[1].tokens_used == 0
+        assert suite.mean_tokens == suite.max_tokens == suite.results[0].tokens_used
+
+    def test_cli_measures_in_the_format_asked(self, tmp_path):
+        graph = tmp_path / "g.json"
+        graph.write_text(json.dumps(nx.node_link_data(_retrieval_graph(), edges="links")))
+        questions = tmp_path / "q.json"
+        questions.write_text(json.dumps([{"id": "a", "question": "login user",
+                                          "ground_truth": "-", "relevant_nodes": ["auth.login"]}]))
+        out = tmp_path / "r.json"
+        res = CliRunner().invoke(cli, ["eval", "--retrieval", "--format", "json",
+                                       "--graph", str(graph), "--questions", str(questions),
+                                       "--output", str(out)])
+        assert res.exit_code == 0, res.output
+        assert "Tokens" in res.output and "json" in res.output
+        data = json.loads(out.read_text())
+        assert data["format"] == "json" and data["results"][0]["tokens_used"] > 0
+
+    def test_cli_format_is_refused_without_retrieval(self, tmp_path):
+        # The LLM eval sends markdown; a format it would ignore must not pass silently.
+        res = CliRunner().invoke(cli, ["eval", "--format", "json", "--dry-run"])
+        assert res.exit_code != 0
+        assert "--retrieval" in res.output
+
     def test_cli_errors_when_no_question_matches_the_graph(self, tmp_path):
         graph = tmp_path / "g.json"
         graph.write_text(json.dumps(nx.node_link_data(_retrieval_graph(), edges="links")))

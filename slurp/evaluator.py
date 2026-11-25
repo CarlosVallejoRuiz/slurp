@@ -372,6 +372,7 @@ class RetrievalResult:
     missing: list[str] = field(default_factory=list)    # relevant but not in the graph
     first_rank: int | None = None                        # best relevant node, by score
     subgraph_nodes: int = 0
+    tokens_used: int = 0                                 # measured size of the text sent
 
     @property
     def scorable(self) -> bool:
@@ -392,7 +393,7 @@ class RetrievalResult:
             "question_id": self.question_id, "question": self.question,
             "relevant": self.relevant, "found": self.found, "missing": self.missing,
             "first_rank": self.first_rank, "subgraph_nodes": self.subgraph_nodes,
-            "recall": self.recall, "reciprocal_rank": self.reciprocal_rank,
+            "tokens_used": self.tokens_used, "recall": self.recall, "reciprocal_rank": self.reciprocal_rank,
             "scorable": self.scorable,
         }
 
@@ -404,6 +405,7 @@ class RetrievalSuite:
     results: list[RetrievalResult] = field(default_factory=list)
     budget: int = 0
     min_score: float = 0.0
+    format: str = "markdown"
 
     @property
     def scored(self) -> list[RetrievalResult]:
@@ -422,12 +424,23 @@ class RetrievalSuite:
     def mrr(self) -> float:
         return EvalSuite._mean(r.reciprocal_rank for r in self.scored)
 
+    @property
+    def mean_tokens(self) -> float:
+        """Mean measured size of the text each scored question would send."""
+        tokens = [r.tokens_used for r in self.scored]
+        return round(sum(tokens) / len(tokens), 1) if tokens else 0.0
+
+    @property
+    def max_tokens(self) -> int:
+        return max((r.tokens_used for r in self.scored), default=0)
+
     def to_dict(self) -> dict:
         return {
-            "budget": self.budget, "min_score": self.min_score,
+            "budget": self.budget, "min_score": self.min_score, "format": self.format,
             "questions_scored": len(self.scored),
             "questions_unscorable": len(self.results) - len(self.scored),
             "mean_recall": self.mean_recall, "hit_rate": self.hit_rate, "mrr": self.mrr,
+            "mean_tokens": self.mean_tokens, "max_tokens": self.max_tokens,
             "results": [r.to_dict() for r in self.results],
         }
 
@@ -439,6 +452,7 @@ def run_retrieval_eval(
     min_score: float = DEFAULT_MIN_SCORE,
     model: str = "cl100k_base",
     token_factor: float = 1.0,
+    format: str = "markdown",
 ) -> RetrievalSuite:
     """Score retrieval against each question's relevant_nodes, with no LLM.
 
@@ -446,7 +460,9 @@ def run_retrieval_eval(
     `slurp QUERY` would. Recall is the share of the question's relevant nodes
     (those present in the graph) that made it into the subgraph; the reciprocal
     rank is 1 / the position of the best-ranked relevant node in the full score
-    ordering, ties broken by node id so runs are reproducible.
+    ordering, ties broken by node id so runs are reproducible. Each result also
+    carries the measured tokens of the text that question would send in
+    *format*, since the budget bounds that text and its size differs by format.
 
     Args:
         G: The graph under test.
@@ -454,12 +470,14 @@ def run_retrieval_eval(
         budget: Token budget for the subgraph.
         min_score: Minimum score, as in build_context.
         model: Tiktoken encoding for token counting.
+        token_factor: Multiplies every token count (see resolve_token_factor).
+        format: 'markdown', 'json' or 'yaml' — the output being budgeted.
 
     Returns:
         A RetrievalSuite. Questions whose relevant nodes are all absent from
         the graph are kept, marked unscorable, and left out of the means.
     """
-    suite = RetrievalSuite(budget=budget, min_score=min_score)
+    suite = RetrievalSuite(budget=budget, min_score=min_score, format=format)
     for question in questions:
         relevant = list(question.relevant_nodes)
         result = RetrievalResult(question_id=question.id, question=question.question,
@@ -472,12 +490,14 @@ def run_retrieval_eval(
             # The query text, as `slurp QUERY` prints it in the header. Until
             # v1.1.0 the whole EvalQuestion went in, and its repr took ~60
             # tokens of room from every question.
-            _text, subgraph, _ = build_context(G, scores, budget=budget, model=model,
-                                               min_score=min_score, query=question.question,
-                                               token_factor=token_factor)
+            _text, subgraph, stats = build_context(G, scores, budget=budget, model=model,
+                                                   min_score=min_score, format=format,
+                                                   query=question.question,
+                                                   token_factor=token_factor)
             result.found = [n for n in relevant if n in subgraph]
             result.first_rank = min(position[n] for n in relevant if n in position)
             result.subgraph_nodes = subgraph.number_of_nodes()
+            result.tokens_used = stats["tokens_used"]
         suite.results.append(result)
     return suite
 

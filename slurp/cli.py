@@ -922,6 +922,10 @@ def serve(graph: tuple[str, ...], graph_labels: tuple[str, ...], log: bool) -> N
               help="No LLM: measure recall and MRR of each question's relevant_nodes.")
 @click.option("--min-score", "min_score", default=None, type=float,
               help="Minimum score for --retrieval (default: the CLI query default).")
+@click.option("--format", "-f", "fmt", type=click.Choice(["markdown", "json", "yaml"]),
+              default=None,
+              help="Output format the --retrieval subgraph is budgeted and measured in "
+                   "(default: markdown, as `slurp QUERY` and the MCP server send).")
 @click.option("--token-factor", "token_factor", type=float, default=None,
               help="Multiply token counts (e.g. 1.56 to estimate Claude tokens). "
                    "Default: $SLURP_TOKEN_FACTOR, else 1.0.")
@@ -938,10 +942,15 @@ def eval_cmd(
     dry_run: bool,
     retrieval: bool,
     min_score: float | None,
+    fmt: str | None,
     token_factor: float | None,
     config_dir: str,
 ) -> None:
     """Measure whether answers are better with slurp than with the full graph."""
+    # The LLM eval sends markdown: a format it would ignore must not pass silently.
+    if fmt is not None and not retrieval:
+        raise click.ClickException("--format applies to --retrieval only; the LLM eval "
+                                   "sends markdown, as `slurp QUERY` does by default.")
     factor = _token_factor(token_factor)
     from slurp.evaluator import (
         default_questions,
@@ -981,7 +990,7 @@ def eval_cmd(
             suite = run_retrieval_eval(
                 G, questions, budget=budget,
                 min_score=DEFAULT_MIN_SCORE if min_score is None else min_score,
-                token_factor=factor)
+                token_factor=factor, format=fmt or "markdown")
         except BudgetTooSmallError as exc:
             raise click.ClickException(str(exc)) from None
         if not suite.scored:
@@ -1051,13 +1060,14 @@ def _build_retrieval_table(suite) -> Table:
     table.add_column("Recall", justify="right")
     table.add_column("Rank", justify="right")
     table.add_column("Subgraph", justify="right")
+    table.add_column("Tokens", justify="right")
     for r in suite.results:
         if not r.scorable:
-            table.add_row(r.question_id, "—", "—", "—", "not in graph")
+            table.add_row(r.question_id, "—", "—", "—", "not in graph", "—")
             continue
         present = len(r.relevant) - len(r.missing)
         table.add_row(r.question_id, f"{len(r.found)}/{present}", f"{r.recall:.2f}",
-                      str(r.first_rank), f"{r.subgraph_nodes} nodes")
+                      str(r.first_rank), f"{r.subgraph_nodes} nodes", f"{r.tokens_used:,}")
     return table
 
 
@@ -1068,6 +1078,8 @@ def _build_retrieval_panel(suite) -> Panel:
         f"Recall (mean):  {suite.mean_recall:.3f}",
         f"Hit rate:       {suite.hit_rate:.3f}",
         f"MRR:            {suite.mrr:.3f}",
+        f"Tokens sent:    mean {suite.mean_tokens:,.0f} · max {suite.max_tokens:,} "
+        f"({suite.format}, measured)",
         f"Questions:      {len(suite.scored)} scored"
         + (f", {skipped} not in this graph" if skipped else ""),
         f"Budget {suite.budget:,} · min score {suite.min_score}",

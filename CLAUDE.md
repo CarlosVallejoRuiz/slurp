@@ -468,6 +468,13 @@ uv sync --extra rust            # solo una
   Línea base PrismaStats (`slurp index`, budget 4000): recall 1,000 · MRR 0,400,
   15/15 preguntas iguales a la implementación del diagnóstico. Es la métrica para
   medir cualquier cambio de scorer o de presupuesto.
+  - Cada pregunta reporta también `tokens_used`, la medida del texto que enviaría, y
+    `--format markdown|json|yaml` elige en qué formato se presupuesta y se mide (el
+    tamaño por nodo cambia mucho entre formatos). `--format` sin `--retrieval` se
+    rechaza: el eval con LLM envía markdown.
+  - La cabecera lleva `question.question`. Hasta v1.1.0 llevaba el `repr` del
+    `EvalQuestion` entero (88 tokens en vez de 28 en auth-01); las cifras
+    publicadas (0,867 a 4000, 1,000 a 16000) no cambiaron al corregirlo.
 
 - **`_graphutils.py` — el hogar de lo compartido.** Cada uno de estos nombres
   fue un privado del módulo que lo necesitó primero, importado con underscore
