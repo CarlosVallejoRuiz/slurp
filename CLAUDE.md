@@ -604,9 +604,9 @@ por debajo de la carpeta que abre el editor (`~/Desktop/Slurp/`). Todos los coma
 de este documento (`uv run pytest`, `ruff check`, `uv build`, `git`) se ejecutan
 desde `~/Desktop/Slurp/slurp/`, que es donde vive este CLAUDE.md.
 
-**Estado actual:** v1.1.1 publicada; v1.2 en desarrollo en `main` (sin bump ni tag) ·
-2694 tests · `ruff check .` limpio. #21 vive en la rama `v1.2-21-docstrings` (2722 tests),
-fuera de main: ver "Resultados de v1.2".
+**Estado actual:** v1.2.0 · 2694 tests · `ruff check .` limpio. #21 (docstrings como
+descripción) vive en la rama `v1.2-21-docstrings` (2722 tests), sin fusionar: se retoma con
+BM25 en la v1.3 (ver "Resultados de v1.2").
 
 **Resultados de v1.2 (fase 1: qué nodos se seleccionan).** Medido con
 `scripts/retrieval.py` (`slurp eval --retrieval` en un proceso por fila) sobre fuentes fijas:
@@ -665,9 +665,9 @@ elegida (main) y el código del tag, así se publica un tag anterior al workflow
 `publish`: `environment: pypi`, `id-token: write`, `pypa/gh-action-pypi-publish`.
 Acciones fijadas por SHA con la versión en comentario; `tests/test_publish_workflow.py`
 lo vigila (pins, OIDC solo en publish, sin secrets, sin `${{ }}` dentro de un `run:`).
-El trusted publisher de PyPI aún no está configurado: 1.0.7 y 1.1.0 se subieron a mano
-con `uv publish`, y el job `publish` falla con `invalid-publisher` (el `build` pasa en
-Linux). Mientras tanto, cada release se construye en `dist-X.Y.Z/` (ignorado) **desde un
+El trusted publisher de PyPI aún no está configurado: 1.0.7, 1.1.0, 1.1.1 y 1.2.0 se suben
+a mano con `uv publish` (el autor, con su clave), y el job `publish` falla con
+`invalid-publisher` (el `build` pasa en Linux y sus ficheros son idénticos a los locales). Mientras tanto, cada release se construye en `dist-X.Y.Z/` (ignorado) **desde un
 clon limpio del tag**, nunca desde el árbol de trabajo, y se sube con `uv publish` de esos
 dos ficheros. Los ficheros de la 1.0.7 en `dist/` no se tocan.
 

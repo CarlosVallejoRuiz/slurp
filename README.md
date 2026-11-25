@@ -48,7 +48,7 @@ slurp prints for each query and budget, and the whole graph printed the same way
 **Mean savings: 96.1% · p50: 96.7% · Best case: 98.3% · Worst case: 93.3%**
 
 The output stays under the budget: 1,964–1,968 tokens at 2k, 3,926–3,928 at 4k, 7,841–7,847 at 8k
-(re-measured for v1.2; the savings are unchanged).
+(re-measured for v1.2.0; the savings are unchanged).
 On the same project's `slurp index` graph, `slurp eval --retrieval` finds 96.7% of the
 labelled nodes of its 15 questions at `--budget 4000` (86.7% in v1.1.1).
 
@@ -64,7 +64,7 @@ recall is the share of each question's labelled nodes inside the subgraph, and t
 tokens are the measured text sent (mean per question). PrismaStats is its `slurp index`
 graph (1,582 nodes, 15 built-in questions); slurp is its own graph (4,165 nodes, 16
 questions labelled for this measurement by the same tool that tuned v1.2 — indicative,
-not an independent ground truth). Measured for v1.2, v1.1.1 in brackets:
+not an independent ground truth). Measured for v1.2.0, v1.1.1 in brackets:
 
 | Graph · format | 4000 | 6000 | 8000 | 12000 | 16000 |
 |---|---|---|---|---|---|
@@ -1655,45 +1655,70 @@ Pass a custom path with `--ignore-file path/to/.slurpignore`.
 - ✅ **v1.0.7** — `slurp index --smart` always produces the graph a full index builds (it records the build commit, stays incremental for edits inside function bodies, and runs a full index when files, definitions or imports change); risk is `UNKNOWN`, never "safe", for the eleven languages without a call graph; `--backend anthropic` is refused (Anthropic has no embeddings endpoint); the viz stops its physics as soon as the layout settles; projects inside a `build/` or `vendor/` folder index normally, and an empty index says why
 - ✅ **v1.1.0** — The token budget bounds the text actually sent, measured; `slurp eval --retrieval` scores recall and MRR with no LLM and reports the tokens each answer costs; `--token-factor` for models that do not tokenize like tiktoken; one `--min-score` default everywhere; `slurp diff` rates impact by the callers a change reaches; the closing tip says why nodes are missing; savings are measured or not shown; releases go to PyPI by trusted publishing
 - ✅ **v1.1.1** — Maintenance: `slurp index` skips the build output of web frameworks (`.next/`, `.nuxt/`, `.svelte-kit/`, `.turbo/`, `.vercel/`, `.output/`, and `out/` when it holds a Next.js static export) and prunes skipped directories instead of walking them (PrismaStats: 4.9 s → 0.5 s, 214 fewer nodes of compiled `.next/` code); `slurp diff` reads a deleted node's risk neighbourhood from the old graph, where it still exists; `slurp config set` adds `.slurp/` to `.gitignore` as `slurp init` does; `scripts/latency.py` reproduces the Performance figures; the sdist ships only the package, its docs and the MIT `LICENSE`, which the wheel now carries too
+- ✅ **v1.2.0** — Better selection, measured: test code and import nodes no longer take places in a subgraph (`--include-tests` / `--include-imports` let them back), and a node lends its neighbour boost to at most ten neighbours, so a hub's callers no longer fill the budget — recall at `--budget 4000` in markdown 0.867 → 0.967 on PrismaStats and 0.688 → 0.875 on slurp's own graph; risk bands in `slurp explain`, `slurp impact` and `slurp diff` count production callers only, with tests shown apart; `_is_test` follows each language's test-runner conventions; `scripts/retrieval.py` measures recall on a fixed tuning/held-out split of the questions
 
-### Upgrading to v1.2 (in development, unreleased)
+### Upgrading to v1.2.0
+
+v1.2.0 changes which nodes a query selects. A query's output keeps its format, plus one
+closing-tip line and two stats keys; `slurp explain`, `slurp impact` and `slurp diff` show
+tests apart (below). No dependency changes.
+
+**Recall**, measured with `slurp eval --retrieval` at `--budget 4000` over all 31
+questions (PrismaStats's `slurp index` graph, 15 built-in questions; slurp's own graph, 16
+questions labelled for this measurement):
+
+| Graph | Markdown, v1.1.1 → v1.2.0 | JSON, v1.1.1 → v1.2.0 |
+|---|---|---|
+| PrismaStats | 0.867 → **0.967** | 0.589 → **0.900** |
+| slurp | 0.688 → **0.875** | 0.562 → **0.812** |
+
+The changes were decided on half of each project's questions, drawn once with a fixed
+seed, and checked once on the other half; every budget and format, both halves, and the
+script that reproduces them are in [Choosing a budget](#choosing-a-budget).
 
 What changes if you already use slurp:
 
 - **Tests and import nodes no longer take a place in a query's subgraph.** `slurp QUERY`,
   `export`, `benchmark`, `eval`, the MCP `slurp_query` and `slurp_suggest`, and the
-  library's `build_context` / `select_subgraph` leave them out by default;
-  `--include-tests` / `--include-imports` (`include_tests` / `include_imports`) let them
-  back in. The closing tip counts them, and JSON/YAML stats carry
-  `nodes_excluded_tests` / `nodes_excluded_imports` when there are any. PageRank still
-  sees them, so the scores do not change.
+  library's `build_context` / `select_subgraph` leave them out by default. **`--include-tests`**
+  and **`--include-imports`** let each kind back in (`include_tests` / `include_imports`
+  over MCP and in the library). The closing tip counts what was left out, and JSON/YAML
+  stats carry `nodes_excluded_tests` / `nodes_excluded_imports` when there are any.
+  PageRank still sees them, so the scores do not change. A test is what a test runner
+  would collect: `tests/`, `test/`, `__tests__/` or `spec/` directories, files like
+  `test_*.py`, `*_test.go`, `*.spec.ts` or `*Test.java`, and Rust's `mod tests` —
+  `latest_results.py` is no longer one, and neither are `contests/` or `lib/respec/`.
+- **A node lends its neighbour boost to at most ten neighbours,** the most relevant on
+  their own. On PrismaStats `createAdminClient`, with 97 callers, lent its score to all
+  of them, and they filled the budget ahead of the nodes a question asked for; with a
+  bigger budget its 97 relationships took the room meant for new nodes.
 - **Risk bands count production callers only, in `slurp explain` and `slurp impact`,**
-  as `slurp diff` already did. Until v1.1.1 explain and impact added the tests in. On
-  slurp's own graph 137 nodes change band in `slurp explain` — 69 from HIGH to LOW, 34
-  from MEDIUM to LOW, 34 from HIGH to MEDIUM; on PrismaStats, which has almost no tests,
-  none do. A CI gate on `slurp impact --output json`'s `risk_level` sees the same
-  change: `direct_dependents`, `transitive_dependents`, `affected_files` and
-  `impact_score` are production-only, and the tests move to `test_dependents` /
-  `test_files`.
+  as `slurp diff` already did, so the three agree. Until v1.1.1 explain and impact added
+  the tests in. **On slurp's own graph 137 nodes change band in `slurp explain`** — 69 from
+  HIGH to LOW, 34 from MEDIUM to LOW, 34 from HIGH to MEDIUM; on PrismaStats, which has
+  almost no tests, none do. Tests are shown apart: `→ Tested by: 72 tests in 9 files`,
+  `10 production callers, 72 in tests`, and a TESTS block in `slurp impact`. A CI gate
+  on `slurp impact --output json` sees the same change: `risk_level`,
+  `direct_dependents`, `transitive_dependents`, `affected_files` and `impact_score` are
+  production-only, and the tests move to `test_dependents` / `test_files`.
 - **SAFE TO EDIT means nothing calls it, not even a test.** A definition only tests call
-  is now `test_only_nodes` in `slurp impact` (LOW, listed apart), not `safe_nodes`.
+  is LOW, listed as `test_only_nodes` in `slurp impact` and told to update its tests in
+  `slurp explain`, not reported as safe.
 - **Import nodes are never dependants.** `slurp diff` no longer counts the module that
   declared a removed import as a caller, and `slurp impact` no longer counts imports as
   definitions of the file (slurp's `budget.py`: 29 → 19).
-- **A node lends its neighbour boost to at most ten neighbours,** the most relevant on
-  their own. On PrismaStats `createAdminClient`, with 97 callers, lent its score to all
-  of them, and they filled the budget ahead of the nodes a question asked for.
-- **Recall, measured with `slurp eval --retrieval` at `--budget 4000` in markdown:**
-  PrismaStats 0.867 → 0.967, slurp's own graph 0.688 → 0.875; in JSON 0.589 → 0.900
-  and 0.562 → 0.812. See [Choosing a budget](#choosing-a-budget) for every budget and
-  format, and how the changes were checked on questions they were not tuned on.
 - **`slurp eval --retrieval`'s MRR has a new definition:** a relevant node's rank counts
-  only the nodes slurp can return (tests and imports are left out of selection, so they
-  are left out of the ranking). The scores did not change; the v1.1.1 rank over every
-  node is still reported, as `mrr_all`.
-- `_is_test` follows the conventions of each language's test runner instead of a
-  substring of the path: `latest_results.py` is no longer a test, `contests/` and
-  `lib/respec/` are not either, and a production `test_connection()` is production.
+  only the nodes slurp can return. Tests and imports are left out of selection, so they
+  are left out of the ranking — that is the order a reader meets the nodes in. The scores
+  did not change, so neither did the old figure: the rank over every node is still
+  reported, as `mrr_all`.
+
+**Known limitation.** With the ten-neighbour boost, PrismaStats's `dashboard_actions`
+module — one of the two nodes of question arch-02, "Which files concentrate the most
+functions?" — is no longer reached at `--budget 12000`. v1.1.1 reached it there only
+through the 97 callers of `createAdminClient`; v1.2.0 finds the question's other module
+from 4000 on, but stays at 0.967 in markdown up to 16000, where v1.1.1 got 1.000 from
+12000.
 
 ### Upgrading to v1.1.0
 
