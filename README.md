@@ -4,7 +4,7 @@
 
 # slurp
 
-![tests](https://img.shields.io/badge/tests-2490%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-2540%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 ![pypi](https://img.shields.io/badge/PyPI-slurp--graph-orange)
@@ -1598,6 +1598,7 @@ Pass a custom path with `--ignore-file path/to/.slurpignore`.
 - ✅ **v1.0.6** — Security patch: an environment API key is never sent to an endpoint from a project's `.slurp/config.json`; `config.json` is written 0600 and `slurp init` adds `.slurp/` to `.gitignore`; `--inject-code` stays inside the project root; `slurp index` asks before replacing a graph graphify wrote (`--force` to skip); the viz works offline (vis-network vendored) and graph text can no longer break its `<script>`; a damaged `audit.jsonl` line is skipped with a warning
 - ✅ **v1.0.7** — `slurp index --smart` always produces the graph a full index builds (it records the build commit, stays incremental for edits inside function bodies, and runs a full index when files, definitions or imports change); risk is `UNKNOWN`, never "safe", for the eleven languages without a call graph; `--backend anthropic` is refused (Anthropic has no embeddings endpoint); the viz stops its physics as soon as the layout settles; projects inside a `build/` or `vendor/` folder index normally, and an empty index says why
 - ✅ **v1.1.0** — The token budget bounds the text actually sent, measured; `slurp eval --retrieval` scores recall and MRR with no LLM and reports the tokens each answer costs; `--token-factor` for models that do not tokenize like tiktoken; one `--min-score` default everywhere; `slurp diff` rates impact by the callers a change reaches; the closing tip says why nodes are missing; savings are measured or not shown; releases go to PyPI by trusted publishing
+- ✅ **v1.1.1** — Maintenance: `slurp index` skips the build output of web frameworks (`.next/`, `.nuxt/`, `.svelte-kit/`, `.turbo/`, `.vercel/`, `.output/`, and `out/` when it holds a Next.js static export) and prunes skipped directories instead of walking them (PrismaStats: 4.9 s → 0.5 s, 214 fewer nodes of compiled `.next/` code); `slurp diff` reads a deleted node's risk neighbourhood from the old graph, where it still exists; `slurp config set` adds `.slurp/` to `.gitignore` as `slurp init` does; `scripts/latency.py` reproduces the Performance figures; the sdist ships only the package and its docs
 
 ### Upgrading to v1.1.0
 

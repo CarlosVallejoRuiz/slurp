@@ -534,7 +534,7 @@ por debajo de la carpeta que abre el editor (`~/Desktop/Slurp/`). Todos los coma
 de este documento (`uv run pytest`, `ruff check`, `uv build`, `git`) se ejecutan
 desde `~/Desktop/Slurp/slurp/`, que es donde vive este CLAUDE.md.
 
-**Estado actual:** v1.1.0 · 2490 tests · `ruff check slurp/` limpio.
+**Estado actual:** v1.1.1 · 2540 tests · `ruff check slurp/` limpio.
 
 **⚠️ IMPORTANTE — `uv sync --extra X` desinstala los extras no mencionados.**
 Sincroniza al conjunto exacto de extras que le pases, así que añadir uno con
@@ -581,6 +581,7 @@ No va en el paquete; `tests/test_latency_script.py` lo mantiene ejecutable.
 ~/Desktop/Slurp/slurp/         ← raíz del repo git — working directory
 ├── CLAUDE.md                  ← este fichero
 ├── .github/workflows/publish.yml ← publicación en PyPI por OIDC
+├── scripts/latency.py         ← reproduce las cifras de README › Performance (no va en el paquete)
 ├── README.md
 ├── USAGE.md
 ├── pyproject.toml
