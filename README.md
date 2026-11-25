@@ -251,11 +251,11 @@ Then query it:
 slurp "player stats" --graph graph.json --budget 4000
 ```
 
-Real output, on a 2,111-node graph of a Next.js codebase:
+Real output with v1.2.0, on a 2,111-node graph of a Next.js codebase:
 
 ```
 ╭─ Slurp — Subgraph for: "player stats" (budget: 4,000 tokens) ╮
-│ Selected 135/2111 nodes · 3,927/4,000 tokens used (6.4%)     │
+│ Selected 108/2111 nodes · 3,928/4,000 tokens used (5.1%)     │
 ╰──────────────────────────────────────────────────────────────╯
 
 ## Relevant Nodes
@@ -279,17 +279,20 @@ Real output, on a 2,111-node graph of a Next.js codebase:
 
 ## Key Relationships
 - admin_page_admindashboardpage → calls → supabase_admin_actions_getadminstats
+- admin_page_admindashboardpage → calls → supabase_admin_actions_getultimosaccesos
 - admin_page_admindashboardpage → calls → supabase_admin_actions_getusagestats
-- comp_home_away_stats → references → supabase_dashboard_actions_homeawaydata
 …
 
 ---
-💡 1333 more nodes scored 0.15 or more but did not fit the budget — increase --budget to include them
+💡 1350 more nodes scored 0.15 or more but did not fit the budget — increase --budget to include them
 💡 643 nodes scored below the minimum score 0.15 — a bigger budget will not include them (see --min-score)
+💡 10 test nodes are left out by default — --include-tests to let them compete
 ```
 
-The closing tip separates the two reasons a node is missing: it did not fit the
-budget (more budget brings it in), or it scored below `--min-score` (no budget will).
+The closing tip separates the reasons a node is missing: it did not fit the
+budget (more budget brings it in), it scored below `--min-score` (no budget will),
+or it is test code or an import node, left out by default (`--include-tests` and
+`--include-imports` let them compete).
 
 Nodes are ordered by relevance, and each carries the score that put it there.
 A node's one-line description appears under its heading when the graph has
@@ -1250,13 +1253,15 @@ slurp index . --force                     # replace a graph another tool wrote
 > Keep both with `-o graphify-out/slurp-graph.json`, or replace it with `--force`.
 > `slurp init` asks the same question if you decline to reuse graphify's graph.
 
-```
-Indexing /path/to/project ...
-✓ 312 nodes · 487 edges · 41 files
-  Parsers: Python (ast), TypeScript (tree-sitter), Go (regex)
-  Saved: /path/to/project/graphify-out/graph.json
+Real output, v1.2.0 on PrismaStats (the graph the retrieval figures use; the paths are placeholders):
 
-Next: slurp "your query" --graph /path/to/project/graphify-out/graph.json
+```
+Indexing /path/to/prismastats ...
+✓ 1582 nodes · 1852 edges · 185 files
+  Parsers: Python (ast) · TypeScript (tree-sitter)
+  Saved: /path/to/prismastats/graphify-out/graph.json
+
+Next: slurp "your query" --graph /path/to/prismastats/graphify-out/graph.json
 ```
 
 **What is never indexed.** Dependencies, caches and build output, wherever they sit
@@ -1438,11 +1443,13 @@ graph to update.
 
 Every tree-sitter language falls back to a regex parser when its grammar is not
 installed. The fallback extracts strictly less — it cannot nest inner classes or
-reach into method bodies — so `slurp index` always prints which parser it used:
+reach into method bodies — so `slurp index` always prints which parser it used.
+Real output, v1.2.0 on PrismaStats without the `ts` extra (with it, the same
+project indexes to 1582 nodes and 1852 edges):
 
 ```
-✓ 312 nodes · 487 edges · 41 files
-  Parsers: Python (ast) · Java (tree-sitter) · Ruby (regex fallback)
+✓ 1521 nodes · 1562 edges · 185 files
+  Parsers: Python (ast) · TypeScript (regex fallback)
   Install the 'ts' extra for full TypeScript support: uv sync --extra ts
 ```
 
