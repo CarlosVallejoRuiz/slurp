@@ -14,7 +14,7 @@ from pathlib import Path
 
 import networkx as nx
 
-from slurp.budget import DEFAULT_MIN_SCORE, build_context, count_tokens, select_subgraph
+from slurp.budget import DEFAULT_MIN_SCORE, build_context, count_tokens
 from slurp.explainer import LLMConfig, SlurpExplainError, _call_llm
 from slurp.formatter import format_subgraph
 from slurp.scorer import score_nodes
@@ -452,7 +452,7 @@ def run_retrieval_eval(
         G: The graph under test.
         questions: Questions carrying relevant_nodes.
         budget: Token budget for the subgraph.
-        min_score: Minimum score, as in select_subgraph.
+        min_score: Minimum score, as in build_context.
         model: Tiktoken encoding for token counting.
 
     Returns:
@@ -469,9 +469,12 @@ def run_retrieval_eval(
             scores = score_nodes(G, question.question)
             order = sorted(scores, key=lambda n: (-scores[n], n))
             position = {n: i + 1 for i, n in enumerate(order)}
-            subgraph, _ = select_subgraph(G, scores, budget=budget, model=model,
-                                          min_score=min_score, query=question,
-                                          token_factor=token_factor)
+            # The query text, as `slurp QUERY` prints it in the header. Until
+            # v1.1.0 the whole EvalQuestion went in, and its repr took ~60
+            # tokens of room from every question.
+            _text, subgraph, _ = build_context(G, scores, budget=budget, model=model,
+                                               min_score=min_score, query=question.question,
+                                               token_factor=token_factor)
             result.found = [n for n in relevant if n in subgraph]
             result.first_rank = min(position[n] for n in relevant if n in position)
             result.subgraph_nodes = subgraph.number_of_nodes()

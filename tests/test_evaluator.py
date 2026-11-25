@@ -548,6 +548,23 @@ class TestRetrievalEval:
         assert data["mean_recall"] == 1.0 and data["mrr"] == 1.0
         assert data["results"][0]["first_rank"] == 1
 
+    def test_selects_with_the_question_text_in_the_header(self, monkeypatch):
+        import slurp.evaluator as ev
+
+        # The header of `slurp QUERY` prints the query; the eval must print the
+        # same text, not the repr of the whole EvalQuestion (id, ground truth...),
+        # which ate ~60 tokens of room on every question.
+        seen: list = []
+        real = ev.build_context
+
+        def spy(*args, **kwargs):
+            seen.append(kwargs.get("query"))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(ev, "build_context", spy)
+        ev.run_retrieval_eval(_retrieval_graph(), [_q("a", "login user", ["auth.login"])])
+        assert seen == ["login user"]
+
     def test_cli_errors_when_no_question_matches_the_graph(self, tmp_path):
         graph = tmp_path / "g.json"
         graph.write_text(json.dumps(nx.node_link_data(_retrieval_graph(), edges="links")))
