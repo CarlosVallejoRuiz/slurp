@@ -118,6 +118,22 @@ returns is rendered and counted before it is sent. The per-component timings v0.
 listed (PageRank, token counting, greedy selection) are not repeated: they were not
 re-measured, and the greedy one gave the same 10.69 ms as the whole query.
 
+**Reproduce these figures** with `scripts/latency.py`, in a checkout of the repository
+(the script is not shipped in the package). Each run is a fresh process, so caches start
+empty:
+
+```bash
+uv run python scripts/latency.py path/to/graph.json --method both --runs 3
+
+# Another release, on the same machine and graph:
+git archive v0.7.0 slurp | tar -x -C /tmp/v070
+uv run python scripts/latency.py path/to/graph.json --method original --src /tmp/v070
+```
+
+It prints one JSON line per run and a summary with the range of each figure. Re-run on
+the same PrismaStats graph with v1.1.1: 11.35–11.55 ms by the original method, and
+9.93–10.08 ms for v0.7.0 through `--src`.
+
 **PageRank cache** — PageRank depends only on the graph, never on the query, so
 it is computed once per graph object instead of once per query.
 

@@ -562,6 +562,11 @@ lo vigila (pins, OIDC solo en publish, sin secrets, sin `${{ }}` dentro de un `r
 Nunca publicar a mano desde `dist/` local: los ficheros de la 1.0.7 que hay ahí no se
 tocan.
 
+**Latencia reproducible** (v1.1.1, #67): `scripts/latency.py GRAPH --method
+original|current|both --runs N [--src DIR]` — los dos métodos de README › Performance,
+un proceso nuevo por ejecución, `--src` para medir otro árbol (`git archive vX slurp`).
+No va en el paquete; `tests/test_latency_script.py` lo mantiene ejecutable.
+
 ```
 ~/Desktop/Slurp/slurp/         ← raíz del repo git — working directory
 ├── CLAUDE.md                  ← este fichero
