@@ -34,3 +34,12 @@ def test_versioned_build_directories_are_ignored():
     # .gitignore of uv's own beside it, so only the repository's rules apply.
     assert _git("check-ignore", "-q", "dist-9.9.9/slurp_graph-9.9.9.tar.gz").returncode == 0
     assert _git("check-ignore", "-q", "dist-9.9.9/").returncode == 0
+
+
+def test_spreadsheets_stay_out_of_the_repository():
+    # A roadmap spreadsheet sat untracked here and went into two published
+    # sdists; spreadsheets are ignored wherever they are.
+    assert _git("check-ignore", "-q", "Roadmap slurp.xlsx").returncode == 0
+    assert _git("check-ignore", "-q", "docs/plan.xlsx").returncode == 0
+    tracked = [f for f in _git("ls-files").stdout.splitlines() if f.endswith(".xlsx")]
+    assert tracked == []

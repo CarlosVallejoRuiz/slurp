@@ -17,3 +17,6 @@ skills-lock.json
 
 # macOS Finder metadata
 .DS_Store
+
+# Spreadsheets (planning documents) never belong in the repository or a release
+*.xlsx
