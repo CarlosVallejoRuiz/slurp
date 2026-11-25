@@ -1005,6 +1005,11 @@ Punto de entrada para un proyecto nuevo. No requiere flags. Secuencia:
   las capturas de CliRunner.
 - La ruta del binario en `.mcp.json` es absoluta: los clientes MCP lanzan el
   servidor sin shell de login y un `slurp` pelado dependería del PATH heredado.
+- `.slurp/` al `.gitignore` con `_ensure_gitignored`: solo si el fichero existe, sin
+  duplicar, respetando cualquier regla previa (también `!.slurp/`). **`slurp config set`
+  aplica las mismas reglas** (v1.1.1, #45) tras cada escritura de `config.json`, con
+  cualquier clave, y solo si el directorio de config se llama `.slurp` y está bajo el
+  directorio actual (`_gitignore_config_dir`): si no, la línea no lo cubriría.
 
 ---
 

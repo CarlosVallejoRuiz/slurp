@@ -719,8 +719,11 @@ saved config → environment auto-detection**, so an explicit flag is never over
 stored preference. `slurp config show` prints both what is saved and what slurp would
 actually use right now.
 
-> `api_key` is masked in all output but stored in plain text in `.slurp/config.json` — keep
-> `.slurp/` out of version control, or leave the key in an environment variable instead.
+> `api_key` is masked in all output but stored in plain text in `.slurp/config.json`, written
+> with permissions 0600. Like `slurp init`, `slurp config set` adds `.slurp/` to an existing
+> `.gitignore` that does not mention it yet; it never creates one, and a rule you wrote —
+> including `!.slurp/` — is left alone. Without a `.gitignore`, keep `.slurp/` out of
+> version control yourself, or leave the key in an environment variable instead.
 
 ---
 

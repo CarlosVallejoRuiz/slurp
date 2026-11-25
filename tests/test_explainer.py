@@ -784,6 +784,64 @@ class TestConfigCommand:
         assert "config" in res.output
 
 
+class TestConfigSetKeepsSlurpDirOutOfGit:
+    """`config set` writes .slurp/config.json, which can hold an API key: it adds
+    .slurp/ to .gitignore under the same rules as `slurp init`."""
+
+    @staticmethod
+    def _set(tmp_path, monkeypatch, *args):
+        monkeypatch.chdir(tmp_path)
+        return CliRunner().invoke(cli, ["config", "set", *args])
+
+    @pytest.mark.parametrize("key, value", [("api_key", "sk-secret-value"),
+                                            ("provider", "anthropic")])
+    def test_existing_gitignore_gains_the_entry(self, tmp_path, monkeypatch, key, value):
+        (tmp_path / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+        res = self._set(tmp_path, monkeypatch, key, value)
+        assert res.exit_code == 0, res.output
+        assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == \
+            "node_modules/\n.slurp/\n"
+        assert ".gitignore" in res.output and "sk-secret-value" not in res.output
+
+    def test_missing_trailing_newline_is_respected(self, tmp_path, monkeypatch):
+        (tmp_path / ".gitignore").write_text("dist", encoding="utf-8")
+        self._set(tmp_path, monkeypatch, "api_key", "sk-x")
+        assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == "dist\n.slurp/\n"
+
+    @pytest.mark.parametrize("existing", [".slurp/", ".slurp", "/.slurp/", "**/.slurp/",
+                                          "!.slurp/"])
+    def test_an_existing_rule_or_negation_is_left_alone(self, tmp_path, monkeypatch,
+                                                        existing):
+        original = f"build/\n{existing}\n"
+        (tmp_path / ".gitignore").write_text(original, encoding="utf-8")
+        res = self._set(tmp_path, monkeypatch, "api_key", "sk-x")
+        self._set(tmp_path, monkeypatch, "model", "m")
+        assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == original
+        assert ".gitignore" not in res.output
+
+    def test_no_gitignore_is_created(self, tmp_path, monkeypatch):
+        res = self._set(tmp_path, monkeypatch, "api_key", "sk-x")
+        assert res.exit_code == 0, res.output
+        assert not (tmp_path / ".gitignore").exists()
+
+    def test_a_config_dir_the_entry_would_not_cover_is_left_alone(self, tmp_path,
+                                                                 monkeypatch):
+        (tmp_path / "proj").mkdir()
+        (tmp_path / "proj" / ".gitignore").write_text("venv/\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path / "proj")
+        for config_dir in (tmp_path / "elsewhere" / ".slurp", tmp_path / "proj" / "cfg"):
+            res = CliRunner().invoke(cli, ["config", "set", "api_key", "sk-x",
+                                           "--config-dir", str(config_dir)])
+            assert res.exit_code == 0, res.output
+        assert (tmp_path / "proj" / ".gitignore").read_text(encoding="utf-8") == "venv/\n"
+
+    def test_a_refused_key_writes_nothing(self, tmp_path, monkeypatch):
+        (tmp_path / ".gitignore").write_text("venv/\n", encoding="utf-8")
+        res = self._set(tmp_path, monkeypatch, "bogus", "x")
+        assert res.exit_code != 0
+        assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == "venv/\n"
+
+
 def _call_graph(callers: int = 0, callees: int = 0, *, ntype: str = "function",
                 tests: int = 0) -> nx.DiGraph:
     """A graph whose `target` has the requested shape."""

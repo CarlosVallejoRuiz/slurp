@@ -279,6 +279,26 @@ def _ensure_gitignored(gitignore: Path) -> bool:
     return True
 
 
+def _gitignore_config_dir(config_dir: Path) -> bool:
+    """Add `.slurp/` to ./.gitignore after `slurp config set`, as `slurp init` does.
+
+    DECISION: config.json can hold an API key, and a user who only ever ran
+    `config set` never had init write the entry. Same rules as init (see
+    _ensure_gitignored), plus one: the entry is only written when it would
+    cover the config — a directory called .slurp at or below the current one.
+
+    Returns:
+        True if the entry was appended.
+    """
+    if config_dir.name != ".slurp":
+        return False
+    try:
+        config_dir.resolve().relative_to(Path.cwd().resolve())
+    except ValueError:
+        return False
+    return _ensure_gitignored(Path(".gitignore"))
+
+
 # DECISION: --backend anthropic is refused, not removed silently. Anthropic
 # offers no embedding model — POST /v1/embeddings answers 404 and the official
 # docs point to Voyage AI — so the backend could never have worked. A bare
@@ -1217,6 +1237,8 @@ def config_set(key: str, value: str, config_dir: str) -> None:
     shown = "********" if key == "api_key" else value
     click.echo(f"Set {key} = {shown}")
     click.echo(f"  Saved: {config_path(Path(config_dir))}")
+    if _gitignore_config_dir(Path(config_dir)):
+        click.echo("  .gitignore: added .slurp/ (the config can hold an API key)")
 
 
 @config_group.command("show")
