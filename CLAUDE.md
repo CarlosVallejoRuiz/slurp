@@ -384,9 +384,16 @@ uv sync --extra rust            # solo una
     API key a mitad de sesión da prosa sin reiniciar, y si la resolución falla
     se cae al modo estructural en vez de dar error. Resolverlo al inicio habría
     convertido `no_llm` en un flag de lanzamiento.
-  - Dos categorías de error, deliberadamente distintas: argumentos inválidos →
-    JSON-RPC `-32602`; fallo de ejecución → `isError: true` con texto legible.
-    Un fallo interno nunca mata el proceso.
+  - Dos categorías de error, deliberadamente distintas (hasta v1.2.x): argumentos
+    inválidos (también `BudgetTooSmallError` y los booleanos mal tipados) → JSON-RPC
+    `-32602`; fallo de ejecución → `isError: true` con texto legible. Un fallo interno
+    nunca mata el proceso.
+    **Cambia en la v1.3 (decisión del autor, confirmada):** con la versión de protocolo
+    negociada ≥ 2025-11-25 (y la moderna, 2026-07-28), los argumentos inválidos y
+    `BudgetTooSmallError` se devuelven como error de la herramienta (`isError: true`, mismo
+    mensaje), como pide la especificación 2025-11-25, para que el modelo pueda corregirse.
+    Un nombre de herramienta desconocido sigue siendo `-32602`, y con versiones anteriores
+    todo queda como arriba. Ver `docs/design/mcp-autonomo.md` §6 (decisión 10).
   - **`find_node()` no falla con un nodo inexistente**: cae a la puntuación por
     relevancia y devuelve el mejor candidato. `slurp_explain` solo da `isError`
     con el grafo vacío. Es comportamiento preexistente, no un defecto nuevo.

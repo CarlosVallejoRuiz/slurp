@@ -2,7 +2,7 @@
 
 **Estado:** diseño aprobado por el autor, sin implementar. Fecha: 2026-11-25.
 **Punto de partida de la implementación:** v1.2.1, que sale antes en otra sesión con tres
-arreglos que este diseño da por hechos (ver §0).
+arreglos y un cambio de compatibilidad que este diseño da por hechos (ver §0).
 **Objetivo:** usar slurp por MCP no requiere ninguna intervención del usuario. El grafo está
 siempre al día y el agente usa las herramientas sin aprobaciones.
 
@@ -49,6 +49,8 @@ Se arreglan en la **v1.2.1**, en otra sesión, antes de empezar esto:
    documentación actual de Claude Code eso es falso (ver §5.1). Prueba empírica:
    `prismastats/.claude/settings.local.json` contiene `mcp__slurp__slurp_query`, la
    aprobación manual guardada con "don't ask again".
+4. **`"slurp"` en `_SLURP_GRAPH_KEYS`** (#86). La v1.2.1 reconoce como propios los grafos con
+   manifiesto que escribirá esta versión (§9).
 
 Este diseño **extiende** el escritor atómico de la v1.2.1 con compare-and-swap y lock
 (§2.3). Para los grafos nuevos sustituye la detección de cambios por git (§2.1); el arreglo
@@ -72,7 +74,7 @@ Otros hallazgos que condicionan el diseño:
 
 | # | Pregunta | Respuesta |
 |---|---|---|
-| 1 | Dónde va el manifiesto | **Dentro de graph.json.** Las notas de la versión dirán que slurp ≤ 1.2 verá los grafos nuevos como ajenos. |
+| 1 | Dónde va el manifiesto | **Dentro de graph.json.** Las notas de la versión dirán que slurp ≤ 1.2.0 verá los grafos nuevos como ajenos (la v1.2.1 ya los reconoce, #86). |
 | 2 | Límite de espera del refresco | **2,0 s**, configurable como se propuso. |
 | 3 | `--watch` | **Reescribirlo** como bucle sobre el manifiesto, con debounce y escritura atómica, y **quitar la dependencia `watchdog`**. La comprobación de frescura bajo demanda se aplica **también a las consultas del CLI**, no solo al MCP. |
 | 4 | Grafo por defecto de `slurp init` | **El grafo propio de slurp, siempre fresco.** Mantener el de graphify sigue siendo una opción del plan. |
@@ -81,6 +83,7 @@ Otros hallazgos que condicionan el diseño:
 | 7 | Versión de protocolo | **Negociarla:** anunciar las versiones soportadas y responder con la que pida el cliente si está entre ellas (§6). |
 | 8 | Criterio de medición | **Aprobado tal cual** (§7). |
 | 9 | Prerrequisitos | El bug de `.slurpignore`, la escritura atómica y el `# DECISION` de `readOnlyHint` van en una **v1.2.1** previa. Esta implementación parte de ella. |
+| 10 | Argumentos inválidos en el MCP | **Error de la herramienta (`isError`)**, siguiendo la especificación 2025-11-25, con las versiones de protocolo ≥ 2025-11-25 y la moderna. Confirmado (§6). Sustituye la decisión "Dos categorías de error" de CLAUDE.md. |
 
 ---
 
@@ -192,7 +195,7 @@ slurp) escribió entretanto, el resultado se descarta y se recarga lo que hay en
 
 La lógica de propiedad (`_is_foreign_graph`, `_SLURP_GRAPH_KEYS`) sale de `cli.py` a un
 módulo de librería, porque la necesitan el CLI, el servidor y `--watch`. `_SLURP_GRAPH_KEYS`
-añade `"slurp"`.
+ya incluye `"slurp"` desde la v1.2.1 (#86).
 
 ### 2.3 Escritura atómica y concurrencia
 
@@ -682,7 +685,7 @@ LEGACY = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 |---|---|
 | `2025-03-26` | Debe aceptar lotes JSON-RPC (un array): se procesa cada mensaje y se responde con un array, omitiendo las notificaciones. En las demás versiones un array sigue siendo `-32600`, como hoy. |
 | ≥ `2025-06-18` | Admite `title` de primer nivel en cada herramienta (se rellena con el `annotations.title` actual). |
-| ≥ `2025-11-25` y moderna | La especificación aclara (SHOULD) que los errores de validación de entrada deben devolverse como error de ejecución de la herramienta (`isError`), para que el modelo pueda corregirse. **Propuesta derivada, a confirmar al implementar:** con estas versiones, argumentos inválidos y `BudgetTooSmallError` pasan de `-32602` a `isError`; un nombre de herramienta desconocido sigue siendo `-32602`. Cambia una decisión documentada en CLAUDE.md ("Dos categorías de error"). |
+| ≥ `2025-11-25` y moderna | La especificación aclara (SHOULD) que los errores de validación de entrada deben devolverse como error de ejecución de la herramienta (`isError`), para que el modelo pueda corregirse. **Decisión del autor (confirmada, decisión 10):** con estas versiones, argumentos inválidos y `BudgetTooSmallError` pasan de `-32602` a `isError`, con el mismo mensaje legible en el texto; un nombre de herramienta desconocido sigue siendo `-32602`. Con las versiones anteriores no cambia nada. Sustituye la decisión "Dos categorías de error" de CLAUDE.md, que ya lo recoge. |
 
 Con este cambio, los clientes dual-era (Claude Code soporta conexiones 2026-07-28) pasarán a
 hablar con slurp en la revisión moderna. Hay que probar Claude Code en las dos eras.
@@ -800,13 +803,12 @@ escribe si existe `.slurp/`):
 
 ## 9. Notas de la versión (obligatorias)
 
-- **slurp ≤ 1.2 verá los grafos nuevos como ajenos** (decisión 1): la clave `slurp` está
+- **slurp ≤ 1.2.0 verá los grafos nuevos como ajenos** (decisión 1): la clave `slurp` está
   fuera de su `_SLURP_GRAPH_KEYS`. `slurp index` de esas versiones preguntará antes de
   sobrescribir, y `--force` lo resuelve.
-  - *Aparte, para la sesión de la v1.2.1:* si la v1.2.1 añade `"slurp"` a
-    `_SLURP_GRAPH_KEYS` (una línea), la nota pasaría a decir "≤ 1.2.0". La v1.2.1
-    sobrescribiría un grafo nuevo perdiendo el manifiesto, y la versión nueva lo adoptaría
-    con un índice completo, sin pérdida de datos.
+  - La v1.2.1 ya lleva `"slurp"` en `_SLURP_GRAPH_KEYS` (#86) y los trata como propios:
+    sobrescribe un grafo nuevo perdiendo el manifiesto, y la versión nueva lo adopta con un
+    índice completo, sin pérdida de datos.
 - **`graph.json` crece** con el manifiesto (PrismaStats, unos +35 KB estimados).
 - **El MCP y las consultas del CLI refrescan el grafo y pueden reescribir `graph.json`.**
   Se desactiva con `--no-refresh` / `SLURP_REFRESH=0`, y el límite se cambia con
@@ -822,8 +824,12 @@ escribe si existe `.slurp/`):
 - **El autodescubrimiento prefiere `graphify-out/slurp-graph.json`** a
   `graphify-out/graph.json`.
 - **El servidor negocia la versión de protocolo** (2024-11-05 a 2026-07-28) y responde a
-  `server/discover`. Si se confirma la propuesta de §6, los argumentos inválidos pasan a
-  `isError` con versiones ≥ 2025-11-25.
+  `server/discover`.
+- **Con versiones de protocolo ≥ 2025-11-25, los argumentos inválidos se devuelven como error
+  de la herramienta** (`isError: true`, con el mismo mensaje) en lugar del error JSON-RPC
+  `-32602`, siguiendo la especificación 2025-11-25; también un presupuesto demasiado pequeño.
+  Un nombre de herramienta desconocido sigue siendo `-32602`, y con versiones anteriores no
+  cambia nada (§6, decisión 10).
 - **El log de sesión cambia de formato:** campos nuevos y todas las herramientas. Las
   entradas antiguas se siguen leyendo.
 
@@ -833,11 +839,11 @@ escribe si existe `.slurp/`):
 
 **Orden:**
 
-0. **v1.2.1** (otra sesión): el bug de `.slurpignore`, la escritura atómica y el
-   `# DECISION`.
+0. **v1.2.1** (otra sesión): el bug de `.slurpignore`, la escritura atómica, el
+   `# DECISION` y `"slurp"` en `_SLURP_GRAPH_KEYS` (#86).
 1. **Módulo del manifiesto:** construir y comparar, solo con la biblioteca estándar. Todos
-   los escritores lo graban. Propiedad del grafo en la librería, y `"slurp"` en
-   `_SLURP_GRAPH_KEYS`.
+   los escritores lo graban. Propiedad del grafo en la librería (`_SLURP_GRAPH_KEYS` ya
+   incluye `"slurp"`).
 2. **Refresco dirigido por el manifiesto** en `smart.py`, compartido por el CLI, el
    servidor y `--watch`. `TestSmartEquivalence` se amplía.
 3. **`write_graph`** con compare-and-swap y lock.
@@ -897,7 +903,9 @@ escribe si existe `.slurp/`):
   - `server/discover`;
   - lotes solo en 2025-03-26;
   - `ping` en las dos eras;
-  - `resultType` y `ttlMs`/`cacheScope` donde toquen.
+  - `resultType` y `ttlMs`/`cacheScope` donde toquen;
+  - argumentos inválidos y `BudgetTooSmallError`: `isError` con ≥ 2025-11-25 y la moderna,
+    `-32602` con las anteriores; herramienta desconocida: `-32602` en todas.
 - **Textos:**
   - instrucciones ≤ 4.096 caracteres y primer párrafo ≤ 512;
   - `alwaysLoad` solo en `slurp_query`;
@@ -921,7 +929,7 @@ escribe si existe `.slurp/`):
    el lock usa `msvcrt`.
 6. **Sistemas de ficheros que no actualizan el mtime de los directorios:** el retraso queda
    acotado a 30 s por la red de seguridad.
-7. **Compatibilidad del formato:** slurp ≤ 1.2 ve los grafos nuevos como ajenos (§9).
+7. **Compatibilidad del formato:** slurp ≤ 1.2.0 ve los grafos nuevos como ajenos (§9).
 8. **`readOnlyHint` junto a una escritura del grafo.** Se justifica como caché (§5.1), pero
    es discutible.
 9. **Comportamiento de Claude Code que puede cambiar:** `settings.local.json` en la raíz git,
