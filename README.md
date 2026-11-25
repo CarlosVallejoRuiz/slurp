@@ -791,9 +791,13 @@ Force it with `--no-llm` to get an offline, zero-cost explanation.
 > The LLM contributes only the prose under `EXPLANATION`; callers, callees, and blast radius
 > are facts slurp already has, so the model is explicitly told not to restate them.
 
-> Works best with graphs that include call edges (graphify). With `slurp index` graphs,
-> callers are inferred from `contains` edges — a symbol's only "caller" is the module that
-> declares it, so the risk level will read `LOW` for almost everything.
+> The risk is only as good as the graph's call edges. `slurp index` extracts them, across
+> files, for Python, TypeScript/JavaScript, Go, Java and Rust — on PrismaStats's `slurp
+> index` graph `createAdminClient` has 97 production callers and reads `HIGH` — and the
+> other eleven languages read `UNKNOWN`, not `LOW`. One gap: a React component rendered as
+> JSX (`<Badge />`) gets no `calls` edge, so most components read `LOW` in a `slurp index`
+> graph (530 of 536 in PrismaStats's `.tsx` files, imports and tests aside); PrismaStats's
+> graphify graph gives `Badge()` 16 dependants.
 
 ---
 

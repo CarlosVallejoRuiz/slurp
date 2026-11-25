@@ -326,7 +326,7 @@ slurp diff graph-v1.json graph-v2.json --viz
 slurp diff graph-v1.json graph-v2.json --budget 4000
 ```
 
-**Typical use case in PrismaStats:** after refactoring `UserModel`, run `graphify .` to regenerate the graph, then `slurp diff` to find which other nodes were affected and review the impact on functions that call it.
+**Typical use case in PrismaStats:** before refactoring `createAdminClient` (`lib/supabase/admin.ts`), keep a copy of `graph.json`; after the change, rebuild the graph (`graphify .` or `slurp index .`) and run `slurp diff` on the old and the new one to see which nodes changed and which of the functions that call it are at risk. To ask before editing, from the one graph you have, use `slurp impact lib/supabase/admin.ts`.
 
 ---
 

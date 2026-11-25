@@ -182,6 +182,10 @@ uv sync --extra rust            # solo una
       guiones igual que `_file_id` (`admin-actions` → `admin_actions`).
     - `import type {...}` y los `type X` en línea se ignoran: no existen en
       runtime, no pueden llamarse.
+    - **JSX no es una llamada** (medido en v1.2.1, #81; sin arreglar): `<Badge />` no genera
+      edge `calls`, solo `Badge()`. En un proyecto React casi todos los componentes salen
+      LOW en explain e impact con un grafo de `slurp index`: PrismaStats, 530 de 536 nodos
+      de `.tsx` (sin imports ni tests); su grafo de graphify da 16 dependientes a `Badge()`.
   - **Go** (regex-primario, sin gramática): los métodos se **anidan bajo su
     receiver** — `pkg.Struct.Method`, no `pkg.Method`. Antes el receiver se
     descartaba en un grupo no-capturador de `_GO_FUNC_RE`.
