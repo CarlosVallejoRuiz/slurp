@@ -166,8 +166,13 @@ def _assemble(G: nx.DiGraph, nodes: list[str], edges: list[tuple[str, str]]) -> 
 
 
 def _measure(sub: nx.DiGraph, render: Renderer, budget: int, nodes_total: int,
-             model: str, warning: str = "", factor: float = 1.0) -> tuple[str, dict, int, bool]:
+             model: str, warning: str = "", factor: float = 1.0,
+             left_out: tuple[int, float] | None = None) -> tuple[str, dict, int, bool]:
     """Render *sub* with stats that state its own true token count.
+
+    Args:
+        left_out: (candidates, min_score) — how many nodes cleared min_score.
+            With it, the stats split the nodes left out by cause.
 
     Returns:
         (text, stats, tokens, settled). `settled` is False when the count never
@@ -181,6 +186,15 @@ def _measure(sub: nx.DiGraph, render: Renderer, budget: int, nodes_total: int,
         "tokens_budget": budget,
         "coverage_pct": round(n / nodes_total * 100, 1) if nodes_total else 0.0,
     }
+    if left_out is not None:
+        # DECISION: two causes, counted apart, because they call for opposite
+        # fixes: a node that did not fit comes in with more budget; one below
+        # min_score never does. Until v1.1.0 the tip lumped both together as
+        # "connected nodes" and sent everyone to --budget.
+        candidates, min_score = left_out
+        stats["nodes_over_budget"] = max(0, candidates - n)
+        stats["nodes_below_min_score"] = nodes_total - candidates
+        stats["min_score"] = min_score
     if warning:
         stats["warning"] = warning
     if factor != 1.0:
@@ -211,6 +225,7 @@ def fit_to_budget(
     costs: dict[tuple, int] | None = None,
     item_cost: Callable[[tuple], int] | None = None,
     token_factor: float = 1.0,
+    left_out: tuple[int, float] | None = None,
 ) -> tuple[str, nx.DiGraph, dict]:
     """Trim *sub* until its rendered text measures at most *budget* tokens.
 
@@ -229,6 +244,9 @@ def fit_to_budget(
         item_cost: Computes a missing cost. With neither, one item goes per
             round — slower, never too many.
         token_factor: Multiplies every count (see resolve_token_factor).
+        left_out: (candidates, min_score): how many nodes of the full graph
+            cleared min_score. With it the stats carry nodes_over_budget and
+            nodes_below_min_score, which the closing tip reports.
 
     Returns:
         (text, subgraph, stats). The text measures <= budget. If trimming
@@ -251,7 +269,7 @@ def fit_to_budget(
             break  # trimmed to nothing (or given nothing): handled below
         current = _assemble(sub, nodes, edges)
         text, stats, tokens, settled = _measure(current, render, budget, nodes_total, model,
-                                                factor=token_factor)
+                                                factor=token_factor, left_out=left_out)
         if settled and tokens <= budget:
             return text, current, stats
         excess = max(1, tokens - budget)
@@ -287,14 +305,15 @@ def fit_to_budget(
     empty = nx.DiGraph()
     if not original_nodes:
         text, stats, _, _ = _measure(empty, render, budget, nodes_total, model,
-                                     factor=token_factor)
+                                     factor=token_factor, left_out=left_out)
         return text, empty, stats
     top = max(original_nodes, key=lambda n: (values.get(("n", n), 0.0), n))
     _, _, alone, _ = _measure(_assemble(sub, [top], []), render, budget, nodes_total, model,
-                              factor=token_factor)
+                              factor=token_factor, left_out=left_out)
     needed = alone + 1
     text, stats, _, _ = _measure(empty, render, budget, nodes_total, model,
-                                 _too_small_warning(budget, needed), factor=token_factor)
+                                 _too_small_warning(budget, needed), factor=token_factor,
+                                 left_out=left_out)
     stats["min_budget"] = needed
     return text, empty, stats
 
@@ -357,11 +376,13 @@ def build_context(
     _check_factor(token_factor)
     nodes_total = G.number_of_nodes()
     empty = nx.DiGraph()
+    candidates = {n for n in G.nodes if scores.get(n, 0.0) >= min_score}
+    left_out = (len(candidates), min_score)
 
     # 1. The smallest output this call can return.
     widest = _too_small_warning(budget, 10 ** 7)
     floor_text, _, floor_tokens, _ = _measure(empty, render, budget, nodes_total, model, widest,
-                                              factor=token_factor)
+                                              factor=token_factor, left_out=left_out)
     if budget < floor_tokens:
         raise BudgetTooSmallError(
             f"--budget {budget:,} is below the {floor_tokens:,} tokens the header "
@@ -369,10 +390,10 @@ def build_context(
             f"{floor_tokens:,} or more.")
 
     # 2. Greedy selection against the room the header leaves.
-    _, _, overhead, _ = _measure(empty, render, budget, nodes_total, model, factor=token_factor)
+    _, _, overhead, _ = _measure(empty, render, budget, nodes_total, model, factor=token_factor,
+                                 left_out=left_out)
     room = math.floor((budget - overhead) * (1 - _SELECTION_MARGIN))
 
-    candidates = {n for n in G.nodes if scores.get(n, 0.0) >= min_score}
     effective: dict[str, float] = {n: scores.get(n, 0.0) for n in candidates}
     values: dict[tuple, float] = {}
     costs: dict[tuple, int] = {}
@@ -432,11 +453,12 @@ def build_context(
     # 3. Measure the real text and trim until it fits.
     text, sub, stats = fit_to_budget(_assemble(G, selected, chosen_edges), budget,
                                      render, values, nodes_total, model, costs,
-                                     token_factor=token_factor)
+                                     token_factor=token_factor, left_out=left_out)
     if sub.number_of_nodes() == 0 and top_cost is not None and "min_budget" not in stats:
         needed = math.ceil((overhead + top_cost) / (1 - _SELECTION_MARGIN)) + 1
         text, stats, _, _ = _measure(empty, render, budget, nodes_total, model,
-                                     _too_small_warning(budget, needed), factor=token_factor)
+                                     _too_small_warning(budget, needed), factor=token_factor,
+                                     left_out=left_out)
         stats["min_budget"] = needed
     return text, sub, stats
 

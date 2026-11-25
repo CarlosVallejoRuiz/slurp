@@ -182,7 +182,7 @@ Real output, on a 2,111-node graph of a Next.js codebase:
 
 ```
 ╭─ Slurp — Subgraph for: "player stats" (budget: 4,000 tokens) ╮
-│ Selected 402/2111 nodes · 4,000/4,000 tokens used (19.0%)    │
+│ Selected 135/2111 nodes · 3,927/4,000 tokens used (6.4%)     │
 ╰──────────────────────────────────────────────────────────────╯
 
 ## Relevant Nodes
@@ -193,23 +193,30 @@ Real output, on a 2,111-node graph of a Next.js codebase:
 ### getPlayerStatsAdmin() · score: 0.91
 → File: lib/supabase/admin-actions.ts
 
+### updatePlayerStatsAdmin() · score: 0.91
+→ File: lib/supabase/admin-actions.ts
+
 ### PlayerStats · score: 0.91
 → File: types/database.ts
 
-### PlayerScatterPoint · score: 0.77
-→ File: lib/supabase/dashboard-actions.ts
+### PlayerStatsInsert · score: 0.91
+→ File: types/database.ts
 
-### PlayerScatter() · score: 0.76
-→ File: components/dashboard/player-scatter.tsx
+…
 
 ## Key Relationships
-- contact_route → imports → supabase_admin_createadminclient
-- supabase_admin_actions_savematchlineup → calls → supabase_admin_actions_requireadmin
-- supabase_admin_actions_savematchlineup → calls → supabase_admin_createadminclient
+- admin_page_admindashboardpage → calls → supabase_admin_actions_getadminstats
+- admin_page_admindashboardpage → calls → supabase_admin_actions_getusagestats
+- comp_home_away_stats → references → supabase_dashboard_actions_homeawaydata
+…
 
 ---
-💡 1709 additional connected nodes available — increase --budget to include them
+💡 1333 more nodes scored 0.15 or more but did not fit the budget — increase --budget to include them
+💡 643 nodes scored below the minimum score 0.15 — a bigger budget will not include them (see --min-score)
 ```
+
+The closing tip separates the two reasons a node is missing: it did not fit the
+budget (more budget brings it in), or it scored below `--min-score` (no budget will).
 
 Nodes are ordered by relevance, and each carries the score that put it there.
 A node's one-line description appears under its heading when the graph has

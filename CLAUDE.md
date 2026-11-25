@@ -692,6 +692,15 @@ relaciones: `--budget 8000` daba 19k–42k tokens reales.
 5. **Nunca vacío en silencio**: si no cabe ni un nodo (o el recorte los quita
    todos, p. ej. tras `--inject-code`), la salida es la cabecera con un aviso y
    `stats["min_budget"]` = lo que necesita el nodo de más valor, medido.
+6. **Por qué falta cada nodo** (v1.1.0, #56): las stats llevan `nodes_over_budget`
+   (puntuaron ≥ `min_score` y no cupieron), `nodes_below_min_score` y `min_score`;
+   `selected + over + below = total`. Las calcula `_measure` con `left_out=(candidatos,
+   min_score)`, así que siguen siendo ciertas tras cada recorte; quien llame a
+   `fit_to_budget` por su cuenta (el `--inject-code` del CLI) tiene que pasar
+   `left_out` o las pierde. El tip imprime una línea por causa y nunca dice
+   "connected" (antes: "1977 additional connected nodes — increase --budget" en
+   PrismaStats graphify, 672 de ellos bajo min_score). Stats hechas a mano, sin el
+   desglose, reciben un recuento neutro sin causa.
 - `select_subgraph()` devuelve `(subgrafo, stats)` del mismo cálculo; hay que
   pasar el mismo `format` y `query` a `format_subgraph` para reproducir el texto.
 - `render=` permite medir un envoltorio (lo usa `slurp export`).

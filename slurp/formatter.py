@@ -224,15 +224,41 @@ def _format_markdown(
         lines.append("")
 
     # Tip ----------------------------------------------------------------
-    excluded = stats["nodes_total"] - stats["nodes_selected"]
-    if excluded > 0:
+    if tips := _left_out_tips(stats):
         lines.append("---")
-        lines.append(
-            f"💡 {excluded} additional connected nodes available"
-            " — increase --budget to include them"
-        )
+        lines.extend(tips)
 
     return "\n".join(lines)
+
+
+def _nodes(n: int) -> str:
+    return "node" if n == 1 else "nodes"
+
+
+def _left_out_tips(stats: dict) -> list[str]:
+    """Why nodes of the graph are missing from this subgraph, one line per cause.
+
+    DECISION: a node that did not fit comes in with a bigger budget; a node
+    below min_score never does, so the two are never added up. Neither is
+    called "connected": nothing here knows whether they touch the selection.
+    Stats built by hand, without the breakdown build_context adds, get a bare
+    count that claims no cause.
+    """
+    excluded = stats["nodes_total"] - stats["nodes_selected"]
+    if excluded <= 0:
+        return []
+    if "nodes_over_budget" not in stats:
+        return [f"💡 {excluded} more {_nodes(excluded)} in the graph "
+                f"{'is' if excluded == 1 else 'are'} not in this subgraph"]
+    tips = []
+    threshold = f"{stats.get('min_score', 0):g}"
+    if over := stats["nodes_over_budget"]:
+        tips.append(f"💡 {over} more {_nodes(over)} scored {threshold} or more but did not "
+                    "fit the budget — increase --budget to include them")
+    if below := stats["nodes_below_min_score"]:
+        tips.append(f"💡 {below} {_nodes(below)} scored below the minimum score {threshold} "
+                    "— a bigger budget will not include them (see --min-score)")
+    return tips
 
 
 def _format_json(

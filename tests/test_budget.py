@@ -619,3 +619,50 @@ class TestTokenFactor:
                 load_graph(_graph_file(tmp_path)), out, session_log=False)
         text = json.loads(out.getvalue())["result"]["content"][0]["text"]
         assert math.ceil(count_tokens(text) * 2.0) <= 1500
+
+
+# ---------------------------------------------------------------------------
+# Why nodes are left out: the budget, or the minimum score
+# ---------------------------------------------------------------------------
+
+class TestLeftOutBreakdown:
+    """stats split the nodes left out by cause, and the tip reports the split."""
+
+    @staticmethod
+    def _graph_and_scores() -> tuple[nx.DiGraph, dict[str, float]]:
+        G = _line(12)
+        # n0..n7 clear the 0.15 threshold, n8..n11 do not.
+        scores = {f"n{i}": (0.9 - i * 0.05 if i < 8 else 0.1) for i in range(12)}
+        return G, scores
+
+    @pytest.mark.parametrize("fmt", FORMATS)
+    def test_counts_add_up_and_name_each_cause(self, fmt):
+        G, scores = self._graph_and_scores()
+        _text, sub, stats = build_context(G, scores, budget=250, format=fmt, query="q")
+        assert stats["min_score"] == 0.15
+        assert stats["nodes_below_min_score"] == 4
+        assert stats["nodes_over_budget"] == 8 - sub.number_of_nodes() > 0
+        assert (stats["nodes_selected"] + stats["nodes_over_budget"]
+                + stats["nodes_below_min_score"]) == stats["nodes_total"]
+
+    def test_a_generous_budget_leaves_only_the_min_score_cause(self):
+        G, scores = self._graph_and_scores()
+        text, _sub, stats = build_context(G, scores, budget=50_000, query="q")
+        assert stats["nodes_over_budget"] == 0 and stats["nodes_below_min_score"] == 4
+        tip = text.split("\n---\n")[-1]
+        assert "--budget" not in tip and "4 nodes scored below" in tip
+
+    def test_the_printed_tip_matches_the_stats_after_trimming(self, monkeypatch):
+        G, scores = self._graph_and_scores()
+        # Force the final measurement to trim: selection aims past the budget.
+        monkeypatch.setattr(budget_mod, "_SELECTION_MARGIN", -0.5)
+        text, sub, stats = build_context(G, scores, budget=300, query="q")
+        assert count_tokens(text) <= 300
+        assert stats["nodes_over_budget"] == 8 - sub.number_of_nodes()
+        assert f"{stats['nodes_over_budget']} more node" in text
+
+    def test_zero_min_score_counts_nothing_below_it(self):
+        G, scores = self._graph_and_scores()
+        _text, _sub, stats = build_context(G, scores, budget=250, min_score=0.0)
+        assert stats["nodes_below_min_score"] == 0
+        assert stats["nodes_over_budget"] == 12 - stats["nodes_selected"]

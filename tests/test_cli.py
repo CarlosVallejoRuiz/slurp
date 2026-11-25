@@ -1239,6 +1239,20 @@ class TestInjectCodeCommand:
         # Warning goes to stderr (err=True); CliRunner merges stderr into output by default
         assert "Warning" in result.output
 
+    def test_inject_code_keeps_the_left_out_breakdown(self, tmp_path):
+        # The code blocks are trimmed by a second measurement; its stats must
+        # still say why nodes are missing, or the tip loses its causes.
+        gpath, root = self._make_graph_json(tmp_path)
+        result = _runner().invoke(
+            cli, ["auth", "--graph", str(gpath), "--budget", "8000", "--inject-code",
+                  "--project-root", str(root), "--format", "json", "--no-audit"]
+        )
+        assert result.exit_code == 0, result.output
+        stats = json.loads(result.output)["stats"]
+        assert stats["min_score"] == 0.15
+        assert (stats["nodes_selected"] + stats["nodes_over_budget"]
+                + stats["nodes_below_min_score"]) == stats["nodes_total"]
+
     def test_without_inject_code_no_code_block(self, tmp_path):
         gpath, root = self._make_graph_json(tmp_path)
         result = _runner().invoke(

@@ -498,7 +498,8 @@ def run(
                 lambda sub, st: format_subgraph(sub, st, format=fmt, scores=scores, query=query),
                 _item_values(injected, scores), G.number_of_nodes(), model,
                 item_cost=lambda item: count_tokens(item_text(injected, item, fmt), model),
-                token_factor=factor)
+                token_factor=factor,
+                left_out=(stats["nodes_total"] - stats["nodes_below_min_score"], min_score))
 
     click.echo(result)
 

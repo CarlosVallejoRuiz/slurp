@@ -230,19 +230,54 @@ class TestMarkdownRelationships:
 # ---------------------------------------------------------------------------
 
 
+def _tip(out: str) -> str:
+    """The closing tip, everything after the final rule."""
+    return out.split("\n---\n")[-1] if "\n---\n" in out else ""
+
+
 class TestMarkdownTip:
+    """The tip says why nodes are missing: the budget, or the minimum score."""
+
+    @staticmethod
+    def _stats(base: dict, over: int, below: int) -> dict:
+        return {**base, "nodes_over_budget": over, "nodes_below_min_score": below,
+                "min_score": 0.15}
+
     def test_tip_shown_when_nodes_excluded(self, auth_subgraph, partial_stats):
-        out = format_subgraph(auth_subgraph, partial_stats, format="markdown")
+        out = format_subgraph(auth_subgraph, self._stats(partial_stats, 3, 1))
         assert "💡" in out
 
-    def test_tip_shows_correct_excluded_count(self, auth_subgraph, partial_stats):
-        # 7 - 3 = 4 excluded
-        out = format_subgraph(auth_subgraph, partial_stats, format="markdown")
-        assert "4 additional" in out
+    def test_nodes_that_did_not_fit_are_counted_and_point_at_the_budget(
+            self, auth_subgraph, partial_stats):
+        tip = _tip(format_subgraph(auth_subgraph, self._stats(partial_stats, 3, 1)))
+        line = next(ln for ln in tip.splitlines() if "--budget" in ln)
+        assert "3 more nodes" in line and "did not fit" in line
 
-    def test_tip_mentions_budget_flag(self, auth_subgraph, partial_stats):
-        out = format_subgraph(auth_subgraph, partial_stats, format="markdown")
-        assert "--budget" in out
+    def test_nodes_below_min_score_are_counted_apart_and_not_sent_to_the_budget(
+            self, auth_subgraph, partial_stats):
+        tip = _tip(format_subgraph(auth_subgraph, self._stats(partial_stats, 3, 1)))
+        line = next(ln for ln in tip.splitlines() if "min-score" in ln)
+        assert "1 node scored below" in line and "0.15" in line
+        assert "will not" in line  # a bigger budget cannot bring them in
+
+    def test_only_the_cause_that_applies_is_printed(self, auth_subgraph, partial_stats):
+        only_budget = _tip(format_subgraph(auth_subgraph, self._stats(partial_stats, 4, 0)))
+        assert "--budget" in only_budget and "min-score" not in only_budget
+        only_score = _tip(format_subgraph(auth_subgraph, self._stats(partial_stats, 0, 4)))
+        assert "min-score" in only_score and "increase --budget" not in only_score
+
+    def test_never_calls_left_out_nodes_connected(self, auth_subgraph, partial_stats):
+        # Nothing here knows whether they touch the selection: "connected" was a guess.
+        for over, below in ((3, 1), (4, 0), (0, 4)):
+            out = format_subgraph(auth_subgraph, self._stats(partial_stats, over, below))
+            assert "connected" not in out
+
+    def test_stats_without_the_breakdown_get_a_neutral_count(self, auth_subgraph,
+                                                             partial_stats):
+        # Hand-built stats (library callers) do not say why: claim no cause.
+        tip = _tip(format_subgraph(auth_subgraph, partial_stats))
+        assert "4 more nodes" in tip
+        assert "connected" not in tip and "--budget" not in tip
 
     def test_tip_not_shown_when_all_nodes_selected(self, auth_subgraph, full_stats):
         out = format_subgraph(auth_subgraph, full_stats, format="markdown")
@@ -457,9 +492,11 @@ class TestIntegration:
         out = format_subgraph(subG, stats, format="markdown", scores=scores)
 
         if stats["nodes_selected"] < stats["nodes_total"]:
-            excluded = stats["nodes_total"] - stats["nodes_selected"]
             assert "💡" in out
-            assert str(excluded) in out
+            if stats["nodes_over_budget"]:
+                assert f"{stats['nodes_over_budget']} more node" in out
+            if stats["nodes_below_min_score"]:
+                assert f"{stats['nodes_below_min_score']} node" in out
 
 
 # ---------------------------------------------------------------------------
