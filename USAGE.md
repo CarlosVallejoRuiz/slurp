@@ -225,6 +225,12 @@ slurp "auth flow" --ignore-file .slurpignore
 | `--inject-code` | off | Append source code block below each node (max 30 nodes). |
 | `--backend` | `tfidf` | `tfidf` (no API) or `openai` for real embeddings. `anthropic` is refused: Anthropic has no embeddings endpoint. |
 | `--no-audit` | off | Do not save this query to `.slurp/audit.jsonl`. |
+| `--include-tests` | off | Let test code compete for a place (left out by default). |
+| `--include-imports` | off | Let import nodes compete for a place (left out by default). |
+
+Test code and the `import` nodes `slurp index` writes are left out of the subgraph by
+default — the closing tip says how many — but stay in the graph, so `slurp explain`,
+`slurp impact` and `slurp diff` still count the tests, apart from production callers.
 
 ---
 
@@ -419,8 +425,8 @@ Next: slurp "your query" --graph /path/to/prismastats/graphify-out/graph.json
 `.slurpignore` is applied during indexing, so excluded nodes never enter the graph:
 
 ```
-type:import      # skip all import nodes (reduces graph size significantly)
-file:tests/**    # skip test files
+type:import      # drop import nodes from the graph itself (queries skip them anyway)
+file:tests/**    # drop test files — explain/impact/diff then stop counting tests too
 id:generated_*  # skip auto-generated code
 ```
 
@@ -486,4 +492,4 @@ Three options, from least to most aggressive:
 
 1. **Raise `--min-score`**: `--min-score 0.3` excludes low-relevance nodes before selection. Useful for broad queries like `"database"`.
 2. **Lower `--neighbor-decay`**: the default `0.7` gives neighbors of each selected node 70% of that node's score. Lowering it to `0.4` reduces context expansion around each node.
-3. **Add a `.slurpignore`**: exclude node types you know are irrelevant to your usual queries (e.g., `type:document`, `file:tests/**`).
+3. **Add a `.slurpignore`**: exclude node types you know are irrelevant to your usual queries (e.g., `type:document`). Tests and import nodes are already left out of queries by default.

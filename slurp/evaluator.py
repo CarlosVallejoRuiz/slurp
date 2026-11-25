@@ -14,6 +14,7 @@ from pathlib import Path
 
 import networkx as nx
 
+from slurp._graphutils import _left_out
 from slurp.budget import DEFAULT_MIN_SCORE, build_context, count_tokens
 from slurp.explainer import LLMConfig, SlurpExplainError, _call_llm
 from slurp.formatter import format_subgraph
@@ -247,12 +248,16 @@ def build_slurp_context(
     G: nx.DiGraph, question: str, budget: int, model: str = "cl100k_base",
     min_score: float = DEFAULT_MIN_SCORE,
     token_factor: float = 1.0,
+    include_tests: bool = False,
+    include_imports: bool = False,
 ) -> tuple[str, int]:
     """Budgeted subgraph context for one question, selected as a query would be."""
     scores = score_nodes(G, question)
     text, _subgraph, stats = build_context(G, scores, budget=budget, model=model,
                                            min_score=min_score, query=question,
-                                           token_factor=token_factor)
+                                           token_factor=token_factor,
+                                           include_tests=include_tests,
+                                           include_imports=include_imports)
     return text, stats["tokens_used"]
 
 
@@ -285,6 +290,8 @@ def run_eval(
     model: str = "cl100k_base",
     on_question: Callable[[EvalResult], None] | None = None,
     token_factor: float = 1.0,
+    include_tests: bool = False,
+    include_imports: bool = False,
 ) -> EvalSuite:
     """Answer every question twice and have a judge score both answers.
 
@@ -296,6 +303,8 @@ def run_eval(
         graph_path: Recorded for reporting; not used for retrieval.
         model: Tiktoken encoding for token counts.
         on_question: Optional callback invoked after each question, for progress.
+        include_tests: Let test nodes into the slurp context.
+        include_imports: Let import nodes into the slurp context.
 
     Returns:
         An EvalSuite. A question whose LLM or judge call fails is recorded with
@@ -314,8 +323,8 @@ def run_eval(
         result = EvalResult(question_id=question.id, question=question.question)
         try:
             slurp_context, slurp_tokens = build_slurp_context(
-                G, question.question, budget, model=model, token_factor=token_factor
-            )
+                G, question.question, budget, model=model, token_factor=token_factor,
+                include_tests=include_tests, include_imports=include_imports)
             result.tokens_with_slurp = slurp_tokens
             result.tokens_without_slurp = baseline_tokens
 
@@ -370,7 +379,10 @@ class RetrievalResult:
     relevant: list[str] = field(default_factory=list)
     found: list[str] = field(default_factory=list)      # relevant and selected
     missing: list[str] = field(default_factory=list)    # relevant but not in the graph
-    first_rank: int | None = None                        # best relevant node, by score
+    # Best relevant node, by score, among the nodes slurp may return (tests and
+    # imports left out unless let in), and among every node — the v1.1.1 rank.
+    first_rank: int | None = None
+    first_rank_all: int | None = None
     subgraph_nodes: int = 0
     tokens_used: int = 0                                 # measured size of the text sent
 
@@ -388,12 +400,18 @@ class RetrievalResult:
     def reciprocal_rank(self) -> float:
         return round(1 / self.first_rank, 4) if self.first_rank else 0.0
 
+    @property
+    def reciprocal_rank_all(self) -> float:
+        return round(1 / self.first_rank_all, 4) if self.first_rank_all else 0.0
+
     def to_dict(self) -> dict:
         return {
             "question_id": self.question_id, "question": self.question,
             "relevant": self.relevant, "found": self.found, "missing": self.missing,
-            "first_rank": self.first_rank, "subgraph_nodes": self.subgraph_nodes,
+            "first_rank": self.first_rank, "first_rank_all": self.first_rank_all,
+            "subgraph_nodes": self.subgraph_nodes,
             "tokens_used": self.tokens_used, "recall": self.recall, "reciprocal_rank": self.reciprocal_rank,
+            "reciprocal_rank_all": self.reciprocal_rank_all,
             "scorable": self.scorable,
         }
 
@@ -425,6 +443,11 @@ class RetrievalSuite:
         return EvalSuite._mean(r.reciprocal_rank for r in self.scored)
 
     @property
+    def mrr_all(self) -> float:
+        """MRR ranking every node of the graph, as until v1.1.1."""
+        return EvalSuite._mean(r.reciprocal_rank_all for r in self.scored)
+
+    @property
     def mean_tokens(self) -> float:
         """Mean measured size of the text each scored question would send."""
         tokens = [r.tokens_used for r in self.scored]
@@ -440,6 +463,7 @@ class RetrievalSuite:
             "questions_scored": len(self.scored),
             "questions_unscorable": len(self.results) - len(self.scored),
             "mean_recall": self.mean_recall, "hit_rate": self.hit_rate, "mrr": self.mrr,
+            "mrr_all": self.mrr_all,
             "mean_tokens": self.mean_tokens, "max_tokens": self.max_tokens,
             "results": [r.to_dict() for r in self.results],
         }
@@ -453,14 +477,19 @@ def run_retrieval_eval(
     model: str = "cl100k_base",
     token_factor: float = 1.0,
     format: str = "markdown",
+    include_tests: bool = False,
+    include_imports: bool = False,
 ) -> RetrievalSuite:
     """Score retrieval against each question's relevant_nodes, with no LLM.
 
     For every question the graph is scored and a subgraph selected exactly as
     `slurp QUERY` would. Recall is the share of the question's relevant nodes
     (those present in the graph) that made it into the subgraph; the reciprocal
-    rank is 1 / the position of the best-ranked relevant node in the full score
-    ordering, ties broken by node id so runs are reproducible. Each result also
+    rank is 1 / the position of the best-ranked relevant node in the score
+    ordering of the nodes slurp may return — tests and imports are left out
+    unless let in, as in selection — ties broken by node id so runs are
+    reproducible. The rank over every node, the definition until v1.1.1, is
+    reported beside it (first_rank_all, mrr_all). Each result also
     carries the measured tokens of the text that question would send in
     *format*, since the budget bounds that text and its size differs by format.
 
@@ -472,6 +501,8 @@ def run_retrieval_eval(
         model: Tiktoken encoding for token counting.
         token_factor: Multiplies every token count (see resolve_token_factor).
         format: 'markdown', 'json' or 'yaml' — the output being budgeted.
+        include_tests: Let test nodes compete, as `slurp QUERY --include-tests`.
+        include_imports: Let import nodes compete, as `--include-imports`.
 
     Returns:
         A RetrievalSuite. Questions whose relevant nodes are all absent from
@@ -486,16 +517,22 @@ def run_retrieval_eval(
         if relevant and result.scorable:
             scores = score_nodes(G, question.question)
             order = sorted(scores, key=lambda n: (-scores[n], n))
-            position = {n: i + 1 for i, n in enumerate(order)}
+            position_all = {n: i + 1 for i, n in enumerate(order)}
+            left_out = _left_out(G, include_tests, include_imports)
+            position = {n: i + 1 for i, n in enumerate(n for n in order if n not in left_out)}
             # The query text, as `slurp QUERY` prints it in the header. Until
             # v1.1.0 the whole EvalQuestion went in, and its repr took ~60
             # tokens of room from every question.
             _text, subgraph, stats = build_context(G, scores, budget=budget, model=model,
                                                    min_score=min_score, format=format,
                                                    query=question.question,
-                                                   token_factor=token_factor)
+                                                   token_factor=token_factor,
+                                                   include_tests=include_tests,
+                                                   include_imports=include_imports)
             result.found = [n for n in relevant if n in subgraph]
-            result.first_rank = min(position[n] for n in relevant if n in position)
+            result.first_rank = min((position[n] for n in relevant if n in position),
+                                    default=None)
+            result.first_rank_all = min(position_all[n] for n in relevant if n in position_all)
             result.subgraph_nodes = subgraph.number_of_nodes()
             result.tokens_used = stats["tokens_used"]
         suite.results.append(result)

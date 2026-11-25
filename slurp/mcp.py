@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TextIO
 
 from slurp import __version__
+from slurp._graphutils import _left_out, clear_left_out_cache
 from slurp.budget import (
     DEFAULT_MIN_SCORE,
     BudgetTooSmallError,
@@ -68,6 +69,33 @@ _INSTRUCTIONS = (
     "dependants, how far they reach, and which are free to touch."
 )
 
+# Tests and import nodes do not compete for a place by default (see
+# _graphutils._left_out); these let each kind back in, as the CLI flags do.
+_INCLUDE_PROPERTIES = {
+    "include_tests": {
+        "type": "boolean",
+        "default": False,
+        "description": "Let test code compete for a place (left out by default).",
+    },
+    "include_imports": {
+        "type": "boolean",
+        "default": False,
+        "description": "Let import nodes compete for a place (left out by default).",
+    },
+}
+
+
+def _include_flags(args: dict) -> tuple[bool, bool] | str:
+    """(include_tests, include_imports) from tool arguments, or the error to report."""
+    flags = []
+    for name in ("include_tests", "include_imports"):
+        value = args.get(name, False)
+        if not isinstance(value, bool):
+            return f"'{name}' must be a boolean"
+        flags.append(value)
+    return flags[0], flags[1]
+
+
 _TOOL_DEFINITION = {
     "name": "slurp_query",
     "description": (
@@ -96,6 +124,7 @@ _TOOL_DEFINITION = {
                 "description": "Maximum token budget for the result.",
                 "default": 4000,
             },
+            **_INCLUDE_PROPERTIES,
         },
         "required": ["query"],
     },
@@ -197,6 +226,7 @@ _SUGGEST_TOOL_DEFINITION = {
                 "description": "Token budget the original query used.",
                 "default": 4000,
             },
+            **_INCLUDE_PROPERTIES,
         },
         "required": ["query"],
     },
@@ -287,6 +317,7 @@ class GraphState:
         self.mtime = current
         clear_pagerank_cache()
         clear_node_token_cache()
+        clear_left_out_cache()
         return True
 
 
@@ -352,6 +383,7 @@ class FederatedGraphState(GraphState):
         self.mtime = current[0]
         clear_pagerank_cache()
         clear_node_token_cache()
+        clear_left_out_cache()
         return True
 
 
@@ -578,12 +610,20 @@ def _handle_suggest(msg_id, args: dict, G, out) -> None:
     if not isinstance(budget, int) or budget <= 0:
         _write(_err(msg_id, -32602, "'budget' must be a positive integer"), out)
         return
+    flags = _include_flags(args)
+    if isinstance(flags, str):
+        _write(_err(msg_id, -32602, flags), out)
+        return
+    include_tests, include_imports = flags
 
     try:
         scores = score_nodes(G, query)
         subG, _stats = select_subgraph(G, scores, budget=budget, min_score=_MIN_SCORE,
-                                       query=query, token_factor=resolve_token_factor())
-        text = format_suggestions(suggest_queries(G, query, scores, subG))
+                                       query=query, token_factor=resolve_token_factor(),
+                                       include_tests=include_tests,
+                                       include_imports=include_imports)
+        text = format_suggestions(suggest_queries(
+            G, query, scores, subG, exclude=_left_out(G, include_tests, include_imports)))
     except BudgetTooSmallError as exc:
         _write(_err(msg_id, -32602, str(exc)), out)
         return
@@ -766,6 +806,11 @@ def _handle(msg: dict, G, out, session_log: bool = True, state: "GraphState | No
         if not isinstance(budget, int) or budget <= 0:
             _write(_err(msg_id, -32602, "'budget' must be a positive integer"), out)
             return
+        flags = _include_flags(args)
+        if isinstance(flags, str):
+            _write(_err(msg_id, -32602, flags), out)
+            return
+        include_tests, include_imports = flags
 
         graph_reloaded = False
         if state is not None:
@@ -790,7 +835,9 @@ def _handle(msg: dict, G, out, session_log: bool = True, state: "GraphState | No
             # Read per call, like the LLM config: export SLURP_TOKEN_FACTOR in the
             # server's environment (.mcp.json "env") to budget in Claude tokens.
             text, subG, stats = build_context(G, scores, budget=budget, min_score=_MIN_SCORE,
-                                              query=query, token_factor=resolve_token_factor())
+                                              query=query, token_factor=resolve_token_factor(),
+                                              include_tests=include_tests,
+                                              include_imports=include_imports)
         except BudgetTooSmallError as exc:
             # The caller's budget argument cannot work: an invalid parameter.
             _write(_err(msg_id, -32602, str(exc)), out)

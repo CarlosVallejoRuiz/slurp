@@ -367,6 +367,19 @@ slurp "prisma models" --backend openai
 | `--backend` | `tfidf` | Scoring backend: `tfidf` (default) or `openai` (real embeddings). `anthropic` was retired in v1.0.7: Anthropic offers no embeddings endpoint. |
 | `--inject-code` | off | Embed source code blocks for each selected node (requires ≤30 nodes). |
 | `--project-root` | graph dir | Root directory for resolving `source_file` paths. |
+| `--include-tests` | off | Let test code compete for a place in the subgraph. |
+| `--include-imports` | off | Let import nodes compete for a place in the subgraph. |
+
+**Tests and imports are left out by default.** Test code (anything under a `tests/`,
+`test/`, `__tests__/` or `spec/` directory, or in a file a test runner collects — see
+[`slurp explain`](#slurp-explain)) and the `import` nodes `slurp index` writes for every
+import statement never take a place in the subgraph unless you pass `--include-tests` or
+`--include-imports`. On slurp's own graph three nodes in four are tests: they carry the
+name of what they test, outscored the code itself and filled the budget. They stay in the
+graph — PageRank still counts the calls from tests, which measured better than dropping
+them — and the closing tip says how many were left out. The same flags exist on
+`export`, `benchmark` and `eval`, and as `include_tests` / `include_imports` on the MCP
+tools `slurp_query` and `slurp_suggest`.
 
 **Auto-discovery** (when `--graph` is omitted):
 
@@ -625,7 +638,7 @@ ARCHITECTURE
 ← Calls: createAdminClient()
 
 RISK IF CHANGED: MEDIUM
-3 nodes depend on this code — 0.1% of the project.
+3 production callers — 0.1% of the project.
 Check each caller before changing the signature.
 
 EXPLORE FURTHER
@@ -633,7 +646,7 @@ EXPLORE FURTHER
   slurp explain 'deleteMatchEventAdmin'  — its most connected caller
 
 ─────────────────────────────────────────────────────────────────────
-Provider: anthropic (claude-sonnet-5) · Context: 440 tokens
+Provider: anthropic (claude-sonnet-5) · Context: 439 tokens
 ```
 
 **Without an LLM** — the model writes the prose and nothing else, so every section below
@@ -653,7 +666,7 @@ depends on createAdminClient(). Relevance to your query: 0.910.
 ... CONTEXT, ARCHITECTURE, RISK and EXPLORE FURTHER exactly as above ...
 
 ─────────────────────────────────────────────────────────────────────
-Provider: structural · Context: 440 tokens
+Provider: structural · Context: 439 tokens
 ```
 
 The role is read off the graph: more than ten callers make a **central utility**, many
@@ -664,6 +677,14 @@ sixty-two dependants. A test file is one a test runner would collect: anything u
 `tests/`, `test/`, `__tests__/` or `spec/` directory (or a .NET `*.Tests` project), a file
 named like `test_*.py`, `*_test.go`, `*.spec.ts` or `*Test.java`, and Rust's
 `mod tests`; `latest_results.py` is not one.
+
+The risk band counts production callers only — the same rule `slurp impact` and
+`slurp diff` use, so the three always agree. Tests get their own line under
+ARCHITECTURE (`→ Tested by: 72 tests in 6 files`) and in the risk summary
+(`10 production callers, 72 in tests`). A node that only tests call is LOW but never
+called safe: `No production callers · 12 tests call it — update them if you change its
+behaviour.` A free-text `slurp explain` never lands on a test or an import node; name
+one exactly and you get it.
 
 
 | Flag | Default | Description |
@@ -787,9 +808,10 @@ a review checklist, or your AI assistant:
 ## Summary
 - **✅ Low impact change**
 - **Impact score:** 0.1184 (🟢 low) — 1 production caller reached
+- 14 tests in 8 files touch the change
 - 1 nodes added · 1 removed · 0 modified
 - 2 edges added · 17 removed
-- 17 nodes in risk neighborhood
+- 3 nodes in risk neighborhood
 
 ## Added Nodes (1)
 
@@ -819,29 +841,29 @@ Direct neighbors of changed nodes:
 
 - build_context (function) · centrality: 0.0058
 - budget (module) · centrality: 0.0031
-- _fed_html (function) · centrality: 0.0013
 - _handle_suggest (function) · centrality: 0.0012
-- test_audit_custom_audit_dir (function) · centrality: 0.0011
-- …
 
 ## What to review
 Most connected nodes in the blast radius — review these first:
 
-1. _runner (function) · centrality: 0.0222 · tests/test_cli.py
-2. load_graph (function) · centrality: 0.0126 · slurp/loader.py
-3. diff_graphs (function) · centrality: 0.0107 · slurp/diff.py
-4. score_nodes (function) · centrality: 0.0103 · slurp/scorer.py
-5. cli (module) · centrality: 0.0092 · slurp/cli.py
+1. load_graph (function) · centrality: 0.0126 · slurp/loader.py
+2. diff_graphs (function) · centrality: 0.0107 · slurp/diff.py
+3. score_nodes (function) · centrality: 0.0103 · slurp/scorer.py
+4. cli (module) · centrality: 0.0092 · slurp/cli.py
+5. format_subgraph (function) · centrality: 0.0090 · slurp/formatter.py
 ```
 
 > The change above renames `select_subgraph` in slurp v1.1.0 without touching its
-> callers: seventeen edges go, but fifteen of them are tests and one is the module that
-> contains it, so one production caller is left broken (`mcp._handle_suggest`) and the
-> score is low. Until v1.0.7 the same kind of rename scored 0.0048 whatever it broke:
-> the score was a share of the whole graph. Since v1.1.0 it counts callers — see below.
-> The risk neighbourhood lists every node the deleted function touched, tests included,
-> read from the old graph where it still exists; until v1.1.1 it was looked up in the
-> new graph, so the same report listed 2 nodes at risk and none of its callers.
+> callers: seventeen edges go — fourteen from tests, one from the module that contains
+> it, one its own call to `build_context` — so one production caller is left broken
+> (`mcp._handle_suggest`) and the score is low. Until v1.0.7 the same kind of rename
+> scored 0.0048 whatever it broke: the score was a share of the whole graph. Since
+> v1.1.0 it counts callers — see below. The risk neighbourhood is read from the old graph
+> where the deleted function still exists (until v1.1.1 it was looked up in the new
+> graph and listed none of its callers), and since v1.2 it holds production code only:
+> the fourteen tests get one line in the summary, and neither they nor import nodes
+> appear among the nodes at risk or to review (v1.1.1 listed 17 at risk, `_runner`
+> first to review).
 
 The run finishes with a colour-coded summary panel and, if you did not pass
 `--viz`, the exact command to see the full picture:
@@ -877,7 +899,8 @@ slurp diff old.json new.json --viz-output reports/impact.html
 
 Impact score counts what could break: the distinct production callers of every
 deleted node, and of every node whose label, type or outgoing calls changed
-(tests and containing modules do not count). It is `1 − e^(−D/k)`, with the scale
+(tests, containing modules and import nodes do not count, and adding or dropping an
+import is not a change in what a node calls). It is `1 − e^(−D/k)`, with the scale
 and bands derived from the same thresholds `slurp impact` and `slurp explain` use,
 so the three always agree: 6+ callers is high, 2–5 medium, 0–1 low. Deleting a
 function with 97 callers scores 1.00 (high); adding an uncalled one scores 0. If a
@@ -941,7 +964,7 @@ slurp impact lib/supabase/admin.ts --graph graph.json
 ╰───────────────────────────────────────────────╯
 
 HIGHEST RISK NODE
-  createAdminClient() — 130 direct dependents (6.2% of codebase)
+  createAdminClient() — 130 production dependents (6.2% of codebase)
 
 AFFECTED FILES (top 10)
   lib/supabase/admin-actions.ts       31 dependents
@@ -955,12 +978,18 @@ RECOMMENDATION
   Add integration tests before editing. 130 nodes depend on functions in this file.
 
 ─────────────────────────────────────────────────────────────────────
-Direct: 130 · Transitive: 48 · Impact score: 0.0843
+Direct: 130 · Transitive: 48 · Tests: 0 · Impact score: 0.0843
 ```
 
-A **SAFE TO EDIT** block lists the definitions in the file that nothing depends on at all —
-the other half of the question. A node called only from inside the same file is not listed
-there: contained is not the same as safe.
+The risk, the dependents and the affected files count production code only, as in
+`slurp explain` and `slurp diff`. Tests that call into the file get their own block —
+`TESTS — 58 tests in 10 files call into this file`, with the files that hold most — and
+import nodes are not counted as definitions. A **SAFE TO EDIT** block lists the
+definitions in the file that nothing calls at all, not even a test — the other half of
+the question. A node only tests call is listed under **NO PRODUCTION CALLERS** instead:
+LOW, but its tests break if it changes. A node called only from inside the same file is
+in neither: contained is not the same as safe. `--output json` carries `safe_nodes`,
+`test_only_nodes`, `test_dependents` and `test_files`.
 
 **Risk is `UNKNOWN` when the file's language has no call graph.** slurp extracts calls
 for Python, TypeScript/JavaScript, Go, Java and Rust; the other eleven languages get
@@ -1166,6 +1195,14 @@ Quality/token baseline: 0.000012
 | `--retrieval` | off | No LLM: for each question, the share of its `relevant_nodes` inside the selected subgraph (recall) and 1/rank of the best one by score (MRR). Same selection settings as `slurp QUERY`; questions whose nodes are not in the graph are reported, not scored. Each question also reports the measured tokens of the text it would send. |
 | `--min-score` | `0.15` | Minimum score for `--retrieval` (the shared default). |
 | `--format`, `-f` | `markdown` | Format the `--retrieval` subgraph is budgeted and measured in (`markdown`, `json`, `yaml`). Refused without `--retrieval`: the LLM eval sends markdown. |
+| `--include-tests`, `--include-imports` | off | Let tests / import nodes compete, as in `slurp QUERY`. |
+
+**MRR counts the nodes slurp can return.** Since v1.2 the rank of a relevant node is its
+position among the nodes selection may pick — tests and import nodes left out unless let
+in — because that is the order a reader meets them in. The rank over every node, the
+definition until v1.1.1, is reported beside it (`mrr_all`, `first_rank_all`, and a second
+figure in the panel when they differ). A relevant node that is itself a test or an import
+cannot be found with the defaults: it scores recall 0 and no rank.
 
 Each question costs **three LLM calls** (answer with slurp, answer from the full graph,
 judge). The built-in set of 15 questions is therefore 45 calls; budget accordingly. The
@@ -1514,10 +1551,10 @@ another; see [Choosing a budget](#choosing-a-budget).
 
 | Tool | Answers | Claude Code reaches for it when… |
 |---|---|---|
-| `slurp_query(query, budget=4000)` | *Where is the code that does X?* | it needs to orient itself in an unfamiliar codebase, or find the code behind a feature — before reading any files |
+| `slurp_query(query, budget=4000, include_tests=false, include_imports=false)` | *Where is the code that does X?* | it needs to orient itself in an unfamiliar codebase, or find the code behind a feature — before reading any files |
 | `slurp_explain(node_name, no_llm=true)` | *What is this, and what breaks if I change it?* | a query has pointed it at a function and it is about to modify it. Structural by default: no API key, no cost |
 | `slurp_diff(old_graph, new_graph, hops=2)` | *What does this change affect?* | it is reviewing a change or preparing a merge and needs the blast radius |
-| `slurp_suggest(query, budget=4000)` | *What else should I look at?* | an answer felt incomplete and it wants the queries that would reach what the budget left out |
+| `slurp_suggest(query, budget=4000, include_tests=false, include_imports=false)` | *What else should I look at?* | an answer felt incomplete and it wants the queries that would reach what the budget left out |
 | `slurp_impact(file_path, hops=2)` | *What breaks if I edit this file?* | it is about to edit a file and wants the blast radius first — no second snapshot required |
 
 All five are declared `readOnlyHint` and `idempotentHint`, so clients can auto-approve
@@ -1602,6 +1639,38 @@ Pass a custom path with `--ignore-file path/to/.slurpignore`.
 - ✅ **v1.0.7** — `slurp index --smart` always produces the graph a full index builds (it records the build commit, stays incremental for edits inside function bodies, and runs a full index when files, definitions or imports change); risk is `UNKNOWN`, never "safe", for the eleven languages without a call graph; `--backend anthropic` is refused (Anthropic has no embeddings endpoint); the viz stops its physics as soon as the layout settles; projects inside a `build/` or `vendor/` folder index normally, and an empty index says why
 - ✅ **v1.1.0** — The token budget bounds the text actually sent, measured; `slurp eval --retrieval` scores recall and MRR with no LLM and reports the tokens each answer costs; `--token-factor` for models that do not tokenize like tiktoken; one `--min-score` default everywhere; `slurp diff` rates impact by the callers a change reaches; the closing tip says why nodes are missing; savings are measured or not shown; releases go to PyPI by trusted publishing
 - ✅ **v1.1.1** — Maintenance: `slurp index` skips the build output of web frameworks (`.next/`, `.nuxt/`, `.svelte-kit/`, `.turbo/`, `.vercel/`, `.output/`, and `out/` when it holds a Next.js static export) and prunes skipped directories instead of walking them (PrismaStats: 4.9 s → 0.5 s, 214 fewer nodes of compiled `.next/` code); `slurp diff` reads a deleted node's risk neighbourhood from the old graph, where it still exists; `slurp config set` adds `.slurp/` to `.gitignore` as `slurp init` does; `scripts/latency.py` reproduces the Performance figures; the sdist ships only the package, its docs and the MIT `LICENSE`, which the wheel now carries too
+
+### Upgrading to v1.2 (in development, unreleased)
+
+What changes if you already use slurp:
+
+- **Tests and import nodes no longer take a place in a query's subgraph.** `slurp QUERY`,
+  `export`, `benchmark`, `eval`, the MCP `slurp_query` and `slurp_suggest`, and the
+  library's `build_context` / `select_subgraph` leave them out by default;
+  `--include-tests` / `--include-imports` (`include_tests` / `include_imports`) let them
+  back in. The closing tip counts them, and JSON/YAML stats carry
+  `nodes_excluded_tests` / `nodes_excluded_imports` when there are any. PageRank still
+  sees them, so the scores do not change.
+- **Risk bands count production callers only, in `slurp explain` and `slurp impact`,**
+  as `slurp diff` already did. Until v1.1.1 explain and impact added the tests in. On
+  slurp's own graph 137 nodes change band in `slurp explain` — 69 from HIGH to LOW, 34
+  from MEDIUM to LOW, 34 from HIGH to MEDIUM; on PrismaStats, which has almost no tests,
+  none do. A CI gate on `slurp impact --output json`'s `risk_level` sees the same
+  change: `direct_dependents`, `transitive_dependents`, `affected_files` and
+  `impact_score` are production-only, and the tests move to `test_dependents` /
+  `test_files`.
+- **SAFE TO EDIT means nothing calls it, not even a test.** A definition only tests call
+  is now `test_only_nodes` in `slurp impact` (LOW, listed apart), not `safe_nodes`.
+- **Import nodes are never dependants.** `slurp diff` no longer counts the module that
+  declared a removed import as a caller, and `slurp impact` no longer counts imports as
+  definitions of the file (slurp's `budget.py`: 29 → 19).
+- **`slurp eval --retrieval`'s MRR ranks the nodes slurp can return.** The v1.1.1 figure,
+  which ranked every node, is `mrr_all`. On the 8 tuning questions of slurp's own graph
+  the scores are unchanged, so the whole MRR change there — 0.335 to 0.573 — is the new
+  definition; the recall change — 0.750 to 1.000 at 4000 in markdown — is the selection.
+- `_is_test` follows the conventions of each language's test runner instead of a
+  substring of the path: `latest_results.py` is no longer a test, `contests/` and
+  `lib/respec/` are not either, and a production `test_connection()` is production.
 
 ### Upgrading to v1.1.0
 

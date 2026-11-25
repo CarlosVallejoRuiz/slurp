@@ -258,7 +258,27 @@ def _left_out_tips(stats: dict) -> list[str]:
     if below := stats["nodes_below_min_score"]:
         tips.append(f"💡 {below} {_nodes(below)} scored below the minimum score {threshold} "
                     "— a bigger budget will not include them (see --min-score)")
+    if kinds := _left_out_kinds_tip(stats):
+        tips.append(kinds)
     return tips
+
+
+def _left_out_kinds_tip(stats: dict) -> str:
+    """The tests and imports that did not compete, and the flags that let them in."""
+    tests = stats.get("nodes_excluded_tests", 0)
+    imports = stats.get("nodes_excluded_imports", 0)
+    if not tests and not imports:
+        return ""
+    parts, flags = [], []
+    if tests:
+        parts.append(f"{tests} test {_nodes(tests)}")
+        flags.append("--include-tests")
+    if imports:
+        parts.append(f"{imports} import {_nodes(imports)}")
+        flags.append("--include-imports")
+    one = tests + imports == 1
+    return (f"💡 {' and '.join(parts)} {'is' if one else 'are'} left out by default — "
+            f"{' / '.join(flags)} to let {'it' if one else 'them'} compete")
 
 
 def _format_json(

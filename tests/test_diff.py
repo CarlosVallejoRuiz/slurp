@@ -1085,3 +1085,88 @@ class TestRiskNeighbourhoodOfRemovedNodes:
                     None, buf, session_log=False)
         text = json.loads(buf.getvalue())["result"]["content"][0]["text"]
         assert "- 3 nodes in risk neighborhood" in text
+
+
+# ---------------------------------------------------------------------------
+# Tests apart, imports never dependants (v1.2, #20/#59)
+# ---------------------------------------------------------------------------
+
+def _tested_hub(callers: int, tests: int) -> nx.DiGraph:
+    G = _hub_graph(callers)
+    for i in range(tests):
+        G.add_node(f"t{i}", label=f"test_hub_{i}", type="function",
+                   source_file=f"tests/test_hub{i % 2}.ts")
+        G.add_edge(f"t{i}", "hub", relation="calls")
+    return G
+
+
+class TestImportsAreNeverDependants:
+    def test_removing_an_import_reaches_no_one(self):
+        # Until v1.2 the module that declared `import os` counted as one
+        # production caller of the import node it lost.
+        G = _hub_graph(0)
+        G.add_node("app", label="app.ts", type="module", source_file="app/app.ts")
+        G.add_node("app.import_os", label="os", type="import", source_file="app/app.ts")
+        G.add_edge("app", "app.import_os", relation="imports_from")
+        d = diff_graphs(G, _without(G, "app.import_os"))
+        assert d.dependents == [] and d.impact_score == 0.0
+
+    def test_adding_an_import_does_not_change_what_a_function_calls(self):
+        G = _hub_graph(3)
+        H = G.copy()
+        H.add_node("hub.import_os", label="os", type="import", source_file="lib/hub.ts")
+        H.add_edge("hub", "hub.import_os", relation="imports_from")
+        d = diff_graphs(G, H)
+        assert d.dependents == []
+
+
+class TestTestsTouchingTheChange:
+    def test_tests_are_counted_apart(self):
+        G = _tested_hub(callers=2, tests=3)
+        d = diff_graphs(G, _without(G, "hub"))
+        assert d.dependents == ["c0", "c1"]
+        assert d.test_dependents == ["t0", "t1", "t2"]
+
+    def test_the_summary_names_them(self):
+        G = _tested_hub(callers=2, tests=3)
+        new = _without(G, "hub")
+        out = format_diff(diff_graphs(G, new), new)
+        assert "- 3 tests in 2 files touch the change" in out
+
+    def test_no_line_without_tests(self):
+        G = _hub_graph(2)
+        new = _without(G, "hub")
+        assert "touch the change" not in format_diff(diff_graphs(G, new), new)
+
+    def test_the_risk_neighbourhood_and_the_review_list_hold_production_only(self):
+        G = _tested_hub(callers=2, tests=3)
+        G.add_node("hub.import_os", label="os", type="import", source_file="lib/hub.ts")
+        G.add_edge("hub", "hub.import_os", relation="imports_from")
+        new = G.copy()
+        new.nodes["hub"]["label"] = "hubRenamed"
+        d = diff_graphs(G, new)
+        out = format_diff(d, new)
+        assert "- 2 nodes in risk neighborhood" in out
+        at_risk = out.split("## Nodes at Risk")[1].split("\n## ")[0]
+        review = out.split("## What to review")[1]
+        for section in (at_risk, review):
+            assert "test_hub" not in section and "(import)" not in section
+        assert "test_hub" not in str(sorted(affected_subgraph(new, d).nodes))
+
+    def test_removed_neighbours_hold_production_only(self):
+        G = _tested_hub(callers=2, tests=3)
+        d = diff_graphs(G, _without(G, "hub"))
+        assert d.removed_neighbors == ["c0", "c1"]
+
+
+class TestExplainImpactAndDiffAgreeWithTests:
+    """The same node with production callers and tests: one band everywhere."""
+
+    @pytest.mark.parametrize(("callers", "tests"), [(0, 12), (1, 74), (3, 10), (7, 74)])
+    def test_same_band_everywhere(self, callers, tests):
+        from slurp.explainer import _risk_level
+        from slurp.impact import analyze_impact
+
+        G = _tested_hub(callers, tests)
+        diff_band = impact_severity(diff_graphs(G, _without(G, "hub")).impact_score).upper()
+        assert diff_band == analyze_impact(G, "lib/hub.ts").risk_level == _risk_level(G, "hub")

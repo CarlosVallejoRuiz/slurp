@@ -142,15 +142,19 @@ def measure(graph: Path, questions: list[dict], budget: int, fmt: str, src: Path
                  "--budget", str(budget), "--format", fmt, "--output", str(out))
     if res.returncode != 0:
         if "relevant_nodes exist" in res.stderr:   # none of them is in this graph
-            return {"questions_scored": 0, "recall": None, "mrr": None, "hit_rate": None,
-                    "mean_tokens": None, "tokens_per_node": None, "results": []}
+            return {"questions_scored": 0, "recall": None, "mrr": None, "mrr_all": None,
+                    "hit_rate": None, "mean_tokens": None, "tokens_per_node": None,
+                    "results": []}
         raise SystemExit(f"slurp eval --retrieval failed:\n{res.stderr}")
     suite = json.loads(out.read_text(encoding="utf-8"))
     scored = [r for r in suite["results"] if r["scorable"]]
     nodes = sum(r["subgraph_nodes"] for r in scored)
     return {
         "questions_scored": suite["questions_scored"],
-        "recall": suite["mean_recall"], "mrr": suite["mrr"], "hit_rate": suite["hit_rate"],
+        "recall": suite["mean_recall"], "mrr": suite["mrr"],
+        # Until v1.1.1 the eval ranked every node, so its "mrr" is this one.
+        "mrr_all": suite.get("mrr_all", suite["mrr"]),
+        "hit_rate": suite["hit_rate"],
         "mean_tokens": suite["mean_tokens"],
         "tokens_per_node": round(sum(r["tokens_used"] for r in scored) / nodes, 1) if nodes
         else None,
@@ -163,11 +167,13 @@ def _fmt(value: float | None, digits: int = 3) -> str:
 
 
 def print_table(rows: list[dict]) -> None:
-    print("| Project | Group | Format | Budget | n | Recall | MRR | Hit | Tokens | Tok/node |")
-    print("|---|---|---|---|---|---|---|---|---|---|")
+    print("| Project | Group | Format | Budget | n | Recall | MRR | MRR all nodes | Hit "
+          "| Tokens | Tok/node |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|")
     for r in rows:
         print(f"| {r['project']} | {r['group']} | {r['format']} | {r['budget']} | "
               f"{r['questions_scored']} | {_fmt(r['recall'])} | {_fmt(r['mrr'])} | "
+              f"{_fmt(r['mrr_all'])} | "
               f"{_fmt(r['hit_rate'])} | {_fmt(r['mean_tokens'], 0)} | "
               f"{_fmt(r['tokens_per_node'], 1)} |")
 

@@ -2398,3 +2398,94 @@ class TestVizSavingsBadge:
         html = out.read_text(encoding="utf-8")
         assert "Saved" not in html
         assert "0/0 tokens" not in html
+
+
+# ---------------------------------------------------------------------------
+# Tests and import nodes are left out of selection unless let in
+# ---------------------------------------------------------------------------
+
+def _left_out_graph_json(tmp_path: Path) -> Path:
+    """Production code, a test and an import that all match "login user"."""
+    nodes = [
+        {"id": "auth.login_user", "label": "login_user", "type": "function",
+         "source_file": "auth.py"},
+        {"id": "auth.charge", "label": "charge", "type": "function", "source_file": "auth.py"},
+        {"id": "tests.test_auth.test_login_user", "label": "test_login_user",
+         "type": "function", "source_file": "tests/test_auth.py"},
+        {"id": "app.import_login_user", "label": "auth.login_user", "type": "import",
+         "source_file": "app.py"},
+    ]
+    links = [{"source": "tests.test_auth.test_login_user", "target": "auth.login_user",
+              "relation": "calls"},
+             {"source": "auth.login_user", "target": "auth.charge", "relation": "calls"}]
+    path = tmp_path / "graph.json"
+    path.write_text(json.dumps({"nodes": nodes, "links": links}))
+    return path
+
+
+class TestTestsAndImportsLeftOut:
+    TEST_HEADING = "### test_login_user (function)"
+    IMPORT_HEADING = "### auth.login_user (import)"
+
+    def _query(self, tmp_path, *flags: str) -> str:
+        res = _runner().invoke(cli, ["login user", "--graph", str(_left_out_graph_json(tmp_path)),
+                                     "--no-audit", *flags])
+        assert res.exit_code == 0, res.output
+        return res.output
+
+    def test_left_out_by_default_and_said_so(self, tmp_path):
+        out = self._query(tmp_path)
+        assert "### login_user (function)" in out
+        assert self.TEST_HEADING not in out and self.IMPORT_HEADING not in out
+        assert ("💡 1 test node and 1 import node are left out by default — "
+                "--include-tests / --include-imports to let them compete") in out
+
+    def test_each_flag_lets_its_kind_in(self, tmp_path):
+        tests = self._query(tmp_path, "--include-tests")
+        assert self.TEST_HEADING in tests and self.IMPORT_HEADING not in tests
+        assert "1 import node is left out by default — --include-imports" in tests
+        imports = self._query(tmp_path, "--include-imports")
+        assert self.IMPORT_HEADING in imports and self.TEST_HEADING not in imports
+        both = self._query(tmp_path, "--include-tests", "--include-imports")
+        assert self.TEST_HEADING in both and self.IMPORT_HEADING in both
+        assert "left out by default" not in both
+
+    def test_json_stats_carry_the_counts(self, tmp_path):
+        out = self._query(tmp_path, "--format", "json")
+        stats = json.loads(out[out.index("{"):])["stats"]
+        assert stats["nodes_excluded_tests"] == 1 and stats["nodes_excluded_imports"] == 1
+
+    def test_export_takes_both_flags(self, tmp_path):
+        graph = str(_left_out_graph_json(tmp_path))
+        default = _runner().invoke(cli, ["export", "login user", "--graph", graph])
+        assert default.exit_code == 0, default.output
+        assert "test_login_user" not in default.output
+        let_in = _runner().invoke(cli, ["export", "login user", "--graph", graph,
+                                        "--include-tests", "--include-imports"])
+        assert let_in.exit_code == 0, let_in.output
+        assert "test_login_user" in let_in.output
+
+    def test_benchmark_takes_both_flags(self, tmp_path):
+        graph = str(_left_out_graph_json(tmp_path))
+        out = tmp_path / "b.json"
+        counts = []
+        for flags in ([], ["--include-tests", "--include-imports"]):
+            res = _runner().invoke(cli, ["benchmark", "--graph", graph, "-q", "login user",
+                                         "--budget", "4000", "-o", str(out), *flags])
+            assert res.exit_code == 0, res.output
+            counts.append(json.loads(out.read_text())["rows"][0]["nodes_selected"])
+        assert counts == [2, 4]
+
+    def test_inject_code_keeps_every_cause_after_trimming(self, tmp_path):
+        graph = _left_out_graph_json(tmp_path)
+        (tmp_path / "auth.py").write_text("def login_user():\n    return charge()\n\n\n"
+                                          "def charge():\n    return 1\n")
+        data = json.loads(graph.read_text())
+        for node, line in (("auth.login_user", "L1"), ("auth.charge", "L5")):
+            next(n for n in data["nodes"] if n["id"] == node)["source_location"] = line
+        graph.write_text(json.dumps(data))
+        res = _runner().invoke(cli, ["login user", "--graph", str(graph), "--no-audit",
+                                     "--inject-code", "--project-root", str(tmp_path)])
+        assert res.exit_code == 0, res.output
+        assert "def login_user" in res.output
+        assert "1 test node and 1 import node are left out by default" in res.output

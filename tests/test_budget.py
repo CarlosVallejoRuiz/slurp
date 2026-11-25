@@ -14,8 +14,12 @@ from slurp.budget import (
     build_context,
     clear_node_token_cache,
     count_tokens,
+    fit_to_budget,
+    full_graph_tokens,
+    left_out_from_stats,
     select_subgraph,
 )
+from slurp._graphutils import _left_out
 from slurp.formatter import format_subgraph, item_text
 
 FORMATS = ("markdown", "json", "yaml")
@@ -124,7 +128,9 @@ def _random_graph(rng: random.Random, n: int) -> nx.DiGraph:
     for i in range(n):
         desc = " ".join(rng.choice(words) for _ in range(rng.randint(0, 25)))
         attrs = {"label": f"{rng.choice(words)}_{i}", "description": desc}
-        if rng.random() < 0.5:
+        if rng.random() < 0.15:
+            attrs["source_file"] = f"tests/test_{rng.choice(words)}_{i}.py"
+        elif rng.random() < 0.5:
             attrs["source_file"] = f"lib/{rng.choice(words)}/{i}.ts"
         elif rng.random() < 0.5:
             attrs["file_path"] = f"src/{i}.py"
@@ -149,16 +155,22 @@ class TestBudgetGuarantee:
         query = " ".join(rng.sample(["auth", "user", "player stats", "db pool", "zzz"], 2))
         scores = {n: rng.random() for n in G.nodes}
         fmt = FORMATS[seed % 3]
+        flags = {"include_tests": rng.random() < 0.3, "include_imports": rng.random() < 0.3}
         for b in (rng.randint(150, 400), rng.randint(400, 3000), rng.randint(3000, 20000)):
             try:
                 text, sub, stats = build_context(G, scores, b, min_score=rng.choice([0.0, 0.3]),
-                                                 format=fmt, query=query)
+                                                 format=fmt, query=query, **flags)
             except BudgetTooSmallError:
                 continue
+            # The closing tip, its line on tests and imports included, is text too.
             assert count_tokens(text) <= b
             assert count_tokens(text) == stats["tokens_used"]
             assert stats["nodes_selected"] == sub.number_of_nodes()
             assert stats["tokens_budget"] == b
+            assert not set(sub.nodes) & _left_out(G, **flags)
+            assert (stats["nodes_selected"] + stats["nodes_over_budget"]
+                    + stats["nodes_below_min_score"] + stats.get("nodes_excluded_tests", 0)
+                    + stats.get("nodes_excluded_imports", 0)) == stats["nodes_total"]
             # select_subgraph + format_subgraph reproduce the same text.
             sub2, stats2 = select_subgraph(G, scores, b, min_score=0.0, format=fmt, query=query)
             assert count_tokens(_render(sub2, stats2, fmt, scores, query)) <= b
@@ -666,3 +678,126 @@ class TestLeftOutBreakdown:
         _text, _sub, stats = build_context(G, scores, budget=250, min_score=0.0)
         assert stats["nodes_below_min_score"] == 0
         assert stats["nodes_over_budget"] == 12 - stats["nodes_selected"]
+
+
+# ---------------------------------------------------------------------------
+# Tests and import nodes do not compete for a place by default
+# ---------------------------------------------------------------------------
+
+def _with_tests_and_imports() -> tuple[nx.DiGraph, dict[str, float]]:
+    """Production code, a test that names it, and an import of it, all scored high."""
+    G = nx.DiGraph()
+    nodes = {
+        "lib.budget.select": ("select", "function", "lib/budget.py", 0.80),
+        "lib.budget.helper": ("helper", "function", "lib/budget.py", 0.40),
+        "lib.other.unrelated": ("unrelated", "function", "lib/other.py", 0.50),
+        "lib.other.reached": ("reached", "function", "lib/other.py", 0.30),
+        "tests.test_budget.test_select": ("test_select", "function",
+                                          "tests/test_budget.py", 0.95),
+        "lib.cli.import_select": ("lib.budget.select", "import", "lib/cli.py", 0.90),
+        "tests.test_budget.import_select": ("lib.budget.select", "import",
+                                            "tests/test_budget.py", 0.90),
+    }
+    for nid, (label, ntype, path, _) in nodes.items():
+        G.add_node(nid, label=label, type=ntype, source_file=path)
+    G.add_edge("lib.budget.select", "lib.budget.helper", relation="calls")
+    G.add_edge("tests.test_budget.test_select", "lib.budget.select", relation="calls")
+    G.add_edge("tests.test_budget.test_select", "lib.other.reached", relation="calls")
+    G.add_edge("lib.cli.import_select", "lib.budget.select", relation="calls")
+    return G, {nid: v[3] for nid, v in nodes.items()}
+
+
+class TestTestsAndImportsLeftOut:
+    TESTS = {"tests.test_budget.test_select", "tests.test_budget.import_select"}
+    IMPORTS = {"lib.cli.import_select", "tests.test_budget.import_select"}
+
+    def test_they_never_take_a_place_by_default(self):
+        G, scores = _with_tests_and_imports()
+        _text, sub, _stats = build_context(G, scores, 50_000, min_score=0.0)
+        assert set(sub.nodes) == {"lib.budget.select", "lib.budget.helper",
+                                  "lib.other.unrelated", "lib.other.reached"}
+
+    def test_each_flag_lets_its_kind_back_in(self):
+        G, scores = _with_tests_and_imports()
+        _t, with_tests, _s = build_context(G, scores, 50_000, min_score=0.0,
+                                           include_tests=True)
+        assert set(with_tests.nodes) & (self.TESTS | self.IMPORTS) == {
+            "tests.test_budget.test_select"}
+        _t, with_imports, _s = build_context(G, scores, 50_000, min_score=0.0,
+                                             include_imports=True)
+        assert set(with_imports.nodes) & (self.TESTS | self.IMPORTS) == {
+            "lib.cli.import_select"}
+        _t, both, _s = build_context(G, scores, 50_000, min_score=0.0,
+                                     include_tests=True, include_imports=True)
+        assert set(both.nodes) == set(G.nodes)
+
+    def test_a_left_out_node_passes_no_boost_on(self):
+        # The test calls `reached` (0.30); selected, it would lift it to
+        # 0.95 * 0.7 above `unrelated` (0.50). Left out, it lifts nothing.
+        G, scores = _with_tests_and_imports()
+
+        def entry_order(**flags) -> list[str]:
+            room = build_context(G, scores, 50_000, min_score=0.0, **flags)[2]["tokens_used"]
+            order: list[str] = []
+            for budget in range(50, room * 2, 5):
+                try:
+                    _t, sub, _s = build_context(G, scores, budget, min_score=0.0, **flags)
+                except BudgetTooSmallError:
+                    continue
+                order.extend(n for n in sorted(sub.nodes) if n not in order)
+            return order
+
+        default = entry_order()
+        assert default.index("lib.other.unrelated") < default.index("lib.other.reached")
+        let_in = entry_order(include_tests=True)
+        assert let_in.index("lib.other.reached") < let_in.index("lib.other.unrelated")
+
+    @pytest.mark.parametrize("fmt", FORMATS)
+    def test_stats_count_them_apart_and_the_counts_add_up(self, fmt):
+        G, scores = _with_tests_and_imports()
+        _t, _sub, stats = build_context(G, scores, 50_000, min_score=0.0, format=fmt)
+        # An import in a test file counts once, as a test.
+        assert stats["nodes_excluded_tests"] == 2
+        assert stats["nodes_excluded_imports"] == 1
+        assert (stats["nodes_selected"] + stats["nodes_over_budget"]
+                + stats["nodes_below_min_score"] + 3) == stats["nodes_total"] == 7
+
+    def test_the_keys_are_absent_when_nothing_is_left_out(self):
+        _t, _sub, stats = build_context(_line(5), _decreasing(_line(5)), 50_000)
+        assert "nodes_excluded_tests" not in stats
+        assert "nodes_excluded_imports" not in stats
+
+    def test_the_tip_names_them_and_fits_the_budget(self):
+        G, scores = _with_tests_and_imports()
+        text, _sub, stats = build_context(G, scores, 50_000, min_score=0.0, query="select")
+        assert ("💡 2 test nodes and 1 import node are left out by default — "
+                "--include-tests / --include-imports to let them compete") in text
+        tight = stats["tokens_used"] - 1   # one node fewer: the tip must still fit
+        text, _sub, stats = build_context(G, scores, tight, min_score=0.0, query="select")
+        assert count_tokens(text) <= tight and "left out by default" in text
+
+    def test_the_whole_graph_baseline_holds_every_node(self):
+        G, scores = _with_tests_and_imports()
+        everything = build_context(G, scores, 10_000_000, min_score=0.0, include_tests=True,
+                                   include_imports=True)[2]["tokens_used"]
+        assert full_graph_tokens(G, scores) == everything
+
+    def test_fit_to_budget_rebuilds_the_breakdown_from_stats(self):
+        # The CLI's --inject-code trims again after build_context: the stats
+        # it prints must keep every cause, the left-out kinds included.
+        G, scores = _with_tests_and_imports()
+        _t, sub, stats = build_context(G, scores, 50_000, min_score=0.0, query="q")
+        left_out = left_out_from_stats(stats)
+        assert left_out == (4, 0.0, 2, 1)
+
+        def render(s, st):
+            return format_subgraph(s, st, "markdown", scores=scores, query="q")
+
+        values = {("n", n): scores[n] for n in sub.nodes}
+        _t2, _sub2, again = fit_to_budget(sub, 50_000, render, values, 7, left_out=left_out)
+        for key in ("nodes_over_budget", "nodes_below_min_score", "nodes_excluded_tests",
+                    "nodes_excluded_imports"):
+            assert again[key] == stats[key]
+
+    def test_hand_built_stats_have_no_breakdown_to_rebuild(self):
+        assert left_out_from_stats({"nodes_selected": 1, "nodes_total": 2}) is None

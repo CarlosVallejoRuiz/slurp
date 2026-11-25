@@ -14,7 +14,7 @@ from rich.table import Table
 from rich.text import Text
 
 from slurp import __version__
-from slurp._graphutils import _LANGUAGE_BY_EXT
+from slurp._graphutils import _LANGUAGE_BY_EXT, _left_out
 from slurp.audit import log_query, read_audit, top_nodes_from_audit
 # Imported at module level because the --price-model choices are built at decoration time.
 from slurp.benchmark import MODEL_PRICES_PER_MTok
@@ -24,6 +24,7 @@ from slurp.budget import (
     build_context,
     count_tokens,
     fit_to_budget,
+    left_out_from_stats,
     resolve_token_factor,
 )
 from slurp.explainer import PROVIDERS as _EXPLAIN_PROVIDERS
@@ -327,6 +328,16 @@ class _BackendChoice(click.Choice):
 
 _BACKEND = _BackendChoice()
 
+# Tests and import nodes do not compete for a place by default (see
+# _graphutils._left_out); these let each kind back in, wherever a subgraph is
+# selected.
+_INCLUDE_TESTS = click.option(
+    "--include-tests", "include_tests", is_flag=True, default=False,
+    help="Let test code compete for a place in the subgraph (left out by default).")
+_INCLUDE_IMPORTS = click.option(
+    "--include-imports", "include_imports", is_flag=True, default=False,
+    help="Let import nodes compete for a place in the subgraph (left out by default).")
+
 
 class _SlurpGroup(click.Group):
     """Routes unknown first args to the hidden 'run' subcommand."""
@@ -408,6 +419,8 @@ def cli(ctx: click.Context) -> None:
 @click.option("--token-factor", "token_factor", type=float, default=None,
               help="Multiply token counts (e.g. 1.56 to estimate Claude tokens). "
                    "Default: $SLURP_TOKEN_FACTOR, else 1.0.")
+@_INCLUDE_TESTS
+@_INCLUDE_IMPORTS
 def run(
     query: str,
     graph: tuple[str, ...],
@@ -428,6 +441,8 @@ def run(
     inject_code_flag: bool,
     project_root: str | None,
     token_factor: float | None,
+    include_tests: bool,
+    include_imports: bool,
 ) -> None:
     """Run a query against the graph."""
     factor = _token_factor(token_factor)
@@ -495,6 +510,7 @@ def run(
             G, scores, budget=budget, model=model,
             neighbor_decay=neighbor_decay, min_score=min_score,
             format=fmt, query=query, token_factor=factor,
+            include_tests=include_tests, include_imports=include_imports,
         )
     except BudgetTooSmallError as exc:
         raise click.ClickException(str(exc)) from None
@@ -518,8 +534,7 @@ def run(
                 lambda sub, st: format_subgraph(sub, st, format=fmt, scores=scores, query=query),
                 _item_values(injected, scores), G.number_of_nodes(), model,
                 item_cost=lambda item: count_tokens(item_text(injected, item, fmt), model),
-                token_factor=factor,
-                left_out=(stats["nodes_total"] - stats["nodes_below_min_score"], min_score))
+                token_factor=factor, left_out=left_out_from_stats(stats))
 
     click.echo(result)
 
@@ -528,7 +543,8 @@ def run(
         # No --graph in the rendered commands: the reader just ran one, and an
         # absolute path doubles the line length for nothing.
         text = format_suggestions(
-            suggest_queries(G, query, scores, subG, n=suggest_n))
+            suggest_queries(G, query, scores, subG, n=suggest_n,
+                            exclude=_left_out(G, include_tests, include_imports)))
         # Silence is the honest answer when the budget covered the neighbourhood.
         click.echo(f"\n{text}" if text else "\nSUGGESTED QUERIES\n  (none — the "
                    "budget already covers this neighbourhood)")
@@ -770,6 +786,8 @@ def _build_diff_panel(
 @click.option("--token-factor", "token_factor", type=float, default=None,
               help="Multiply token counts (e.g. 1.56 to estimate Claude tokens). "
                    "Default: $SLURP_TOKEN_FACTOR, else 1.0.")
+@_INCLUDE_TESTS
+@_INCLUDE_IMPORTS
 def export_cmd(
     query: str,
     graph: str | None,
@@ -782,6 +800,8 @@ def export_cmd(
     ignore_file: str,
     backend: str,
     token_factor: float | None,
+    include_tests: bool,
+    include_imports: bool,
 ) -> None:
     """Export a context block ready to paste into a Claude/ChatGPT/CLAUDE.md system prompt."""
     factor = _token_factor(token_factor)
@@ -806,7 +826,7 @@ def export_cmd(
             G, scores, budget=budget, model=model,
             neighbor_decay=neighbor_decay, min_score=min_score, query=query,
             render=lambda sub, st: export_context(sub, st, query, format=fmt, scores=scores),
-            token_factor=factor,
+            token_factor=factor, include_tests=include_tests, include_imports=include_imports,
         )
     except BudgetTooSmallError as exc:
         raise click.ClickException(str(exc)) from None
@@ -842,6 +862,8 @@ def export_cmd(
 @click.option("--token-factor", "token_factor", type=float, default=None,
               help="Multiply token counts (e.g. 1.56 to estimate Claude tokens). "
                    "Default: $SLURP_TOKEN_FACTOR, else 1.0.")
+@_INCLUDE_TESTS
+@_INCLUDE_IMPORTS
 def benchmark_cmd(
     graph: str | None,
     queries: tuple[str, ...],
@@ -852,6 +874,8 @@ def benchmark_cmd(
     backend: str,
     model_price: str,
     token_factor: float | None,
+    include_tests: bool,
+    include_imports: bool,
 ) -> None:
     """Measure token savings of slurp vs injecting the full graph."""
     factor = _token_factor(token_factor)
@@ -877,6 +901,8 @@ def benchmark_cmd(
         backend=backend,
         model_price=model_price,
         token_factor=factor,
+        include_tests=include_tests,
+        include_imports=include_imports,
     )
 
     click.echo(format_benchmark(result))
@@ -950,6 +976,8 @@ def serve(graph: tuple[str, ...], graph_labels: tuple[str, ...], log: bool) -> N
 @click.option("--token-factor", "token_factor", type=float, default=None,
               help="Multiply token counts (e.g. 1.56 to estimate Claude tokens). "
                    "Default: $SLURP_TOKEN_FACTOR, else 1.0.")
+@_INCLUDE_TESTS
+@_INCLUDE_IMPORTS
 @click.option("--config-dir", "config_dir", default=".slurp", show_default=True,
               help="Directory holding config.json.")
 def eval_cmd(
@@ -965,6 +993,8 @@ def eval_cmd(
     min_score: float | None,
     fmt: str | None,
     token_factor: float | None,
+    include_tests: bool,
+    include_imports: bool,
     config_dir: str,
 ) -> None:
     """Measure whether answers are better with slurp than with the full graph."""
@@ -1011,7 +1041,8 @@ def eval_cmd(
             suite = run_retrieval_eval(
                 G, questions, budget=budget,
                 min_score=DEFAULT_MIN_SCORE if min_score is None else min_score,
-                token_factor=factor, format=fmt or "markdown")
+                token_factor=factor, format=fmt or "markdown",
+                include_tests=include_tests, include_imports=include_imports)
         except BudgetTooSmallError as exc:
             raise click.ClickException(str(exc)) from None
         if not suite.scored:
@@ -1052,7 +1083,8 @@ def eval_cmd(
         task = progress.add_task("eval", total=len(questions))
         suite = run_eval(
             G, questions, config, budget=budget, graph_path=graph_path,
-            token_factor=factor,
+            token_factor=factor, include_tests=include_tests,
+            include_imports=include_imports,
             on_question=lambda _r: progress.advance(task),
         )
     click.echo(buf.getvalue(), nl=False)
@@ -1098,7 +1130,9 @@ def _build_retrieval_panel(suite) -> Panel:
     lines = [
         f"Recall (mean):  {suite.mean_recall:.3f}",
         f"Hit rate:       {suite.hit_rate:.3f}",
-        f"MRR:            {suite.mrr:.3f}",
+        f"MRR:            {suite.mrr:.3f}"
+        + (f" · {suite.mrr_all:.3f} ranking every node, tests and imports included"
+           if suite.mrr_all != suite.mrr else ""),
         f"Tokens sent:    mean {suite.mean_tokens:,.0f} · max {suite.max_tokens:,} "
         f"({suite.format}, measured)",
         f"Questions:      {len(suite.scored)} scored"

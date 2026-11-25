@@ -1205,3 +1205,55 @@ class TestUnknownRiskOverMcp:
         text = resp["result"]["content"][0]["text"]
         assert "RISK IF CHANGED: UNKNOWN" in text
         assert "Nothing in the project depends on" not in text
+
+
+# ---------------------------------------------------------------------------
+# include_tests / include_imports
+# ---------------------------------------------------------------------------
+
+def _left_out_graph() -> nx.DiGraph:
+    G = nx.DiGraph()
+    G.add_node("auth.login_user", label="login_user", type="function", source_file="auth.py")
+    G.add_node("tests.test_auth.test_login_user", label="test_login_user", type="function",
+               source_file="tests/test_auth.py")
+    G.add_node("app.import_login_user", label="auth.login_user", type="import",
+               source_file="app.py")
+    G.add_edge("tests.test_auth.test_login_user", "auth.login_user", relation="calls")
+    return G
+
+
+class TestIncludeTestsAndImportsOverMcp:
+    def _query(self, **arguments) -> dict:
+        return _invoke(_req("tools/call", {"name": "slurp_query", "arguments": {
+            "query": "login user", **arguments}}), _left_out_graph())
+
+    @pytest.mark.parametrize("tool", ["slurp_query", "slurp_suggest"])
+    def test_both_are_declared_booleans_defaulting_to_false(self, tool):
+        schema = next(t for t in _TOOLS if t["name"] == tool)["inputSchema"]["properties"]
+        for name in ("include_tests", "include_imports"):
+            assert schema[name]["type"] == "boolean" and schema[name]["default"] is False
+
+    def test_left_out_by_default_and_said_so(self):
+        text = self._query()["result"]["content"][0]["text"]
+        assert "test_login_user (function)" not in text
+        assert "1 test node and 1 import node are left out by default" in text
+
+    def test_each_argument_lets_its_kind_in(self):
+        text = self._query(include_tests=True)["result"]["content"][0]["text"]
+        assert "test_login_user (function)" in text and "(import)" not in text
+        text = self._query(include_tests=True, include_imports=True)["result"][
+            "content"][0]["text"]
+        assert "(import)" in text and "left out by default" not in text
+
+    @pytest.mark.parametrize("tool", ["slurp_query", "slurp_suggest"])
+    @pytest.mark.parametrize("name", ["include_tests", "include_imports"])
+    def test_a_non_boolean_is_an_invalid_parameter(self, tool, name):
+        resp = _invoke(_req("tools/call", {"name": tool, "arguments": {
+            "query": "login user", name: "yes"}}), _left_out_graph())
+        assert resp["error"]["code"] == -32602
+        assert name in resp["error"]["message"]
+
+    def test_suggest_accepts_them(self):
+        resp = _invoke(_req("tools/call", {"name": "slurp_suggest", "arguments": {
+            "query": "login user", "include_tests": True}}), _left_out_graph())
+        assert "result" in resp and not resp["result"].get("isError")

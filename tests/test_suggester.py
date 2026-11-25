@@ -223,3 +223,29 @@ class TestSuggestOnRealGraph:
         for suggestion in out:
             assert suggestion.query
             assert suggestion.reason
+
+
+class TestLeftOutKindsAreNotSuggested:
+    """What selection leaves out by default is no destination for a follow-up."""
+
+    @staticmethod
+    def _graph() -> nx.DiGraph:
+        G = nx.DiGraph()
+        _node(G, "core", "playerStats")
+        for i in range(4):
+            _node(G, f"t{i}", f"test_database_schema_{i}", source="tests/test_db.py")
+            G.add_edge(f"t{i}", "core", relation="calls")
+        for i in range(10):   # elsewhere, so "database" is rare graph-wide
+            _node(G, f"far{i}", f"unrelatedThing{i}", source="lib/far.py")
+        return G
+
+    def test_tests_are_not_frontier_by_default(self):
+        G = self._graph()
+        assert suggest_queries(G, "player", score_nodes(G, "player"),
+                               _selected(G, "core")) == []
+
+    def test_the_caller_says_what_was_left_out(self):
+        G = self._graph()
+        out = suggest_queries(G, "player", score_nodes(G, "player"), _selected(G, "core"),
+                              exclude=frozenset())
+        assert any("database" in s.query for s in out)

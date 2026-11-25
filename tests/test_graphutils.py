@@ -3,7 +3,13 @@
 import networkx as nx
 import pytest
 
-from slurp._graphutils import _is_test, _split_callers
+from slurp._graphutils import (
+    _is_import,
+    _is_test,
+    _left_out,
+    _left_out_sets,
+    _split_callers,
+)
 
 
 def _graph_with(path: str, node_id: str = "node", key: str = "source_file") -> nx.DiGraph:
@@ -125,3 +131,84 @@ class TestSplitCallers:
         G.add_edge("report", "target", relation="calls")
         G.add_edge("t", "target", relation="calls")
         assert _split_callers(G, "target") == (["report"], ["t"])
+
+    def test_an_import_node_is_never_a_caller(self):
+        # slurp index writes one `import` node per import statement; it calls
+        # nothing, and where a graph says otherwise it is not a dependant.
+        G = nx.DiGraph()
+        G.add_node("target", type="function", source_file="lib/core.py")
+        G.add_node("app.import_target", type="import", source_file="app.py")
+        G.add_node("app.main", type="function", source_file="app.py")
+        G.add_edge("app.import_target", "target", relation="calls")
+        G.add_edge("app.main", "target", relation="calls")
+        assert _split_callers(G, "target") == (["app.main"], [])
+
+    def test_an_import_node_has_no_dependants(self):
+        # The module that declares an import owns it, as it owns its functions.
+        G = nx.DiGraph()
+        G.add_node("app", type="module", source_file="app.py")
+        G.add_node("app.import_os", type="import", label="os", source_file="app.py")
+        G.add_edge("app", "app.import_os", relation="imports_from")
+        assert _split_callers(G, "app.import_os") == ([], [])
+
+    def test_graphify_import_edges_between_real_nodes_still_count(self):
+        G = nx.DiGraph()
+        G.add_node("a", source_file="a.ts")
+        G.add_node("b", source_file="b.ts")
+        G.add_edge("a", "b", relation="imports_from")
+        assert _split_callers(G, "b") == (["a"], [])
+
+
+def _mixed_graph() -> nx.DiGraph:
+    G = nx.DiGraph()
+    G.add_node("lib.core.run", type="function", source_file="lib/core.py")
+    G.add_node("lib.core.import_os", type="import", source_file="lib/core.py")
+    G.add_node("tests.test_core.test_run", type="function", source_file="tests/test_core.py")
+    G.add_node("tests.test_core.import_run", type="import", source_file="tests/test_core.py")
+    G.add_node("concept", file_type="concept")          # graphify: no type at all
+    return G
+
+
+class TestIsImport:
+    def test_only_the_import_type(self):
+        G = _mixed_graph()
+        assert _is_import(G, "lib.core.import_os")
+        assert not _is_import(G, "lib.core.run")
+        assert not _is_import(G, "concept")
+        assert not _is_import(G, "missing")
+
+
+class TestLeftOut:
+    """The nodes that do not compete for a place in a subgraph by default."""
+
+    def test_tests_and_imports_by_default(self):
+        G = _mixed_graph()
+        assert _left_out(G) == {"lib.core.import_os", "tests.test_core.test_run",
+                                "tests.test_core.import_run"}
+
+    def test_each_flag_lets_its_kind_back_in(self):
+        G = _mixed_graph()
+        # An import in a test file is both: it stays out until both are let in.
+        assert _left_out(G, include_tests=True) == {"lib.core.import_os",
+                                                    "tests.test_core.import_run"}
+        assert _left_out(G, include_imports=True) == {"tests.test_core.test_run",
+                                                      "tests.test_core.import_run"}
+        assert _left_out(G, include_tests=True, include_imports=True) == set()
+
+    def test_the_kinds_are_computed_once_per_graph(self):
+        G = _mixed_graph()
+        first = _left_out_sets(G)
+        assert _left_out_sets(G) is first
+        tests, imports = first
+        assert tests == {"tests.test_core.test_run", "tests.test_core.import_run"}
+        assert imports == {"lib.core.import_os", "tests.test_core.import_run"}
+
+    def test_a_new_graph_is_never_served_a_dead_graphs_kinds(self):
+        tests, _ = _left_out_sets(_mixed_graph())
+        G = nx.DiGraph()
+        G.add_node("lib.core.run", type="function", source_file="lib/core.py")
+        assert _left_out_sets(G) == (frozenset(), frozenset())
+        assert tests  # the first graph did have tests
+
+    def test_an_empty_graph(self):
+        assert _left_out(nx.DiGraph()) == set()

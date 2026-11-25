@@ -525,6 +525,46 @@ uv sync --extra rust            # solo una
     `testdata/` de Go no es test. Efecto medido: PrismaStats 14 → 13 nodos test
     (sale el módulo `scripts/test-hardware-upload.ts`, marcado por el nombre), slurp
     3.130 → 3.130; `slurp eval --retrieval` idéntico (la selección no lo usaba).
+
+- **Tests e imports separados por defecto** (v1.2, #20/#59). Nodo import = `type ==
+  "import"` (el marcador que escribe `slurp index` por cada import; las aristas
+  `imports`/`imports_from` entre nodos reales de graphify no cambian de significado).
+  - **Selección**: `_graphutils._left_out(G, include_tests, include_imports)` — tests e
+    imports no son candidatos en `build_context` (ni entran, ni reciben boost, ni lo
+    pasan). Un import de un fichero de test necesita los dos flags. Siguen en el grafo
+    para el PageRank: quitarlos también de ahí bajó el tune de slurp de MRR 0,573 a 0,234
+    (recall md 4000 1,000 → 0,875); las llamadas desde tests son señal de importancia.
+    `(tests, imports)` se cachea por objeto grafo con weakref (≈3 ms en 4.165 nodos, lo
+    que cuesta una query en caliente); el MCP lo limpia al recargar
+    (`clear_left_out_cache`).
+  - Flags `--include-tests`/`--include-imports` en `slurp QUERY`, `export`, `benchmark`,
+    `eval`; `include_tests`/`include_imports` (booleanos, `-32602` si no) en
+    `slurp_query` y `slurp_suggest`; kwargs en `build_context`/`select_subgraph`/
+    `run_retrieval_eval`/`run_benchmark`. `full_graph_tokens` incluye todo (es lo que se
+    mandaría sin slurp). El suggester no sugiere lo excluido (`exclude=`).
+  - **Stats**: tercera causa `nodes_excluded_tests`/`nodes_excluded_imports` (solo si
+    > 0; un import de test cuenta como test), `selected + over + below + excluded =
+    total`. `left_out` pasa a `(candidatos, min_score, tests, imports)`;
+    `left_out_from_stats(stats)` lo reconstruye (lo usa el `--inject-code` del CLI). La
+    línea del tip cuenta en el presupuesto como el resto (el test de propiedad la cubre).
+  - **Dependientes**: `_split_callers` nunca devuelve un nodo import como llamador, y un
+    nodo import no tiene dependientes (su módulo lo posee). Bandas solo con producción en
+    explain, impact y diff (`TestExplainImpactAndDiffAgreeWithTests`). explain:
+    `Called by` solo producción + `→ Tested by: N tests in M files`, riesgo
+    `7 production callers, 74 in tests`, y un nodo solo con tests: LOW + `No production
+    callers · N tests call it — update them if you change its behaviour` (sin "Safe").
+    impact: `direct/transitive/affected_files/impact_score` de producción, bloque
+    `TESTS — …` (top 5 ficheros), `test_only_nodes` (NO PRODUCTION CALLERS) separado de
+    `safe_nodes` (ningún llamador, ni test), imports fuera de `nodes_in_file`. diff:
+    añadir/quitar un import no es "cambiar lo que llama", `test_dependents` + línea
+    `N tests in M files touch the change`, vecindario de riesgo, review y viz sin tests
+    ni imports (los nodos cambiados siempre entran). `find_node` por relevancia salta
+    tests e imports; un nombre exacto gana siempre.
+  - **eval**: `first_rank`/`mrr` = rango entre los nodos seleccionables;
+    `first_rank_all`/`mrr_all` = rango entre todos (la definición de v1.1.1). Ninguna de
+    las 31 preguntas tiene un test o un import entre sus `relevant_nodes`.
+  - Efecto en bandas (cambio de comportamiento documentado en el README): slurp 137 nodos
+    cambian en explain (69 HIGH→LOW, 34 MEDIUM→LOW, 34 HIGH→MEDIUM); PrismaStats 0.
   - Los módulos origen los reimportan, así que `from slurp.scorer import
     _tokenize` y `from slurp.explainer import _split_callers` siguen
     funcionando — los tests no hizo falta tocarlos.
@@ -762,13 +802,15 @@ relaciones: `--budget 8000` daba 19k–42k tokens reales.
    `stats["min_budget"]` = lo que necesita el nodo de más valor, medido.
 6. **Por qué falta cada nodo** (v1.1.0, #56): las stats llevan `nodes_over_budget`
    (puntuaron ≥ `min_score` y no cupieron), `nodes_below_min_score` y `min_score`;
-   `selected + over + below = total`. Las calcula `_measure` con `left_out=(candidatos,
+   `selected + over + below (+ excluded) = total`. Las calcula `_measure` con `left_out=(candidatos,
    min_score)`, así que siguen siendo ciertas tras cada recorte; quien llame a
    `fit_to_budget` por su cuenta (el `--inject-code` del CLI) tiene que pasar
    `left_out` o las pierde. El tip imprime una línea por causa y nunca dice
    "connected" (antes: "1977 additional connected nodes — increase --budget" en
    PrismaStats graphify, 672 de ellos bajo min_score). Stats hechas a mano, sin el
    desglose, reciben un recuento neutro sin causa.
+   Desde v1.2 hay una tercera causa: tests e imports que no compiten
+   (`nodes_excluded_*`, ver `_graphutils` más abajo).
 - `select_subgraph()` devuelve `(subgrafo, stats)` del mismo cálculo; hay que
   pasar el mismo `format` y `query` a `format_subgraph` para reproducir el texto.
 - `render=` permite medir un envoltorio (lo usa `slurp export`).

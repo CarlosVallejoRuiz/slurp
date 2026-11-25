@@ -13,6 +13,7 @@ happened to be defined.
 from __future__ import annotations
 
 import re
+import weakref
 
 import networkx as nx
 
@@ -139,6 +140,22 @@ def _display(G: nx.DiGraph, node_id: str) -> str:
     return f"{label}()" if node_type in {"function", "method"} else label
 
 
+def _files_of(G: nx.DiGraph, nodes) -> list[str]:
+    """The distinct files *nodes* are defined in, sorted."""
+    files = set()
+    for n in nodes:
+        attrs = G.nodes.get(n, {})
+        if path := attrs.get("source_file") or attrs.get("file_path"):
+            files.add(str(path))
+    return sorted(files)
+
+
+def _caller_counts(production: int, tests: int) -> str:
+    """"7 production callers, 74 in tests" — the one wording explain uses."""
+    text = f"{production} production caller{'' if production == 1 else 's'}"
+    return text + (f", {tests} in tests" if tests else "")
+
+
 def _callers(G: nx.DiGraph, node_id: str) -> list[str]:
     return sorted(G.predecessors(node_id)) if node_id in G else []
 
@@ -169,19 +186,83 @@ def _is_test(G: nx.DiGraph, node_id: str) -> bool:
         part in _RUST_TEST_MODULES for part in str(node_id).split("."))
 
 
+def _is_import(G: nx.DiGraph, node_id: str) -> bool:
+    """Whether *node_id* is an import placeholder, as `slurp index` writes one
+    per import statement. Import edges between real nodes (graphify) are not."""
+    return G.nodes.get(node_id, {}).get("type") == "import"
+
+
 def _split_callers(G: nx.DiGraph, node_id: str) -> tuple[list[str], list[str]]:
     """Callers split into production and test, in that order.
 
     A node called by sixty tests and six modules is not depended on by
     sixty-six things in any sense a reader cares about, and reporting one
     number overstates the blast radius by an order of magnitude.
+
+    Neither a containing node nor an import node is a caller. An import node
+    has no dependants at all: the code that declares it owns it, the way a
+    module owns its functions, so removing `import os` reaches no one.
     """
+    if _is_import(G, node_id):
+        return [], []
     callers = [
         c for c in _callers(G, node_id)
-        if G.edges[c, node_id].get("relation") != "contains"
+        if G.edges[c, node_id].get("relation") != "contains" and not _is_import(G, c)
     ]
     tests = [c for c in callers if _is_test(G, c)]
     return [c for c in callers if c not in set(tests)], tests
+
+
+# DECISION: (tests, imports) of a graph depend on the graph alone, and finding
+# them costs ~3 ms on a 4,000-node graph — as much as the rest of a warm query —
+# so they are cached per graph object, the way scorer caches PageRank: keyed by
+# id() with a weakref beside the result, because CPython recycles ids. A graph
+# mutated in place after the first query would be served stale kinds; nothing
+# in slurp does that (apply_ignore and the MCP reload build new graphs).
+_left_out_cache: dict[int, tuple["weakref.ref", tuple[frozenset, frozenset]]] = {}
+
+
+def clear_left_out_cache() -> None:
+    """Drop every cached (tests, imports) result."""
+    _left_out_cache.clear()
+
+
+def _left_out_sets(G: nx.DiGraph) -> tuple[frozenset, frozenset]:
+    """(test nodes, import nodes) of *G*. An import in a test file is in both."""
+    key = id(G)
+    if (hit := _left_out_cache.get(key)) is not None:
+        ref, kinds = hit
+        if ref() is G:
+            return kinds
+        del _left_out_cache[key]
+    kinds = (frozenset(n for n in G.nodes if _is_test(G, n)),
+             frozenset(n for n in G.nodes if _is_import(G, n)))
+    try:
+        _left_out_cache[key] = (weakref.ref(G), kinds)
+    except TypeError:
+        pass  # INTENTIONAL: no weakref support only costs the cache, never the answer
+    return kinds
+
+
+def _left_out(G: nx.DiGraph, include_tests: bool = False,
+              include_imports: bool = False) -> frozenset:
+    """Nodes that do not compete for a place in a subgraph.
+
+    DECISION: tests and import nodes are left out of selection by default.
+    On slurp's own graph three nodes in four are tests: they name what they
+    test, outscored the code itself and filled the budget. Import nodes repeat
+    the name of what they import. Both stay in the graph — PageRank still sees
+    them, and measured, the calls from tests are a useful signal of what
+    matters — they just never take a place. Each flag lets its kind back in;
+    an import in a test file needs both.
+    """
+    tests, imports = _left_out_sets(G)
+    out = frozenset()
+    if not include_tests:
+        out |= tests
+    if not include_imports:
+        out |= imports
+    return out
 
 
 def _box(title: str, subtitle: str) -> str:

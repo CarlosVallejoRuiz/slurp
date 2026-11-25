@@ -8,7 +8,14 @@ from dataclasses import dataclass, field
 import networkx as nx
 
 from slurp import _graphutils
-from slurp._graphutils import _call_graph_gap, _extensions_with_calls, _split_callers
+from slurp._graphutils import (
+    _call_graph_gap,
+    _extensions_with_calls,
+    _files_of,
+    _is_import,
+    _left_out,
+    _split_callers,
+)
 
 
 @dataclass
@@ -29,7 +36,11 @@ class GraphDiff:
     risk_reason: str = ""
     # Nodes still in the new graph that were direct neighbours of a removed
     # node in the old one, where it still exists: its callers and callees.
+    # Production code only: tests and import nodes are reported apart.
     removed_neighbors: list[str] = field(default_factory=list)
+    # Tests that call what was removed or changed: they will need updating,
+    # but they are not what ships, so they stay out of impact_score.
+    test_dependents: list[str] = field(default_factory=list)
 
     @property
     def has_changes(self) -> bool:
@@ -114,17 +125,26 @@ def diff_graphs(old: nx.DiGraph, new: nx.DiGraph) -> GraphDiff:
     # What could break: callers of deleted nodes (they now call nothing), and
     # callers of nodes whose own behaviour changed — relabelled, retyped, or
     # calling something different for a reason other than a deleted callee.
+    # An import added or dropped is not a change in what a node calls: import
+    # nodes have no dependants (see _split_callers) and pass none on.
     removed = set(removed_nodes)
+
+    def _imports(u: str, v: str) -> bool:
+        return any(_is_import(g, n) for g in (old, new) for n in (u, v))
+
     changed = set(modified_nodes) | {
         u for u, v in added_edges + removed_edges
-        if u in old and u in new and v not in removed
+        if u in old and u in new and v not in removed and not _imports(u, v)
     }
     dependents: set[str] = set()
-    for node in removed:
-        dependents.update(_split_callers(old, node)[0])
-    for node in changed:
-        dependents.update(_split_callers(new, node)[0])
+    tests: set[str] = set()
+    for graph, nodes in ((old, removed), (new, changed)):
+        for node in nodes:
+            production, testing = _split_callers(graph, node)
+            dependents.update(production)
+            tests.update(testing)
     dependents -= removed
+    tests -= removed
 
     # A changed node with no call graph has callers nobody can count.
     old_calls, new_calls = _extensions_with_calls(old), _extensions_with_calls(new)
@@ -141,6 +161,7 @@ def diff_graphs(old: nx.DiGraph, new: nx.DiGraph) -> GraphDiff:
         removed_neighbors.update(old.predecessors(node))
         removed_neighbors.update(old.successors(node))
     removed_neighbors &= new_nodes
+    removed_neighbors -= _left_out(old)
 
     return GraphDiff(
         added_nodes=added_nodes,
@@ -153,6 +174,7 @@ def diff_graphs(old: nx.DiGraph, new: nx.DiGraph) -> GraphDiff:
         unknown_nodes=unknown,
         risk_reason=gaps[unknown[0]] if unknown else "",
         removed_neighbors=sorted(removed_neighbors),
+        test_dependents=sorted(tests),
     )
 
 
@@ -164,7 +186,10 @@ def affected_subgraph(
     """Returns the subgraph of nodes affected by the diff plus their N-hop neighborhood.
 
     Removed nodes are not in G and are therefore absent from the result — use
-    diff.removed_nodes directly if you need to display them.
+    diff.removed_nodes directly if you need to display them. Added and
+    modified nodes are always in; tests and import nodes are never reached as
+    neighbourhood — a test that calls three functions would otherwise join
+    them, and both are reported apart.
 
     Args:
         G:    The new (current) graph.
@@ -174,12 +199,12 @@ def affected_subgraph(
     Returns:
         A copy of the induced subgraph over the affected neighborhood.
     """
+    left_out = _left_out(G)
     seeds: set[str] = set()
     seeds.update(diff.added_nodes)
     seeds.update(diff.modified_nodes)
     for u, v in diff.added_edges + diff.removed_edges:
-        seeds.add(u)
-        seeds.add(v)
+        seeds.update(n for n in (u, v) if n not in left_out)
 
     # Keep only nodes that actually exist in G (removed nodes won't).
     seeds &= set(G.nodes)
@@ -196,6 +221,7 @@ def affected_subgraph(
             next_f.update(G.predecessors(nid))
             next_f.update(G.successors(nid))
         next_f -= visited
+        next_f -= left_out
         if not next_f:
             break
         visited.update(next_f)
@@ -322,6 +348,13 @@ def format_diff(diff: GraphDiff, G_new: nx.DiGraph, hops: int = 2) -> str:
     lines.append(f"- **Impact score:** {diff.impact_score:.4f} ({impact_label}) — "
                  f"{len(diff.dependents)} production "
                  f"{'caller' if len(diff.dependents) == 1 else 'callers'} reached")
+    if diff.test_dependents:
+        files = _files_of(G_new, diff.test_dependents)
+        tests = len(diff.test_dependents)
+        lines.append(f"- {tests} test{'s' if tests != 1 else ''}"
+                     + (f" in {len(files)} file{'s' if len(files) != 1 else ''}" if files
+                        else "")
+                     + f" touch{'es' if tests == 1 else ''} the change")
     if diff.unknown_nodes:
         lines.append(f"- **Risk unknown for {len(diff.unknown_nodes)} changed "
                      f"{'node' if len(diff.unknown_nodes) == 1 else 'nodes'}:** "
@@ -338,6 +371,7 @@ def format_diff(diff: GraphDiff, G_new: nx.DiGraph, hops: int = 2) -> str:
 
     # At-risk: direct neighbors of added/modified nodes in G_new, and of
     # removed nodes in the old graph (diff.removed_neighbors).
+    # Production code only: tests are counted above, imports reach no one.
     affected_ids = set(diff.added_nodes) | set(diff.modified_nodes)
     at_risk: set[str] = set(diff.removed_neighbors)
     for nid in affected_ids:
@@ -345,6 +379,7 @@ def format_diff(diff: GraphDiff, G_new: nx.DiGraph, hops: int = 2) -> str:
             at_risk.update(G_new.predecessors(nid))
             at_risk.update(G_new.successors(nid))
     at_risk -= affected_ids
+    at_risk -= _left_out(G_new)
 
     lines.append(f"- {len(at_risk)} nodes in risk neighborhood")
     lines.append("")

@@ -279,6 +279,44 @@ class TestMarkdownTip:
         assert "4 more nodes" in tip
         assert "connected" not in tip and "--budget" not in tip
 
+    @staticmethod
+    def _excluded(base: dict, tests: int, imports: int) -> dict:
+        stats = {**base, "nodes_total": base["nodes_selected"] + tests + imports,
+                 "nodes_over_budget": 0, "nodes_below_min_score": 0, "min_score": 0.15}
+        if tests:
+            stats["nodes_excluded_tests"] = tests
+        if imports:
+            stats["nodes_excluded_imports"] = imports
+        return stats
+
+    def test_tests_and_imports_left_out_by_default_are_named_with_their_flags(
+            self, auth_subgraph, partial_stats):
+        tip = _tip(format_subgraph(auth_subgraph, self._excluded(partial_stats, 3130, 797)))
+        assert tip.strip() == ("💡 3130 test nodes and 797 import nodes are left out by "
+                               "default — --include-tests / --include-imports to let them "
+                               "compete")
+
+    def test_only_the_kind_left_out_is_named(self, auth_subgraph, partial_stats):
+        tests = _tip(format_subgraph(auth_subgraph, self._excluded(partial_stats, 1, 0)))
+        assert "1 test node is left out by default — --include-tests to let it" in tests
+        assert "import" not in tests
+        imports = _tip(format_subgraph(auth_subgraph, self._excluded(partial_stats, 0, 5)))
+        assert "5 import nodes are left out by default — --include-imports" in imports
+        assert "test" not in imports
+
+    def test_the_left_out_kinds_are_not_sent_to_the_budget(self, auth_subgraph,
+                                                           partial_stats):
+        tip = _tip(format_subgraph(auth_subgraph, self._excluded(partial_stats, 3, 2)))
+        assert "--budget" not in tip and "min-score" not in tip
+
+    def test_json_and_yaml_carry_the_counts(self, auth_subgraph, partial_stats):
+        stats = self._excluded(partial_stats, 3, 2)
+        data = json.loads(format_subgraph(auth_subgraph, stats, format="json"))
+        assert data["stats"]["nodes_excluded_tests"] == 3
+        assert data["stats"]["nodes_excluded_imports"] == 2
+        yaml = format_subgraph(auth_subgraph, stats, format="yaml")
+        assert "nodes_excluded_tests: 3" in yaml and "nodes_excluded_imports: 2" in yaml
+
     def test_tip_not_shown_when_all_nodes_selected(self, auth_subgraph, full_stats):
         out = format_subgraph(auth_subgraph, full_stats, format="markdown")
         assert "💡" not in out

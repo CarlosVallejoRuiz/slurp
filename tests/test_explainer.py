@@ -113,7 +113,7 @@ class TestBuildContext:
 
     def test_includes_blast_radius(self, graph, scores):
         context = _build_context(graph, "target", scores)
-        assert "BLAST RADIUS: 8 direct dependents (risk HIGH)" in context
+        assert "BLAST RADIUS: 8 production callers (risk HIGH)" in context
 
     def test_reports_empty_relationships(self):
         G = nx.DiGraph()
@@ -616,13 +616,13 @@ class TestFormatExplanation:
         assert "← Calls: nothing" in out
 
     def test_dependent_count_line(self):
-        assert "2 nodes depend on this function" in format_explanation(
+        assert "2 production callers" in format_explanation(
             self._result()
         )
 
     def test_singular_dependent_agrees(self):
         out = format_explanation(self._result(callers=["a()"]))
-        assert "1 node depends on this function" in out
+        assert "1 production caller" in out and "callers" not in out.split("RISK")[1]
 
     def test_no_dependents_line(self):
         out = format_explanation(self._result(callers=[]))
@@ -682,7 +682,7 @@ class TestExplainCommand:
         assert "EXPLANATION" in res.output
         assert "ARCHITECTURE" in res.output
         assert "RISK IF CHANGED: HIGH" in res.output
-        assert "8 nodes depend on this function" in res.output
+        assert "8 production callers" in res.output
 
     def test_panel_shows_type_and_file(self, graph_file, tmp_path):
         res = CliRunner().invoke(cli, [
@@ -960,7 +960,7 @@ class TestRiskSummary:
         result = explain_node(_call_graph(callers=2, tests=9), "target")
         out = format_explanation(result)
         assert result.production_callers == 2
-        assert "9 more in tests" in out
+        assert "2 production callers, 9 in tests — " in out
 
     def test_high_risk_recommends_tests(self):
         out = format_explanation(explain_node(_call_graph(callers=8), "target"))
@@ -1043,3 +1043,84 @@ class TestExplainWithoutCallGraph:
     def test_reason_is_stated_once(self):
         text = format_explanation(explain_node(_csharp_graph(), "run"))
         assert text.count("slurp extracts calls only for") == 1
+
+
+# ---------------------------------------------------------------------------
+# Tests are shown apart and never raise the risk band (v1.2, #20)
+# ---------------------------------------------------------------------------
+
+class TestTestsAreShownApart:
+    def test_the_band_counts_production_callers_only(self):
+        # Until v1.2 the tests were added in: 1 + 74 callers was HIGH.
+        assert _risk_level(_call_graph(callers=3, tests=74), "target") == "MEDIUM"
+        assert _risk_level(_call_graph(callers=1, tests=74), "target") == "LOW"
+        assert _risk_level(_call_graph(callers=7, tests=74), "target") == "HIGH"
+
+    def test_the_risk_line_gives_both_counts(self):
+        out = format_explanation(explain_node(_call_graph(callers=7, tests=74), "target"))
+        assert "RISK IF CHANGED: HIGH" in out
+        assert "7 production callers, 74 in tests — " in out
+
+    def test_one_production_caller_and_no_tests(self):
+        out = format_explanation(explain_node(_call_graph(callers=1), "target"))
+        assert "1 production caller — " in out and "in tests" not in out
+
+    def test_called_by_lists_production_and_tested_by_counts_the_tests(self):
+        result = explain_node(_call_graph(callers=2, tests=9), "target")
+        assert result.callers == ["caller0()", "caller1()"]
+        assert result.test_files == ["tests/test_core.py"]
+        out = format_explanation(result)
+        called_by = next(ln for ln in out.splitlines() if ln.startswith("→ Called by:"))
+        assert "test_" not in called_by
+        assert "→ Tested by: 9 tests in 1 file" in out
+
+    def test_only_tests_call_it_is_low_but_never_called_safe(self):
+        result = explain_node(_call_graph(tests=12), "target")
+        out = format_explanation(result)
+        assert result.risk_level == "LOW"
+        assert ("No production callers · 12 tests call it — update them if you change "
+                "its behaviour.") in out
+        assert "Safe to refactor" not in out
+
+    def test_no_callers_at_all_is_safe(self):
+        out = format_explanation(explain_node(_call_graph(), "target"))
+        assert "Nothing in the project depends on this function." in out
+        assert "Safe to refactor" in out
+        assert "Tested by" not in out
+
+    def test_the_llm_context_separates_them_too(self):
+        context = _build_context(_call_graph(callers=2, tests=3), "target")
+        assert "CALLED BY (2):" in context
+        assert "TESTED BY (3 tests in 1 file):" in context
+        assert "BLAST RADIUS: 2 production callers, 3 in tests (risk MEDIUM)" in context
+        called_by = context.split("CALLED BY")[1].split("TESTED BY")[0]
+        assert "test_t" not in called_by
+
+
+class TestFindNodeSkipsWhatSelectionLeavesOut:
+    @staticmethod
+    def _graph() -> nx.DiGraph:
+        G = nx.DiGraph()
+        G.add_node("lib.stats.recalc", label="recalc", type="function",
+                   source_file="lib/stats.py")
+        G.add_node("tests.test_stats.test_recalc", label="test_recalc", type="function",
+                   source_file="tests/test_stats.py")
+        G.add_node("app.import_recalc", label="lib.stats.recalc", type="import",
+                   source_file="app.py")
+        return G
+
+    def test_the_relevance_fallback_never_lands_on_a_test_or_an_import(self):
+        G = self._graph()
+        scores = {"tests.test_stats.test_recalc": 0.9, "app.import_recalc": 0.8,
+                  "lib.stats.recalc": 0.5}
+        assert find_node(G, "how are stats recalculated", scores) == "lib.stats.recalc"
+
+    def test_a_test_asked_for_by_name_is_found(self):
+        G = self._graph()
+        assert find_node(G, "test_recalc", {}) == "tests.test_stats.test_recalc"
+        assert find_node(G, "tests.test_stats.test_recalc", {}) == "tests.test_stats.test_recalc"
+
+    def test_a_graph_of_tests_alone_still_answers(self):
+        G = nx.DiGraph()
+        G.add_node("tests.t", label="t", type="function", source_file="tests/test_x.py")
+        assert find_node(G, "something", {"tests.t": 0.4}) == "tests.t"

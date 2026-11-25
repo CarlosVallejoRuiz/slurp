@@ -19,9 +19,12 @@ import networkx as nx
 from slurp.budget import count_tokens
 from slurp._graphutils import (
     _call_graph_gap,
+    _caller_counts,
     _callees,
     _display,
+    _files_of,
     _label,
+    _left_out,
     _risk_band,
     _split_callers,
 )
@@ -102,6 +105,7 @@ class ExplainResult:
     used_by: list[str] = field(default_factory=list)
     depends_on: list[str] = field(default_factory=list)
     test_callers: int = 0
+    test_files: list[str] = field(default_factory=list)
     production_callers: int = 0
     dependents_pct: float = 0.0
     advice: str = ""
@@ -304,8 +308,10 @@ def find_node(G: nx.DiGraph, query: str, scores: dict[str, float] | None = None)
     """Resolve a query to the node it most likely names.
 
     An exact node id or label match wins outright — asking about a node by name
-    should never be beaten by relevance scoring. Otherwise the highest-scoring
-    node is used.
+    should never be beaten by relevance scoring, even when it is a test.
+    Otherwise the highest-scoring node is used, skipping the tests and import
+    nodes a query leaves out (see _graphutils._left_out) unless nothing else
+    scored.
 
     Args:
         G: The graph.
@@ -335,9 +341,10 @@ def find_node(G: nx.DiGraph, query: str, scores: dict[str, float] | None = None)
 
     if scores:
         ranked = sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
-        for node_id, score in ranked:
-            if node_id in G and score > 0:
-                return node_id
+        for skip in (_left_out(G), frozenset()):
+            for node_id, score in ranked:
+                if node_id in G and score > 0 and node_id not in skip:
+                    return node_id
 
     raise SlurpExplainError(
         f"No node matches {query!r}. Try `slurp \"{query}\"` to search the graph."
@@ -416,6 +423,9 @@ def _risk_advice(G: nx.DiGraph, node_id: str, risk: str) -> str:
         return "Add tests covering the current behaviour before modifying."
     if risk == "MEDIUM":
         return "Check each caller before changing the signature."
+    production, tests = _split_callers(G, node_id)
+    if tests and not production:
+        return ""   # the risk line already says what to do: update the tests
     return "Safe to refactor — little depends on it."
 
 
@@ -450,14 +460,19 @@ def _risk_level(G: nx.DiGraph, node_id: str) -> str:
     calling it — so every function used to start one dependant ahead of its
     real count, pushing a single-caller helper up to MEDIUM.
 
+    DECISION: only production callers count, as in `slurp diff` and `slurp
+    impact`. Until v1.2 explain added the tests in, so a helper with one caller
+    and sixty tests was HIGH here and low in diff. The tests are shown apart.
+
     Returns:
-        "HIGH" (6+ dependents), "MEDIUM" (2–5), "LOW" (0–1), or "UNKNOWN" when
-        the node's language has no call graph and its callers cannot be known.
+        "HIGH" (6+ production callers), "MEDIUM" (2–5), "LOW" (0–1), or
+        "UNKNOWN" when the node's language has no call graph and its callers
+        cannot be known.
     """
     if _call_graph_gap(G, node_id):
         return "UNKNOWN"
-    production, tests = _split_callers(G, node_id)
-    return _risk_band(len(production) + len(tests))
+    production, _tests = _split_callers(G, node_id)
+    return _risk_band(len(production))
 
 
 def _neighbors_within(G: nx.DiGraph, node_id: str, hops: int) -> list[tuple[str, int]]:
@@ -525,24 +540,34 @@ def _build_context(
     # it does not depend on it. Feeding the model the larger number had it
     # writing "4 direct dependents" above a RISK line that said 3.
     production, tests = _split_callers(G, node_id)
-    callers = production + tests
     if gap := _call_graph_gap(G, node_id):
         lines.append("")
         lines.append(f"NOTE: {gap}. The caller and callee lists below are unknown, "
                      "not empty — do not describe this code as unused.")
     lines.append("")
-    lines.append(f"CALLED BY ({len(callers)}):")
-    if callers:
-        for caller in callers[:_MAX_LISTED_NEIGHBORS]:
+    lines.append(f"CALLED BY ({len(production)}):")
+    if production:
+        for caller in production[:_MAX_LISTED_NEIGHBORS]:
             rel = G.edges[caller, node_id].get("relation", "references")
             lines.append(
                 f"  - {_display(G, caller)} "
                 f"[{G.nodes[caller].get('type', '?')}] --{rel}-->"
             )
-        if len(callers) > _MAX_LISTED_NEIGHBORS:
-            lines.append(f"  … and {len(callers) - _MAX_LISTED_NEIGHBORS} more")
+        if len(production) > _MAX_LISTED_NEIGHBORS:
+            lines.append(f"  … and {len(production) - _MAX_LISTED_NEIGHBORS} more")
     else:
-        lines.append("  (nothing depends on this node)")
+        lines.append("  (no production code depends on this node)" if tests
+                     else "  (nothing depends on this node)")
+    if tests:
+        files = _files_of(G, tests)
+        lines.append("")
+        lines.append(f"TESTED BY ({len(tests)} test{'' if len(tests) == 1 else 's'} in "
+                     f"{len(files)} file{'' if len(files) == 1 else 's'}):")
+        for test in tests[:_MAX_LISTED_NEIGHBORS]:
+            lines.append(f"  - {_display(G, test)} [{G.nodes[test].get('type', '?')}]")
+        if len(tests) > _MAX_LISTED_NEIGHBORS:
+            lines.append(f"  … and {len(tests) - _MAX_LISTED_NEIGHBORS} more")
+    callers = production + tests
 
     callees = _callees(G, node_id)
     lines.append("")
@@ -577,7 +602,7 @@ def _build_context(
             lines.append(f"  … and {len(wider) - _MAX_LISTED_NEIGHBORS * 2} more")
 
     lines.append("")
-    lines.append(f"BLAST RADIUS: {len(callers)} direct dependents "
+    lines.append(f"BLAST RADIUS: {_caller_counts(len(production), len(tests))} "
                  f"(risk {_risk_level(G, node_id)})")
     return "\n".join(lines)
 
@@ -938,7 +963,8 @@ def explain_node(
         score=round(scores.get(node_id, 0.0), 4),
     )
     production, tests = _split_callers(G, node_id)
-    result.callers = [_display(G, n) for n in production + tests]
+    result.callers = [_display(G, n) for n in production]
+    result.test_files = _files_of(G, tests)
     parent = _parent_module(G, node_id)
     result.role = _architectural_role(G, node_id)
     result.part_of = _display(G, parent) if parent else ""
@@ -1040,24 +1066,33 @@ def format_explanation(result: ExplainResult, width: int = 69) -> str:
         extra = len(result.callers) - len(shown)
         lines.extend(_wrap_list(
             shown + ([f"+{extra} more"] if extra > 0 else []), "→ Called by: "))
+        if result.test_callers:
+            files = len(result.test_files)
+            lines.append(f"→ Tested by: {result.test_callers} "
+                         f"test{'' if result.test_callers == 1 else 's'}"
+                         + (f" in {files} file{'' if files == 1 else 's'}" if files else ""))
         lines.extend(_wrap_list(result.callees[:_ARCH_LIST_MAX], "← Calls: "))
     lines.append("")
 
     noun = result.node_type or "node"
     # Fall back to the caller list when the count was not populated, so a
-    # result built by hand still renders an accurate line.
-    count = result.production_callers or (len(result.callers) - result.test_callers)
+    # result built by hand still renders an accurate line. `callers` holds
+    # production callers only.
+    count = result.production_callers or len(result.callers)
+    tests = result.test_callers
     lines.append(f"RISK IF CHANGED: {result.risk_level}")
     if result.risk_reason:
         summary = f"Callers unknown: {result.risk_reason}"
+    elif count:
+        summary = _caller_counts(count, tests)
+    elif tests:
+        # DECISION: never "safe" while tests call it: nothing shipped breaks,
+        # but its tests do. SAFE is for code with no caller of either kind.
+        summary = (f"No production callers · {tests} test{'' if tests == 1 else 's'} "
+                   f"call{'s' if tests == 1 else ''} it — update them if you change "
+                   "its behaviour")
     else:
-        summary = (
-            f"{count} node depends on this {noun}" if count == 1
-            else f"{count} nodes depend on this {noun}" if count
-            else f"Nothing in the project depends on this {noun}"
-        )
-    if result.test_callers:
-        summary += f" ({result.test_callers} more in tests)"
+        summary = f"Nothing in the project depends on this {noun}"
     if result.dependents_pct:
         summary += f" — {result.dependents_pct}% of the project"
     lines.append(summary + ".")

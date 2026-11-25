@@ -17,11 +17,13 @@ from slurp._graphutils import (
     _call_graph_gap,
     _display,
     _extensions_with_calls,
+    _is_import,
     _risk_band,
     _split_callers,
 )
 
 _TOP_FILES = 10
+_TOP_TEST_FILES = 5
 _SAFE_LISTED = 6
 
 
@@ -37,10 +39,16 @@ class ImpactResult:
     risk_level: str = "LOW"
     affected_files: list[str] = field(default_factory=list)
     impact_score: float = 0.0
-    # Nodes in the file nothing depends on, which is the other half of the
-    # question: not only what is dangerous, but what is free to touch.
+    # Nodes in the file nothing calls, not even a test, which is the other half
+    # of the question: not only what is dangerous, but what is free to touch.
     safe_nodes: list[str] = field(default_factory=list)
     dependents_per_node: dict[str, int] = field(default_factory=dict)
+    # Tests outside the file that call into it, kept apart from the production
+    # dependents the risk is measured on — they are what to run after editing.
+    test_dependents: list[str] = field(default_factory=list)
+    test_files: list[str] = field(default_factory=list)
+    # Nodes only tests call: LOW, but not safe — changing them breaks tests.
+    test_only_nodes: list[str] = field(default_factory=list)
     # Set when the file's language has no call graph: risk_level is then
     # "UNKNOWN" and nothing is listed as safe.
     risk_reason: str = ""
@@ -86,9 +94,9 @@ def _is_file_node(G: nx.DiGraph, node: str) -> bool:
 
 
 def _dependants(G: nx.DiGraph, node: str) -> list[str]:
-    """Nodes that depend on *node* — callers, never its containing module."""
-    production, tests = _split_callers(G, node)
-    return production + tests
+    """Production code that depends on *node* — never its containing module,
+    an import node or a test (see _split_callers)."""
+    return _split_callers(G, node)[0]
 
 
 def analyze_impact(G: nx.DiGraph, file_path: str, hops: int = 2) -> ImpactResult:
@@ -103,9 +111,14 @@ def analyze_impact(G: nx.DiGraph, file_path: str, hops: int = 2) -> ImpactResult
         An ImpactResult. A file with no nodes in the graph yields an empty
         result rather than an error: asking about an unindexed file is a
         reasonable question with a boring answer.
+
+    DECISION: the risk counts production dependents only, as explain and diff
+    do; tests calling into the file are listed apart (test_dependents). Import
+    nodes are not definitions anyone edits and are left out of the file's
+    nodes. Until v1.2 tests counted as dependents and imports as definitions.
     """
     result = ImpactResult(file_path=file_path)
-    owned = nodes_in_file(G, file_path)
+    owned = [n for n in nodes_in_file(G, file_path) if not _is_import(G, n)]
     if not owned:
         return result
 
@@ -113,21 +126,30 @@ def analyze_impact(G: nx.DiGraph, file_path: str, hops: int = 2) -> ImpactResult
     owned_set = set(owned)
 
     direct: set[str] = set()
+    tested_by: set[str] = set()
     per_node: dict[str, int] = {}
     untouched: list[str] = []
+    tests_only: list[str] = []
     for node in owned:
-        callers = _dependants(G, node)
-        outside = [c for c in callers if c not in owned_set]
+        production, tests = _split_callers(G, node)
+        outside = [c for c in production if c not in owned_set]
         per_node[node] = len(outside)
         direct.update(outside)
-        # "Safe" means nothing depends on it at all. A node with three callers
-        # in this same file is not safe to edit — it is merely contained.
-        if not callers:
+        tested_by.update(t for t in tests if t not in owned_set)
+        # "Safe" means nothing calls it at all, not even a test. A node with
+        # three callers in this same file is not safe to edit — it is merely
+        # contained — and one only tests call breaks those tests.
+        if not production and not tests:
             untouched.append(node)
+        elif not production:
+            tests_only.append(node)
 
     result.direct_dependents = sorted(direct)
     result.dependents_per_node = per_node
     result.safe_nodes = sorted(untouched)
+    result.test_only_nodes = sorted(tests_only)
+    result.test_dependents = sorted(tested_by)
+    result.test_files = sorted({_source_of(G, t) for t in tested_by if _source_of(G, t)})
 
     # Transitive reach: follow dependants of dependants, against the edges,
     # since "who would notice this change" runs the opposite way to "calls".
@@ -164,6 +186,7 @@ def analyze_impact(G: nx.DiGraph, file_path: str, hops: int = 2) -> ImpactResult
         result.risk_level = "UNKNOWN"
         result.risk_reason = gap
         result.safe_nodes = []
+        result.test_only_nodes = []
 
     files = {
         _source_of(G, n) for n in direct | reached
@@ -202,6 +225,10 @@ def _recommendation(result: ImpactResult) -> str:
                 "changing any signature.")
     if not result.nodes_in_file:
         return "Nothing in the graph comes from this file — nothing to break."
+    if tests := len(result.test_dependents):
+        return (f"No production code outside this file depends on it · {tests} "
+                f"test{'s' if tests != 1 else ''} call{'' if tests != 1 else 's'} into "
+                "it — update them if you change its behaviour.")
     return "Safe to edit — nothing outside this file depends on it."
 
 
@@ -228,10 +255,13 @@ def format_impact(result: ImpactResult, G: nx.DiGraph, width: int = 69) -> str:
         top = result.highest_risk_node
         dependants = result.dependents_per_node[top]
         share = round(dependants / (G.number_of_nodes() or 1) * 100, 1)
+        owned = set(result.nodes_in_file)
+        tests = sum(1 for t in _split_callers(G, top)[1] if t not in owned)
         lines.append("HIGHEST RISK NODE")
-        lines.append(f"  {_display(G, top)} — {dependants} direct "
-                     f"dependent{'s' if dependants != 1 else ''} "
-                     f"({share}% of codebase)")
+        lines.append(f"  {_display(G, top)} — {dependants} production "
+                     f"dependent{'s' if dependants != 1 else ''}"
+                     + (f" (+{tests} in tests)" if tests else "")
+                     + f" ({share}% of codebase)")
         lines.append("")
 
     counts = _file_counts(G, result.direct_dependents)
@@ -245,9 +275,35 @@ def format_impact(result: ImpactResult, G: nx.DiGraph, width: int = 69) -> str:
             lines.append(f"  … and {len(counts) - _TOP_FILES} more files")
         lines.append("")
 
+    if result.test_dependents:
+        tests, files = len(result.test_dependents), len(result.test_files)
+        by_file = _file_counts(G, result.test_dependents)
+        lines.append(f"TESTS — {tests} test{'s' if tests != 1 else ''} in {files} "
+                     f"file{'s' if files != 1 else ''} call into this file")
+        pad = max(len(_truncate(f)) for f, _ in by_file[:_TOP_TEST_FILES])
+        for path, n in by_file[:_TOP_TEST_FILES]:
+            lines.append(f"  {_truncate(path).ljust(pad)}  {n} test{'s' if n != 1 else ''}")
+        if files > _TOP_TEST_FILES:
+            lines.append(f"  … and {files - _TOP_TEST_FILES} more files")
+        lines.append("")
+
     if result.risk_reason:
         lines.append("RISK UNKNOWN")
         lines.append(f"  {result.risk_reason[0].upper()}{result.risk_reason[1:]}.")
+        lines.append("")
+
+    if result.test_only_nodes:
+        lines.append("NO PRODUCTION CALLERS")
+        for node in result.test_only_nodes[:_SAFE_LISTED]:
+            n = len(_split_callers(G, node)[1])
+            lines.append(f"  {_display(G, node)} · {n} test{'s' if n != 1 else ''} "
+                         f"call{'' if n != 1 else 's'} it")
+        if len(result.test_only_nodes) > _SAFE_LISTED:
+            lines.append(f"  … and {len(result.test_only_nodes) - _SAFE_LISTED} more")
+        # Never SAFE TO EDIT: nothing shipped breaks, but these tests do.
+        lines.append("  LOW — update them if you change its behaviour."
+                     if len(result.test_only_nodes) == 1 else
+                     "  LOW — update their tests if you change their behaviour.")
         lines.append("")
 
     if result.safe_nodes:
@@ -256,7 +312,7 @@ def format_impact(result: ImpactResult, G: nx.DiGraph, width: int = 69) -> str:
         lines.append("SAFE TO EDIT")
         lines.append("  " + ", ".join(shown)
                      + (f", +{extra} more" if extra > 0 else "")
-                     + "  — 0 dependents")
+                     + "  — nothing calls them, not even a test")
         lines.append("")
 
     lines.append("RECOMMENDATION")
@@ -266,6 +322,7 @@ def format_impact(result: ImpactResult, G: nx.DiGraph, width: int = 69) -> str:
     lines.append(
         f"Direct: {len(result.direct_dependents)} · "
         f"Transitive: {len(result.transitive_dependents)} · "
+        f"Tests: {len(result.test_dependents)} · "
         f"Impact score: {result.impact_score}"
     )
     return "\n".join(lines)
@@ -285,4 +342,7 @@ def impact_to_dict(result: ImpactResult) -> dict:
         "affected_files": result.affected_files,
         "safe_nodes": result.safe_nodes,
         "dependents_per_node": result.dependents_per_node,
+        "test_only_nodes": result.test_only_nodes,
+        "test_dependents": result.test_dependents,
+        "test_files": result.test_files,
     }

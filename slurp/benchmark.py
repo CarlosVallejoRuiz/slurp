@@ -136,6 +136,8 @@ def run_benchmark(
     backend: str = "tfidf",
     model_price: str = "default",
     token_factor: float = 1.0,
+    include_tests: bool = False,
+    include_imports: bool = False,
 ) -> BenchmarkResult:
     """Run a battery of queries across multiple budgets and measure token savings.
 
@@ -148,6 +150,9 @@ def run_benchmark(
         neighbor_decay: Neighbor decay passed to select_subgraph.
         backend: Scoring backend — 'tfidf' (default), 'openai', or 'anthropic'.
         model_price: Key into MODEL_PRICES_PER_MTok used to price token counts.
+        include_tests: Let test nodes compete, as in `slurp QUERY --include-tests`.
+        include_imports: Let import nodes compete. The full-graph baseline holds
+            every node either way: it is what would be sent without slurp.
 
     Returns:
         BenchmarkResult with per-row data and aggregate statistics.
@@ -171,7 +176,8 @@ def run_benchmark(
                 _text, subG, stats = build_context(
                     G, scores, budget=budget, model=model,
                     neighbor_decay=neighbor_decay, min_score=min_score, query=query,
-                    token_factor=token_factor,
+                    token_factor=token_factor, include_tests=include_tests,
+                    include_imports=include_imports,
                 )
             except BudgetTooSmallError as exc:
                 rows.append(QueryBudgetResult(

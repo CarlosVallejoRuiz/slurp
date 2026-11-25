@@ -16,6 +16,7 @@ import networkx as nx
 from slurp._graphutils import (
     _display,
     _is_test,
+    _left_out,
     _risk_band,
     _split_callers,
     _tokenize,
@@ -50,12 +51,14 @@ class SuggestedQuery:
     relevance_score: float = 0.0
 
 
-def _frontier(G: nx.DiGraph, subgraph: nx.DiGraph, hops: int = _FRONTIER_HOPS) -> set[str]:
+def _frontier(G: nx.DiGraph, subgraph: nx.DiGraph, hops: int = _FRONTIER_HOPS,
+              exclude: frozenset = frozenset()) -> set[str]:
     """Nodes within *hops* of the subgraph that did not make it in.
 
     This is the whole premise: they were connected enough to be neighbours and
     not relevant enough to be selected, which is exactly the shape of a thing
-    the user has not looked at yet.
+    the user has not looked at yet. Nodes in *exclude* — the ones selection
+    left out without competing — are no such thing.
     """
     selected = set(subgraph.nodes)
     if not selected:
@@ -67,7 +70,7 @@ def _frontier(G: nx.DiGraph, subgraph: nx.DiGraph, hops: int = _FRONTIER_HOPS) -
             continue
         for neighbour in nx.single_source_shortest_path_length(
                 undirected, node, cutoff=hops):
-            if (neighbour not in selected
+            if (neighbour not in selected and neighbour not in exclude
                     and G.nodes[neighbour].get("type") not in _UNINTERESTING_TYPES):
                 reached.add(neighbour)
     return reached
@@ -217,6 +220,7 @@ def suggest_queries(
     scores: dict[str, float],
     subgraph: nx.DiGraph,
     n: int = 3,
+    exclude: frozenset | None = None,
 ) -> list[SuggestedQuery]:
     """Propose up to *n* queries that explore what this answer left out.
 
@@ -226,6 +230,9 @@ def suggest_queries(
         scores: Relevance scores from the scorer.
         subgraph: The selected subgraph.
         n: Maximum number of suggestions.
+        exclude: Nodes the selection left out without letting them compete;
+            never suggested. Defaults to the selection default: tests and
+            import nodes (see _graphutils._left_out).
 
     Returns:
         Suggestions ordered by estimated relevance, highest first. An empty
@@ -235,7 +242,7 @@ def suggest_queries(
     if n <= 0 or not subgraph.number_of_nodes():
         return []
 
-    frontier = _frontier(G, subgraph)
+    frontier = _frontier(G, subgraph, exclude=_left_out(G) if exclude is None else exclude)
     if not frontier:
         return []
 

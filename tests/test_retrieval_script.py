@@ -105,6 +105,7 @@ class TestMeasuring:
             assert row["format"] == "markdown" and row["budget"] == 4000
             assert row["questions_scored"] == 1     # one tuning node per project
             assert row["recall"] == 1.0
+            assert row["mrr"] == row["mrr_all"] == 1.0   # nothing left out ranks first
             assert row["tokens_per_node"] > 0
             assert row["results"]                   # per question, from slurp eval
         assert "holdout" not in res.stdout
@@ -122,6 +123,7 @@ class TestMeasuring:
         # No holdout node is in the tiny graph: reported, not scored, no crash.
         assert groups[("slurp", "holdout")]["questions_scored"] == 0
         assert groups[("slurp", "holdout")]["recall"] is None
+        assert groups[("slurp", "holdout")]["mrr_all"] is None
 
     def test_a_directory_is_indexed_with_the_code_under_test(self, tmp_path):
         project = tmp_path / "proj"

@@ -474,6 +474,18 @@ def _retrieval_graph() -> nx.DiGraph:
     return G
 
 
+def _with_a_test() -> nx.DiGraph:
+    """_retrieval_graph plus a test that outscores auth.login for "login user
+    session", and an import of it that does not."""
+    G = _retrieval_graph()
+    G.add_node("tests.test_auth.test_login_user", label="test_login_user_session",
+               type="function", source_file="tests/test_auth.py")
+    G.add_node("app.import_login_user", label="auth.login_user", type="import",
+               source_file="app.py")
+    G.add_edge("tests.test_auth.test_login_user", "auth.login", relation="calls")
+    return G
+
+
 def _q(qid: str, question: str, relevant: list[str]) -> "EvalQuestion":
     return EvalQuestion(id=qid, question=question, area="t", ground_truth="-",
                         relevant_nodes=relevant)
@@ -503,6 +515,47 @@ class TestRetrievalEval:
         r = suite.results[0]
         assert r.first_rank in (1, 2)
         assert r.reciprocal_rank == round(1 / r.first_rank, 4)
+
+    def test_the_rank_counts_the_nodes_slurp_could_return(self):
+        # MRR reads the position a reader meets the node at: tests and imports
+        # left out of selection are left out of the ranking too. The rank over
+        # every node — the v1.1.1 definition — is kept beside it.
+        from slurp.evaluator import run_retrieval_eval
+        from slurp.scorer import score_nodes
+
+        G = _with_a_test()
+        scores = score_nodes(G, "login user session")
+        ahead = [n for n in G if scores[n] > scores["auth.login"]]
+        assert set(ahead) == {"tests.test_auth.test_login_user"}
+
+        r = run_retrieval_eval(G, [_q("a", "login user session", ["auth.login"])]).results[0]
+        assert r.first_rank == 1 and r.first_rank_all == 2
+        assert r.reciprocal_rank == 1.0 and r.reciprocal_rank_all == 0.5
+        suite = run_retrieval_eval(G, [_q("a", "login user session", ["auth.login"])])
+        assert suite.mrr == 1.0 and suite.mrr_all == 0.5
+        d = suite.to_dict()
+        assert d["mrr_all"] == 0.5 and d["results"][0]["first_rank_all"] == 2
+
+    def test_the_include_flags_select_and_rank_like_a_query(self):
+        from slurp.evaluator import run_retrieval_eval
+
+        G = _with_a_test()
+        q = [_q("a", "login user session", ["auth.login"])]
+        r = run_retrieval_eval(G, q, include_tests=True).results[0]
+        assert r.first_rank == r.first_rank_all == 2
+        both = run_retrieval_eval(G, q, include_tests=True, include_imports=True).results[0]
+        assert both.first_rank == both.first_rank_all
+
+    def test_a_relevant_node_left_out_of_selection_cannot_be_found(self):
+        # Such a question is impossible with the defaults: say so in the
+        # numbers (recall 0, no rank) instead of hiding the question.
+        from slurp.evaluator import run_retrieval_eval
+
+        r = run_retrieval_eval(_with_a_test(), [
+            _q("t", "login user session", ["tests.test_auth.test_login_user"])]).results[0]
+        assert r.scorable and r.recall == 0.0
+        assert r.first_rank is None and r.reciprocal_rank == 0.0
+        assert r.first_rank_all == 1
 
     def test_never_calls_an_llm(self, monkeypatch):
         import slurp.evaluator as ev
@@ -609,6 +662,34 @@ class TestRetrievalEval:
         assert "Tokens" in res.output and "json" in res.output
         data = json.loads(out.read_text())
         assert data["format"] == "json" and data["results"][0]["tokens_used"] > 0
+
+    def test_cli_include_flags_reach_the_selection_and_the_rank(self, tmp_path):
+        graph = tmp_path / "g.json"
+        graph.write_text(json.dumps(nx.node_link_data(_with_a_test(), edges="links")))
+        questions = tmp_path / "q.json"
+        questions.write_text(json.dumps([{"id": "a", "question": "login user session",
+                                          "ground_truth": "-", "relevant_nodes": ["auth.login"]}]))
+        ranks = {}
+        for flags in ([], ["--include-tests"], ["--include-tests", "--include-imports"]):
+            out = tmp_path / "r.json"
+            res = CliRunner().invoke(cli, ["eval", "--retrieval", "--graph", str(graph),
+                                           "--questions", str(questions), "--output", str(out),
+                                           *flags])
+            assert res.exit_code == 0, res.output
+            ranks[tuple(flags)] = json.loads(out.read_text())["results"][0]["first_rank"]
+        assert ranks[()] == 1 and ranks[("--include-tests",)] == 2
+
+    def test_cli_shows_both_mrr_when_they_differ(self, tmp_path):
+        graph = tmp_path / "g.json"
+        graph.write_text(json.dumps(nx.node_link_data(_with_a_test(), edges="links")))
+        questions = tmp_path / "q.json"
+        questions.write_text(json.dumps([{"id": "a", "question": "login user session",
+                                          "ground_truth": "-", "relevant_nodes": ["auth.login"]}]))
+        res = CliRunner().invoke(cli, ["eval", "--retrieval", "--graph", str(graph),
+                                       "--questions", str(questions)])
+        assert res.exit_code == 0, res.output
+        assert "MRR:            1.000" in res.output
+        assert "0.500 ranking every node, tests and imports included" in res.output
 
     def test_cli_format_is_refused_without_retrieval(self, tmp_path):
         # The LLM eval sends markdown; a format it would ignore must not pass silently.

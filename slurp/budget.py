@@ -15,6 +15,7 @@ from collections.abc import Callable, Mapping
 import networkx as nx
 import tiktoken
 
+from slurp._graphutils import _left_out, _left_out_sets
 from slurp.formatter import format_subgraph, item_text
 
 
@@ -165,14 +166,35 @@ def _assemble(G: nx.DiGraph, nodes: list[str], edges: list[tuple[str, str]]) -> 
     return sub
 
 
+# (candidates, min_score[, test nodes left out, import nodes left out]):
+# how many nodes could take a place, and why the others could not.
+LeftOut = tuple
+
+
+def left_out_from_stats(stats: dict) -> LeftOut | None:
+    """The `left_out` that produced *stats*, for trimming them again.
+
+    A caller that trims a build_context result once more with fit_to_budget
+    (the CLI's --inject-code) passes this so the new stats keep every cause.
+    None for stats without the breakdown.
+    """
+    if "nodes_over_budget" not in stats:
+        return None
+    tests = stats.get("nodes_excluded_tests", 0)
+    imports = stats.get("nodes_excluded_imports", 0)
+    candidates = stats["nodes_total"] - stats["nodes_below_min_score"] - tests - imports
+    return (candidates, stats["min_score"], tests, imports)
+
+
 def _measure(sub: nx.DiGraph, render: Renderer, budget: int, nodes_total: int,
              model: str, warning: str = "", factor: float = 1.0,
-             left_out: tuple[int, float] | None = None) -> tuple[str, dict, int, bool]:
+             left_out: LeftOut | None = None) -> tuple[str, dict, int, bool]:
     """Render *sub* with stats that state its own true token count.
 
     Args:
-        left_out: (candidates, min_score) — how many nodes cleared min_score.
-            With it, the stats split the nodes left out by cause.
+        left_out: (candidates, min_score[, tests, imports]) — how many nodes
+            cleared min_score, and how many tests and imports were left out
+            of selection. With it, the stats split the nodes left out by cause.
 
     Returns:
         (text, stats, tokens, settled). `settled` is False when the count never
@@ -191,10 +213,16 @@ def _measure(sub: nx.DiGraph, render: Renderer, budget: int, nodes_total: int,
         # fixes: a node that did not fit comes in with more budget; one below
         # min_score never does. Until v1.1.0 the tip lumped both together as
         # "connected nodes" and sent everyone to --budget.
-        candidates, min_score = left_out
+        candidates, min_score, *kinds = left_out
+        tests, imports = (*kinds, 0, 0)[:2]
         stats["nodes_over_budget"] = max(0, candidates - n)
-        stats["nodes_below_min_score"] = nodes_total - candidates
+        stats["nodes_below_min_score"] = nodes_total - candidates - tests - imports
         stats["min_score"] = min_score
+        # A third cause, with its own fix: these never competed (see _left_out).
+        if tests:
+            stats["nodes_excluded_tests"] = tests
+        if imports:
+            stats["nodes_excluded_imports"] = imports
     if warning:
         stats["warning"] = warning
     if factor != 1.0:
@@ -225,7 +253,7 @@ def fit_to_budget(
     costs: dict[tuple, int] | None = None,
     item_cost: Callable[[tuple], int] | None = None,
     token_factor: float = 1.0,
-    left_out: tuple[int, float] | None = None,
+    left_out: LeftOut | None = None,
 ) -> tuple[str, nx.DiGraph, dict]:
     """Trim *sub* until its rendered text measures at most *budget* tokens.
 
@@ -244,9 +272,11 @@ def fit_to_budget(
         item_cost: Computes a missing cost. With neither, one item goes per
             round — slower, never too many.
         token_factor: Multiplies every count (see resolve_token_factor).
-        left_out: (candidates, min_score): how many nodes of the full graph
-            cleared min_score. With it the stats carry nodes_over_budget and
-            nodes_below_min_score, which the closing tip reports.
+        left_out: (candidates, min_score[, tests, imports]): how many nodes of
+            the full graph cleared min_score, and how many tests and imports
+            were left out of selection (left_out_from_stats rebuilds it). With
+            it the stats carry nodes_over_budget, nodes_below_min_score and the
+            nodes_excluded_* counts, which the closing tip reports.
 
     Returns:
         (text, subgraph, stats). The text measures <= budget. If trimming
@@ -330,6 +360,8 @@ def build_context(
     query: str = "",
     render: Renderer | None = None,
     token_factor: float = 1.0,
+    include_tests: bool = False,
+    include_imports: bool = False,
 ) -> tuple[str, nx.DiGraph, dict]:
     """Select a subgraph and return the text that fits *budget*, measured.
 
@@ -343,7 +375,9 @@ def build_context(
        at every score level the output holds the nodes and the relationships
        among them, and what is left out first is the structural edges of
        low-scoring nodes, then low-scoring nodes. Each item is costed with the
-       formatter's own renderer in *format*.
+       formatter's own renderer in *format*. Test and import nodes are not
+       candidates unless let in (see _graphutils._left_out); they are neither
+       selected nor boosted, and pass no boost on.
     3. fit_to_budget renders the whole text, counts it, and trims until it
        fits; the stats state the true count of the text returned.
 
@@ -360,6 +394,8 @@ def build_context(
             formatted subgraph (exporter). Defaults to format_subgraph.
         token_factor: Multiplies every token count, for a reader whose
             tokenizer differs from tiktoken (see resolve_token_factor).
+        include_tests: Let test nodes compete for a place.
+        include_imports: Let import nodes compete for a place.
 
     Returns:
         (text, subgraph, stats). count_tokens(text) <= budget, and stats report
@@ -376,8 +412,11 @@ def build_context(
     _check_factor(token_factor)
     nodes_total = G.number_of_nodes()
     empty = nx.DiGraph()
-    candidates = {n for n in G.nodes if scores.get(n, 0.0) >= min_score}
-    left_out = (len(candidates), min_score)
+    excluded = _left_out(G, include_tests, include_imports)
+    excluded_tests = len(excluded & _left_out_sets(G)[0])
+    candidates = {n for n in G.nodes
+                  if n not in excluded and scores.get(n, 0.0) >= min_score}
+    left_out = (len(candidates), min_score, excluded_tests, len(excluded) - excluded_tests)
 
     # 1. The smallest output this call can return.
     widest = _too_small_warning(budget, 10 ** 7)
@@ -478,10 +517,12 @@ def full_graph_tokens(
     """Tokens of the whole graph sent exactly the way an answer is sent.
 
     The honest baseline for "tokens saved": same formatter, same header with
-    the same query, same scores, every node and relationship.
+    the same query, same scores, every node and relationship — tests and
+    imports included, since without slurp they would be sent too.
     """
     _, _, stats = build_context(G, scores, _UNBOUNDED, model, min_score=0.0,
-                                format=format, query=query, token_factor=token_factor)
+                                format=format, query=query, token_factor=token_factor,
+                                include_tests=True, include_imports=True)
     return stats["tokens_used"]
 
 
@@ -497,6 +538,8 @@ def select_subgraph(
     query: str = "",
     render: Renderer | None = None,
     token_factor: float = 1.0,
+    include_tests: bool = False,
+    include_imports: bool = False,
 ) -> tuple[nx.DiGraph, dict]:
     """Like build_context, returning only (subgraph, stats).
 
@@ -506,5 +549,6 @@ def select_subgraph(
     """
     _, sub, stats = build_context(G, scores, budget, model, neighbor_decay, min_score,
                                   format=format, query=query, render=render,
-                                  token_factor=token_factor)
+                                  token_factor=token_factor, include_tests=include_tests,
+                                  include_imports=include_imports)
     return sub, stats

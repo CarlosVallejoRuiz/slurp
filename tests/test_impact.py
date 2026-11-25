@@ -324,3 +324,88 @@ class TestUnknownRiskWithoutCallGraph:
                                        "--output", "json"])
         assert res.exit_code == 0, res.output
         assert json.loads(res.output)["risk_level"] == "UNKNOWN"
+
+
+# ---------------------------------------------------------------------------
+# Tests are reported apart; imports are not definitions (v1.2, #20/#59)
+# ---------------------------------------------------------------------------
+
+def _tested_graph(production: int = 2) -> nx.DiGraph:
+    """_graph plus tests of both definitions and an import in the file."""
+    G = _graph(dependents=production)
+    for i in range(3):
+        _add(G, f"t{i}", f"test_create_client_{i}", "tests/test_core.py")
+        G.add_edge(f"t{i}", "hot", relation="calls")
+    _add(G, "tc", "test_format_date", "tests/test_dates.py")
+    G.add_edge("tc", "cold", relation="calls")
+    _add(G, "imp", "os", TARGET, ntype="import")
+    G.add_edge("file", "imp", relation="imports_from")
+    return G
+
+
+class TestTestsAreReportedApart:
+    def test_direct_dependents_and_the_band_are_production_only(self):
+        result = analyze_impact(_tested_graph(production=2), TARGET)
+        assert result.direct_dependents == ["dep0", "dep1"]
+        assert result.risk_level == "MEDIUM"
+        # Until v1.2 the three tests were added in: 5 dependents, still MEDIUM;
+        # one production caller and many tests was MEDIUM or HIGH, now LOW.
+        G = _tested_graph(production=1)
+        for i in range(3, 10):
+            _add(G, f"t{i}", f"test_more_{i}", "tests/test_core.py")
+            G.add_edge(f"t{i}", "hot", relation="calls")
+        assert analyze_impact(G, TARGET).risk_level == "LOW"
+
+    def test_the_tests_and_their_files_are_listed(self):
+        result = analyze_impact(_tested_graph(), TARGET)
+        assert result.test_dependents == ["t0", "t1", "t2", "tc"]
+        assert result.test_files == ["tests/test_core.py", "tests/test_dates.py"]
+        assert "tests/test_core.py" not in result.affected_files
+
+    def test_imports_are_not_definitions(self):
+        result = analyze_impact(_tested_graph(), TARGET)
+        assert set(result.nodes_in_file) == {"file", "hot", "cold"}
+        assert "imp" not in result.dependents_per_node
+        assert "imp" not in result.safe_nodes
+
+    def test_safe_means_no_caller_of_either_kind(self):
+        result = analyze_impact(_tested_graph(), TARGET)
+        assert result.safe_nodes == ["file"]
+        assert result.test_only_nodes == ["cold"]
+
+    def test_the_report_has_a_tests_section_and_never_calls_tested_code_safe(self):
+        G = _tested_graph()
+        out = format_impact(analyze_impact(G, TARGET), G)
+        assert ("TESTS — 4 tests in 2 files call into this file\n"
+                "  tests/test_core.py   3 tests\n"
+                "  tests/test_dates.py  1 test\n") in out
+        assert "NO PRODUCTION CALLERS" in out
+        assert "formatDate() · 1 test calls it" in out
+        assert "update them if you change its behaviour" in out.lower()
+        safe = out.split("SAFE TO EDIT")[1].split("\n\n")[0]
+        assert "formatDate" not in safe and "core.py" in safe
+
+    def test_the_highest_risk_node_gives_both_counts(self):
+        G = _tested_graph()
+        out = format_impact(analyze_impact(G, TARGET), G)
+        assert "createClient() — 2 production dependents (+3 in tests)" in out
+
+    def test_the_footer_counts_the_tests(self):
+        G = _tested_graph()
+        out = format_impact(analyze_impact(G, TARGET), G)
+        assert "Direct: 2 · Transitive: 0 · Tests: 4 · Impact score:" in out
+
+    def test_low_risk_with_tests_points_at_them(self):
+        G = _tested_graph(production=0)
+        out = format_impact(analyze_impact(G, TARGET), G)
+        assert "RISK: LOW" in out
+        assert "Safe to edit" not in out
+        assert ("No production code outside this file depends on it · 4 tests call into "
+                "it — update them if you change its behaviour.") in out
+
+    def test_json_tells_safe_from_tested_only(self):
+        payload = impact_to_dict(analyze_impact(_tested_graph(), TARGET))
+        assert payload["safe_nodes"] == ["file"]
+        assert payload["test_only_nodes"] == ["cold"]
+        assert payload["test_dependents"] == ["t0", "t1", "t2", "tc"]
+        assert payload["test_files"] == ["tests/test_core.py", "tests/test_dates.py"]
