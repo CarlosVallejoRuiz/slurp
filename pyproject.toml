@@ -116,12 +116,7 @@ dev = [
 [tool.hatch.build.targets.wheel]
 packages = ["slurp"]
 
+# A whitelist: the sdist holds the package and its docs, whatever else sits in
+# the working tree. An exclude list let an untracked file into 1.0.7 and 1.1.0.
 [tool.hatch.build.targets.sdist]
-exclude = [
-  "assets/",
-  "images/",
-  "tests/",
-  "uv.lock",
-  "scratchpad/",
-  ".slurp/",
-]
+only-include = ["slurp", "README.md", "USAGE.md"]

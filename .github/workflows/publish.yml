@@ -91,6 +91,16 @@ jobs:
           test -f "dist/slurp_graph-${v}-py3-none-any.whl"
           test "$(ls dist/ | wc -l)" -eq 2
 
+      - name: The sdist holds the package and its docs, nothing else
+        run: |
+          v="${TAG#v}"
+          tar -tzf "dist/slurp_graph-${v}.tar.gz" | while read -r f; do
+            case "${f#slurp_graph-${v}/}" in
+              slurp/*|README.md|USAGE.md|pyproject.toml|PKG-INFO|.gitignore|"") ;;
+              *) echo "::error::unexpected file in the sdist: $f"; exit 1 ;;
+            esac
+          done
+
       - name: Keep dist/ as an artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

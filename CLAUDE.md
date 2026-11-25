@@ -559,8 +559,18 @@ elegida (main) y el código del tag, así se publica un tag anterior al workflow
 `publish`: `environment: pypi`, `id-token: write`, `pypa/gh-action-pypi-publish`.
 Acciones fijadas por SHA con la versión en comentario; `tests/test_publish_workflow.py`
 lo vigila (pins, OIDC solo en publish, sin secrets, sin `${{ }}` dentro de un `run:`).
-Nunca publicar a mano desde `dist/` local: los ficheros de la 1.0.7 que hay ahí no se
-tocan.
+El trusted publisher de PyPI aún no está configurado: 1.0.7 y 1.1.0 se subieron a mano
+con `uv publish`, y el job `publish` falla con `invalid-publisher` (el `build` pasa en
+Linux). Mientras tanto, cada release se construye en `dist-X.Y.Z/` (ignorado) **desde un
+clon limpio del tag**, nunca desde el árbol de trabajo, y se sube con `uv publish` de esos
+dos ficheros. Los ficheros de la 1.0.7 en `dist/` no se tocan.
+
+**El sdist es una lista blanca** (v1.1.1): `only-include = ["slurp", "README.md",
+"USAGE.md"]`; hatchling añade `pyproject.toml`, `PKG-INFO` y `.gitignore`. Con la lista de
+exclusión anterior, los sdists de 1.0.7 y 1.1.0 publicados en PyPI llevan
+`Roadmap slurp.xlsx` (sin seguir en el árbol donde se construyeron), `CLAUDE.md`,
+`.github/` y `.python-version`. Lo vigilan `tests/test_packaging.py` y un paso del job
+`build` que rechaza cualquier otro fichero en el tarball.
 
 **Latencia reproducible** (v1.1.1, #67): `scripts/latency.py GRAPH --method
 original|current|both --runs N [--src DIR]` — los dos métodos de README › Performance,
