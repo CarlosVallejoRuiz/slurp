@@ -532,9 +532,22 @@ uv sync --extra all-languages --extra llm-openai --reinstall-package slurp-graph
 Señal de que ha pasado: la suite reporta tests *skipped* donde antes había 0, o
 `uv run slurp` ejecuta una versión distinta de la del repo.
 
+**Publicación en PyPI** (v1.1.0, #63): `.github/workflows/publish.yml`, trusted
+publishing por OIDC, sin secrets. Se dispara con un push de tag `v*` o a mano
+(`workflow_dispatch`) con un tag existente: el fichero del workflow sale de la rama
+elegida (main) y el código del tag, así se publica un tag anterior al workflow
+(v1.0.7). Job `build`: comprueba que tag, `pyproject.toml` y `__init__.py` coinciden,
+`uv sync --locked --all-extras`, la suite, `uv build`, `dist/` como artefacto. Job
+`publish`: `environment: pypi`, `id-token: write`, `pypa/gh-action-pypi-publish`.
+Acciones fijadas por SHA con la versión en comentario; `tests/test_publish_workflow.py`
+lo vigila (pins, OIDC solo en publish, sin secrets, sin `${{ }}` dentro de un `run:`).
+Nunca publicar a mano desde `dist/` local: los ficheros de la 1.0.7 que hay ahí no se
+tocan.
+
 ```
 ~/Desktop/Slurp/slurp/         ← raíz del repo git — working directory
 ├── CLAUDE.md                  ← este fichero
+├── .github/workflows/publish.yml ← publicación en PyPI por OIDC
 ├── README.md
 ├── USAGE.md
 ├── pyproject.toml

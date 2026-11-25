@@ -1,0 +1,118 @@
+# Publish slurp-graph to PyPI with trusted publishing (OIDC): no API token or
+# secret is stored anywhere. PyPI trusts this workflow file, run in the `pypi`
+# environment of CarlosVallejoRuiz/slurp.
+#
+# Two ways in:
+# - pushing a tag v* publishes that tag;
+# - "Run workflow" (workflow_dispatch) publishes an existing tag given as input.
+#   The workflow file comes from the branch picked in "Use workflow from"
+#   (main), the code from the tag, so a tag made before this file existed
+#   (v1.0.7) can still be published.
+#
+# Actions are pinned to a commit SHA; the comment names the release it is.
+
+name: Publish to PyPI
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to publish (e.g. v1.0.7)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # One publish per tag at a time: a tag push and a manual run cannot race.
+  group: publish-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and test ${{ inputs.tag || github.ref_name }}
+    runs-on: ubuntu-24.04
+    env:
+      # Never interpolated into a script: read as "$TAG".
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: Check the tag name
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::'$TAG' is not a release tag (vMAJOR.MINOR.PATCH)."
+            exit 1
+          fi
+
+      - name: Check out the tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ inputs.tag || github.ref_name }}
+          persist-credentials: false
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          version: "0.11.19"
+          python-version: "3.12"
+          # A release build starts from nothing: no cache to poison.
+          enable-cache: false
+
+      - name: Tag, pyproject.toml and __init__.py agree on the version
+        run: |
+          uv run --no-project python - <<'PY'
+          import os, re, sys, tomllib
+          from pathlib import Path
+
+          tag = os.environ["TAG"].removeprefix("v")
+          pyproject = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+          init = re.search(r'^__version__\s*=\s*"([^"]+)"',
+                           Path("slurp/__init__.py").read_text(), re.M).group(1)
+          print(f"tag {tag} · pyproject.toml {pyproject} · slurp/__init__.py {init}")
+          if not tag == pyproject == init:
+              print("::error::The tag, pyproject.toml and slurp/__init__.py disagree.")
+              sys.exit(1)
+          PY
+
+      - name: Install with every extra
+        run: uv sync --locked --all-extras
+
+      - name: Run the test suite
+        run: uv run --no-sync pytest tests/ -q
+
+      - name: Build the sdist and wheel
+        run: |
+          uv build --out-dir dist/
+          ls -l dist/
+          v="${TAG#v}"
+          test -f "dist/slurp_graph-${v}.tar.gz"
+          test -f "dist/slurp_graph-${v}-py3-none-any.whl"
+          test "$(ls dist/ | wc -l)" -eq 2
+
+      - name: Keep dist/ as an artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish ${{ inputs.tag || github.ref_name }} to PyPI
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: pypi
+      url: https://pypi.org/project/slurp-graph/
+    permissions:
+      id-token: write
+    steps:
+      - name: Fetch dist/
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
