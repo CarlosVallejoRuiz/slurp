@@ -286,6 +286,33 @@ def _box(title: str, subtitle: str) -> str:
     return "\n".join([top, mid, bot])
 
 
+def _source_of(G: nx.DiGraph, node: str) -> str:
+    """The file a node comes from: `source_file` (graphify, slurp index) or `file_path`."""
+    attrs = G.nodes[node]
+    return str(attrs.get("source_file") or attrs.get("file_path") or "")
+
+
+def _normalise(path: str) -> str:
+    """Compare paths without tripping over separators or a leading `./`."""
+    return str(path).replace("\\", "/").removeprefix("./").strip("/")
+
+
+def _is_file_node(G: nx.DiGraph, node: str) -> bool:
+    """Whether *node* represents the file itself rather than a definition in it.
+
+    Type alone will not find it — graphify writes no `type` at all — but the
+    file node is the one labelled after the file. impact and the suggester rank
+    definitions above it: it collects the file's imports, and nobody edits
+    "the file".
+    """
+    attrs = G.nodes[node]
+    if attrs.get("type") in ("module", "file"):
+        return True
+    label = str(attrs.get("label", "")).strip()
+    source = _normalise(_source_of(G, node))
+    return bool(label) and bool(source) and source.rsplit("/", 1)[-1] == label
+
+
 def _extension(G: nx.DiGraph, node_id: str) -> str:
     attrs = G.nodes.get(node_id, {})
     source = str(attrs.get("source_file") or attrs.get("file_path") or "")

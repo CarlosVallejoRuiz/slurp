@@ -1141,6 +1141,12 @@ they import, so they describe wiring rather than subject matter. A suggestion th
 nothing the original query did not is dropped, and when the budget already covers the
 neighbourhood the list is simply empty.
 
+The same graph and query always give the same suggestions. The risk suggestion names the
+frontier node with the most dependants; on a tie, a definition comes before the file node
+that holds it (`Badge` before `badge.tsx` above, 16 each), then the smallest node id.
+Until v1.2.0 a tie went to whichever node a set happened to yield first, which changed
+from one process to the next.
+
 > Also exposed over MCP as **`slurp_suggest(query, budget=4000)`**, so an agent can ask
 > what else is worth looking at without a second round trip through the terminal.
 

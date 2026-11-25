@@ -17,8 +17,11 @@ from slurp._graphutils import (
     _call_graph_gap,
     _display,
     _extensions_with_calls,
+    _is_file_node,
     _is_import,
+    _normalise,
     _risk_band,
+    _source_of,
     _split_callers,
 )
 
@@ -57,16 +60,6 @@ class ImpactResult:
     risk_reason: str = ""
 
 
-def _source_of(G: nx.DiGraph, node: str) -> str:
-    attrs = G.nodes[node]
-    return str(attrs.get("source_file") or attrs.get("file_path") or "")
-
-
-def _normalise(path: str) -> str:
-    """Compare paths without tripping over separators or a leading `./`."""
-    return str(path).replace("\\", "/").removeprefix("./").strip("/")
-
-
 def nodes_in_file(G: nx.DiGraph, file_path: str) -> list[str]:
     """Every node defined in *file_path*.
 
@@ -84,16 +77,6 @@ def nodes_in_file(G: nx.DiGraph, file_path: str) -> list[str]:
         n for n in G.nodes
         if _normalise(_source_of(G, n)).endswith(f"/{wanted}")
     )
-
-
-def _is_file_node(G: nx.DiGraph, node: str) -> bool:
-    """Whether *node* represents the file itself rather than a definition in it."""
-    attrs = G.nodes[node]
-    if attrs.get("type") in ("module", "file"):
-        return True
-    label = str(attrs.get("label", "")).strip()
-    source = _normalise(_source_of(G, node))
-    return bool(label) and bool(source) and source.rsplit("/", 1)[-1] == label
 
 
 def _dependants(G: nx.DiGraph, node: str) -> list[str]:

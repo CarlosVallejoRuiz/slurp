@@ -125,10 +125,6 @@ class Ctx:
     def run(self, args: list[str], cwd: Path, *, stdin: str | None = None,
             merge: bool = True, binary: Path | None = None) -> str:
         env = {k: v for k, v in os.environ.items() if k not in SCRUBBED_ENV}
-        # Fixed hash seed: in v1.2.0 `--suggest` breaks a tie between two equally
-        # depended-on frontier nodes by set order, so its risk suggestion varies
-        # between processes. Remove once that tie breaks deterministically.
-        env["PYTHONHASHSEED"] = "0"
         proc = subprocess.run(
             [str(binary or self.slurp_bin), *args], cwd=cwd, input=stdin,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT if merge else subprocess.PIPE,

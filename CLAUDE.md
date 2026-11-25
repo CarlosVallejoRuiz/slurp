@@ -424,6 +424,13 @@ uv sync --extra rust            # solo una
     nombre de lo que prueban — pierden todo empate contra producción.
   - **El silencio es respuesta válida**: si el budget cubre la vecindad, la
     lista sale vacía en vez de rellenarse.
+  - **Determinista** (v1.2.1, #78): la sugerencia de riesgo es el nodo de la frontera con
+    más dependientes; el empate va a una definición antes que al nodo-fichero que la
+    contiene (`_graphutils._is_file_node`, el mismo criterio que `impact` para el nodo de
+    más riesgo) y luego al id menor. Hasta v1.2.0 ganaba el primero que daba el set, que
+    depende de `PYTHONHASHSEED`: PrismaStats "player stats" sugería `Badge` o `badge.tsx`
+    (16 cada uno) según el proceso. `TestRiskTieBreak` lo ejecuta con seis semillas.
+    `_source_of`, `_normalise` e `_is_file_node` pasaron de `impact.py` a `_graphutils`.
   - `slurp_suggest` re-ejecuta la query en lugar de recibir el subgrafo: MCP no
     tiene estado entre llamadas, y reenviarlo sería peor que recalcularlo.
   - **Acoplamiento a vigilar**: importa cuatro privados de `explainer.py`
@@ -663,9 +670,10 @@ en un grafo de 3.421 — y otros de versiones antiguas sin decirlo.
   salidas nuevas listas para pegar. No forma parte de la suite: necesita PrismaStats, los
   tags, un virtualenv sin gramáticas (el ejemplo del fallback) y ~20 s.
 - Un ejemplo nuevo = una entrada en `EXAMPLES` del script + el marcador en el doc.
-- **Pendiente en el código:** en v1.2.0 la sugerencia de riesgo de `--suggest` desempata por
-  orden de set (`Badge` o `badge.tsx` en PrismaStats según el proceso); el script fija
-  `PYTHONHASHSEED=0` hasta que el desempate sea determinista.
+- **El script no fija `PYTHONHASHSEED`** (desde v1.2.1). Hasta v1.2.0 lo fijaba a 0 porque la
+  sugerencia de riesgo de `--suggest` desempataba por orden de set (#78). Si un ejemplo
+  cambia entre dos ejecuciones del script, es un orden de set colándose en una salida: se
+  arregla en el código, no fijando la semilla.
 
 ---
 

@@ -15,6 +15,7 @@ import networkx as nx
 
 from slurp._graphutils import (
     _display,
+    _is_file_node,
     _is_test,
     _left_out,
     _risk_band,
@@ -196,15 +197,25 @@ def _sibling_area(G, query, subgraph, frontier) -> SuggestedQuery | None:
 
 
 def _risk_exploration(G, frontier) -> SuggestedQuery | None:
-    """Point at the riskiest thing the answer depends on but did not explain."""
-    riskiest, highest = "", 0
+    """Point at the riskiest thing the answer depends on but did not explain.
+
+    DECISION (#78): the riskiest is the frontier node with the most dependents.
+    A tie goes to a definition over the file node that holds it, then to the
+    smallest node id — never to the order of iteration. The frontier is a set,
+    whose order follows the per-process hash seed: until v1.2.0 the first node
+    found won, and PrismaStats's "player stats" suggested Badge or badge.tsx
+    (16 dependents each) depending on the process.
+    """
+    dependents: dict[str, int] = {}
     for node in frontier:
         production, tests = _split_callers(G, node)
-        dependents = len(production) + len(tests)
-        if _risk_band(dependents) == "HIGH" and dependents > highest:
-            riskiest, highest = node, dependents
-    if not riskiest:
+        if _risk_band(len(production) + len(tests)) == "HIGH":
+            dependents[node] = len(production) + len(tests)
+    if not dependents:
         return None
+    riskiest = min(dependents,
+                   key=lambda n: (-dependents[n], _is_file_node(G, n), str(n)))
+    highest = dependents[riskiest]
     label = _display(G, riskiest).rstrip("()")
     return SuggestedQuery(
         query=f"explain:{label}",

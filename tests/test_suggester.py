@@ -249,3 +249,88 @@ class TestLeftOutKindsAreNotSuggested:
         out = suggest_queries(G, "player", score_nodes(G, "player"), _selected(G, "core"),
                               exclude=frozenset())
         assert any("database" in s.query for s in out)
+
+
+# ---------------------------------------------------------------------------
+# #78 — the risk suggestion breaks ties the same way in every process
+# ---------------------------------------------------------------------------
+
+def _tied_hubs_graph() -> nx.DiGraph:
+    """`core` calls three hubs, each with seven dependents: a three-way tie.
+
+    The labels run the other way round from the ids, so a tie broken by label
+    would name a different hub than one broken by id.
+    """
+    G = nx.DiGraph()
+    _node(G, "core", "playerStats")
+    for hub, label in (("hub_a", "zuluClient"), ("hub_b", "mikeClient"),
+                       ("hub_c", "alphaClient")):
+        _node(G, hub, label, source=f"lib/{hub}.py")
+        G.add_edge("core", hub, relation="calls")
+        for i in range(6):
+            _node(G, f"{hub}_user{i}", f"consumer{i}", source=f"lib/users_{hub}.py")
+            G.add_edge(f"{hub}_user{i}", hub, relation="calls")
+    return G
+
+
+class TestRiskTieBreak:
+    def test_a_tie_goes_to_the_smallest_id_whatever_the_order(self):
+        from itertools import permutations
+
+        from slurp.suggester import _risk_exploration
+
+        G = _tied_hubs_graph()
+        picked = {_risk_exploration(G, list(order)).query
+                  for order in permutations(["hub_a", "hub_b", "hub_c"])}
+        assert picked == {"explain:zuluClient"}
+
+    def test_a_definition_wins_a_tie_with_the_file_that_holds_it(self):
+        # PrismaStats, "player stats": Badge() and its file node badge.tsx both
+        # have 16 dependents; v1.2.0 named one or the other by hash seed. The
+        # file node's id is the smaller one, so the id alone would pick it.
+        from slurp.suggester import _risk_exploration
+
+        G = nx.DiGraph()
+        source = "components/ui/badge.tsx"
+        G.add_node("ui_badge", label="badge.tsx", source_file=source)
+        G.add_node("ui_badge_badge", label="Badge()", source_file=source)
+        for i in range(8):
+            G.add_node(f"page{i}", label=f"Page{i}()", source_file=f"app/p{i}/page.tsx")
+            G.add_edge(f"page{i}", "ui_badge", relation="imports_from")
+            G.add_edge(f"page{i}", "ui_badge_badge", relation="calls")
+        for order in (["ui_badge", "ui_badge_badge"], ["ui_badge_badge", "ui_badge"]):
+            assert _risk_exploration(G, order).query == "explain:Badge"
+
+    def test_more_dependents_still_win_over_the_tie_break(self):
+        from slurp.suggester import _risk_exploration
+
+        G = _tied_hubs_graph()
+        G.add_edge("hub_b_user0", "hub_c", relation="calls")  # hub_c: 8 dependents
+        assert _risk_exploration(G, ["hub_a", "hub_b", "hub_c"]).query == \
+            "explain:alphaClient"
+
+    def test_the_cli_suggests_the_same_in_every_process(self, tmp_path):
+        # String hashing is randomised per process (PYTHONHASHSEED), and with it
+        # the order of a set of node ids. Same graph, same query: same answer.
+        import json
+        import os
+        import subprocess
+        import sys
+
+        G = _tied_hubs_graph()
+        graph = tmp_path / "graph.json"
+        graph.write_text(json.dumps({
+            "nodes": [{"id": n, **G.nodes[n]} for n in G.nodes],
+            "links": [{"source": u, "target": v, **G.edges[u, v]} for u, v in G.edges],
+        }), encoding="utf-8")
+        outputs = set()
+        for seed in ("0", "1", "2", "3", "42", "12345"):
+            env = {**os.environ, "PYTHONHASHSEED": seed}
+            proc = subprocess.run(
+                [sys.executable, "-c", "from slurp.cli import cli; cli()",
+                 "player stats", "--graph", str(graph), "--budget", "400",
+                 "--min-score", "0.5", "--suggest", "--no-audit"],
+                capture_output=True, text=True, env=env, cwd=tmp_path, check=True)
+            outputs.add(proc.stdout.split("SUGGESTED QUERIES", 1)[-1])
+        assert len(outputs) == 1, outputs
+        assert "slurp explain 'zuluClient'" in outputs.pop()
