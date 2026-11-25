@@ -1175,6 +1175,16 @@ Indexing /path/to/project ...
 Next: slurp "your query" --graph /path/to/project/graphify-out/graph.json
 ```
 
+**What is never indexed.** Dependencies, caches and build output, wherever they sit
+below the project root: `node_modules/`, `.venv/`, `venv/`, `vendor/`, `_vendor/`,
+`dist/`, `build/`, `coverage/`, `.git/`, the Python caches and `*.egg-info/`, minified
+`*.min.js` bundles, and the build output of web frameworks — `.next/` (Next.js),
+`.nuxt/` (Nuxt), `.svelte-kit/` (SvelteKit), `.turbo/` (Turborepo), `.vercel/`
+(Vercel CLI) and `.output/` (Nitro: Nuxt 3, SolidStart). An `out/` folder is skipped
+only when it holds a Next.js static export (an `out/_next/` directory); otherwise it may
+be real code and is indexed. Folders above the project root never count. To leave out
+anything else, use [`.slurpignore`](#slurpignore).
+
 > **Call graph — five languages** (Python, TypeScript/JavaScript, Go, Java, Rust):
 > `slurp index` extracts `calls` edges between functions, within a file and across them,
 > enabling accurate risk analysis in [`slurp explain`](#slurp-explain) and impact

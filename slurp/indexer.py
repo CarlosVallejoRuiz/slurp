@@ -109,7 +109,40 @@ _SKIP_DIRS: frozenset[str] = frozenset({
     "coverage", ".tox", ".eggs", "vendor",
     # pip, setuptools and slurp itself keep third-party code here.
     "_vendor",
+    # DECISION: build output of web frameworks. Each directory is written by
+    # its tool on every build or dev run, holds compiled or generated code, and
+    # is never where anyone keeps source; the scaffolders gitignore them all.
+    # Only dot-named, tool-owned names: `next/`, `output/` and the like can be
+    # real source and are left alone. PrismaStats indexed 214 nodes of .next/.
+    ".next",        # Next.js: server and static bundles, cache (next build/dev)
+    ".nuxt",        # Nuxt: the generated app, types and dev build (nuxi dev/build)
+    ".svelte-kit",  # SvelteKit: generated types, route manifest, build output
+    ".turbo",       # Turborepo: task output cache and logs
+    ".vercel",      # Vercel CLI: project link and Build Output API bundles
+    ".output",      # Nitro (Nuxt 3, SolidStart, Analog): production server build
 })
+
+# DECISION: `out/` is Next.js's static export (`output: 'export'`), but it is
+# also a plain English folder name that can hold real code. It is skipped only
+# when it holds that export, recognised by the `_next/` directory Next.js
+# always writes into it — which takes a look at the disk, so callers that know
+# the project root pass it to _should_skip.
+_NEXT_EXPORT_DIR = "out"
+_NEXT_EXPORT_MARKER = "_next"
+
+
+def _is_skipped_dir(name: str, path: Path | None = None) -> bool:
+    """Whether a directory called *name* is left out of the index.
+
+    Args:
+        name: The directory's name.
+        path: The directory on disk, when known; needed to recognise a
+            Next.js static export in `out/`.
+    """
+    if name in _SKIP_DIRS or name.endswith(".egg-info"):
+        return True
+    return (name == _NEXT_EXPORT_DIR and path is not None
+            and (path / _NEXT_EXPORT_MARKER).is_dir())
 
 # DECISION: a minified bundle is someone else's code compressed onto a few
 # lines. Parsing it yields hundreds of one-letter "functions", and tree-sitter
@@ -117,19 +150,28 @@ _SKIP_DIRS: frozenset[str] = frozenset({
 _MINIFIED_SUFFIX = ".min.js"
 
 
-def _should_skip(path: Path) -> bool:
+def _should_skip(path: Path, root: Path | None = None) -> bool:
     """Return True if path is inside a directory that should be skipped.
 
     Pass the path *relative to the project root*. Every part is checked, so an
     absolute path would also test the folders above the project: a project
     living under ~/code/build/ lost every file and indexed to 0 nodes.
     Minified bundles (*.min.js) are skipped wherever they sit.
+
+    Args:
+        path: Path relative to the project root.
+        root: The project root. Without it an `out/` folder cannot be told
+            apart from a Next.js static export and is not skipped.
     """
     if path.name.lower().endswith(_MINIFIED_SUFFIX):
         return True
+    if any(part in _SKIP_DIRS or part.endswith(".egg-info") for part in path.parts):
+        return True
+    if root is None:
+        return False
     return any(
-        part in _SKIP_DIRS or part.endswith(".egg-info")
-        for part in path.parts
+        part == _NEXT_EXPORT_DIR and _is_skipped_dir(part, root.joinpath(*path.parts[:i + 1]))
+        for i, part in enumerate(path.parts[:-1])
     )
 
 
@@ -7019,7 +7061,7 @@ def iter_source_files(root: Path) -> Iterator[Path]:
     root_resolved = root.resolve()
     for path in sorted(root.rglob("*")):
         # Skip rules apply below the root only — see _should_skip.
-        if not path.is_file() or _should_skip(path.relative_to(root)):
+        if not path.is_file() or _should_skip(path.relative_to(root), root):
             continue
         try:
             path.resolve().relative_to(root_resolved)
@@ -7050,8 +7092,8 @@ def skipped_source_files(root: Path) -> dict[str, int]:
         if path.suffix.lower() not in _INDEXED_EXTENSIONS or not path.is_file():
             continue
         rel = path.relative_to(root)
-        for part in rel.parts[:-1]:
-            if part in _SKIP_DIRS or part.endswith(".egg-info"):
+        for i, part in enumerate(rel.parts[:-1]):
+            if _is_skipped_dir(part, root.joinpath(*rel.parts[:i + 1])):
                 counts[part] = counts.get(part, 0) + 1
                 break
     return counts

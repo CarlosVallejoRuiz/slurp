@@ -5639,6 +5639,82 @@ class TestVendoredAndMinifiedAreSkipped:
 
 
 # ---------------------------------------------------------------------------
+# Framework build output is generated, never the project's own source
+# ---------------------------------------------------------------------------
+
+_APP_TS = "export function app(): number { return 1 }\n"
+_GENERATED_JS = "function generated() { return 1 }\n"
+
+
+def _indexed_files(root: Path) -> set[str]:
+    return {p.relative_to(root).as_posix() for p in iter_source_files(root)}
+
+
+def _put(root: Path, rel: str, text: str) -> None:
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+
+
+class TestFrameworkBuildOutputIsSkipped:
+    @pytest.mark.parametrize("rel", [
+        ".next/server/app/page.js",              # Next.js: next build / next dev
+        ".nuxt/components.d.ts",                 # Nuxt: generated app and types
+        ".svelte-kit/generated/root.js",         # SvelteKit: generated routes and types
+        ".turbo/cache/task.js",                  # Turborepo: task cache
+        ".vercel/output/functions/api.func/index.js",  # Vercel: Build Output API
+        ".output/server/index.js",               # Nitro (Nuxt 3, SolidStart): production build
+        "apps/web/.next/static/chunks/main.js",  # same, inside a monorepo package
+    ])
+    def test_build_output_is_skipped(self, tmp_path, rel):
+        _put(tmp_path, "src/app.ts", _APP_TS)
+        _put(tmp_path, rel, _GENERATED_JS)
+        assert _indexed_files(tmp_path) == {"src/app.ts"}
+
+    @pytest.mark.parametrize("folder", ["next", "nuxt", "output", "turbo", "vercel",
+                                        "svelte-kit", "outputs", "out"])
+    def test_source_folders_with_similar_names_are_indexed(self, tmp_path, folder):
+        # No dot, or `out` without a Next.js export in it: could be real code.
+        _put(tmp_path, f"{folder}/handler.ts", _APP_TS)
+        assert _indexed_files(tmp_path) == {f"{folder}/handler.ts"}
+
+    def test_out_holding_a_next_static_export_is_skipped(self, tmp_path):
+        _put(tmp_path, "src/app.ts", _APP_TS)
+        _put(tmp_path, "out/_next/static/chunks/main.js", _GENERATED_JS)
+        _put(tmp_path, "out/sw.js", _GENERATED_JS)
+        assert _indexed_files(tmp_path) == {"src/app.ts"}
+
+    def test_only_the_out_that_holds_the_export_is_skipped(self, tmp_path):
+        _put(tmp_path, "apps/web/out/_next/static/main.js", _GENERATED_JS)
+        _put(tmp_path, "apps/web/out/sw.js", _GENERATED_JS)
+        _put(tmp_path, "apps/api/out/handler.ts", _APP_TS)
+        assert _indexed_files(tmp_path) == {"apps/api/out/handler.ts"}
+
+    def test_out_is_judged_on_disk_so_the_root_is_needed(self, tmp_path):
+        _put(tmp_path, "out/_next/static/main.js", _GENERATED_JS)
+        rel = Path("out/_next/static/main.js")
+        assert _should_skip(rel, tmp_path)
+        # Without the root nothing says what out/ holds: not skipped.
+        assert not _should_skip(rel)
+        assert _should_skip(Path(".next/server/page.js"))
+
+    def test_index_has_no_build_output_nodes(self, tmp_path):
+        _put(tmp_path, "src/app.ts", _APP_TS)
+        _put(tmp_path, ".next/server/app/page.js", _GENERATED_JS)
+        _put(tmp_path, "out/_next/static/main.js", _GENERATED_JS)
+        sources = {n["source_file"] for n in index_project(tmp_path)["nodes"]}
+        assert sources == {"src/app.ts"}
+
+    def test_empty_index_names_the_build_directories(self, tmp_path):
+        from slurp.indexer import skipped_source_files
+
+        _put(tmp_path, ".next/server/page.js", _GENERATED_JS)
+        _put(tmp_path, "out/_next/static/main.js", _GENERATED_JS)
+        _put(tmp_path, "out/sw.js", _GENERATED_JS)
+        assert skipped_source_files(tmp_path) == {".next": 1, "out": 2}
+
+
+# ---------------------------------------------------------------------------
 # No private (_-prefixed) attribute survives into the written graph
 # ---------------------------------------------------------------------------
 

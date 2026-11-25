@@ -575,3 +575,21 @@ def test_changes_detected_in_a_project_under_build(tmp_path):
     _commit_all(root)
     (root / "a.py").write_text("def f():\n    return 2\n", encoding="utf-8")
     assert (root / "a.py").resolve() in get_changed_files(root)
+
+
+@requires_git
+class TestChangedFilesSkipBuildOutput:
+    def test_framework_build_output_is_never_a_changed_file(self, project):
+        for rel in (".next/server/page.js", "out/_next/static/main.js", "out/sw.js"):
+            path = project / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("function generated() { return 1 }\n", encoding="utf-8")
+        changed = {p.relative_to(project.resolve()).as_posix()
+                   for p in get_changed_files(project)}
+        assert not {c for c in changed if c.startswith((".next/", "out/"))}
+
+    def test_out_without_a_next_export_still_counts(self, project):
+        (project / "out").mkdir()
+        (project / "out" / "handler.py").write_text("def h():\n    return 1\n",
+                                                   encoding="utf-8")
+        assert (project / "out" / "handler.py").resolve() in get_changed_files(project)

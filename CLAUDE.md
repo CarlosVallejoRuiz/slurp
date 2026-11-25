@@ -79,6 +79,13 @@ uv sync --extra rust            # solo una
   Si un índice sale con 0 nodos, `slurp index` explica por stderr qué
   directorios saltados tenían fuentes (`skipped_source_files`) o que no hay
   ninguna extensión indexable.
+- **Salidas de build de frameworks** (v1.1.1, #66): `.next`, `.nuxt`, `.svelte-kit`,
+  `.turbo`, `.vercel`, `.output` en `_SKIP_DIRS` — solo nombres con punto que escribe la
+  herramienta y que nunca contienen fuente (`next/`, `output/`… sí se indexan). `out/`
+  solo se salta si contiene `_next/` (export estático de Next.js): mirarlo exige disco,
+  así que `_should_skip(rel, root)` recibe la raíz y sin ella no salta `out/`;
+  `_is_skipped_dir(nombre, ruta)` es la regla por directorio. PrismaStats: 1796 → 1582
+  nodos, exactamente los 214 de `.next/` y sus 136 relaciones, nada más cambia.
 - Cada gramática es un extra **independiente**: su ausencia es una configuración
   soportada y debe degradar en silencio al fallback regex.
 - **Regex principal vs regex fallback**: Go, Lua, Elixir y PowerShell no tienen
