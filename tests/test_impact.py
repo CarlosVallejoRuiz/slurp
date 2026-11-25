@@ -409,3 +409,116 @@ class TestTestsAreReportedApart:
         assert payload["test_only_nodes"] == ["cold"]
         assert payload["test_dependents"] == ["t0", "t1", "t2", "tc"]
         assert payload["test_files"] == ["tests/test_core.py", "tests/test_dates.py"]
+
+
+# ---------------------------------------------------------------------------
+# #79 — the headline, the JSON and the AFFECTED FILES list count the same files
+# ---------------------------------------------------------------------------
+
+def _headline_files(out: str) -> int:
+    import re
+
+    return int(re.search(r"affects (\d+) files?", out).group(1))
+
+
+def _listed_files(out: str) -> int:
+    """Files the AFFECTED FILES block accounts for: those shown plus '… and N more'."""
+    import re
+
+    if "AFFECTED FILES" not in out:
+        return 0
+    block = out.split("AFFECTED FILES", 1)[1].split("\n\n", 1)[0].splitlines()[1:]
+    more = next((int(m.group(1)) for ln in block
+                 if (m := re.match(r"\s+… and (\d+) more files", ln))), 0)
+    return sum(1 for ln in block if "dependent" in ln) + more
+
+
+def _prismastats_admin_graph() -> nx.DiGraph:
+    """The shape of PrismaStats's lib/supabase/admin.ts in its graphify graph.
+
+    graphify writes no `type`. createAdminClient is called and imported by
+    functions in a few *-actions.ts files (direct dependents); pages and API
+    routes import and call those functions (transitive dependents, in files of
+    their own). v1.2.0 printed "affects 69 files" (direct and transitive) over
+    a list that accounted for 34 (direct only).
+    """
+    G = nx.DiGraph()
+
+    def add(nid, label, source):
+        G.add_node(nid, label=label, source_file=source, file_type="code")
+
+    add("supabase_admin", "admin.ts", "lib/supabase/admin.ts")
+    add("supabase_admin_createadminclient", "createAdminClient()", "lib/supabase/admin.ts")
+    G.add_edge("supabase_admin", "supabase_admin_createadminclient", relation="contains")
+    for a in range(3):
+        module, source = f"supabase_actions{a}", f"lib/supabase/actions{a}.ts"
+        add(module, f"actions{a}.ts", source)
+        G.add_edge(module, "supabase_admin", relation="imports_from")
+        G.add_edge(module, "supabase_admin_createadminclient", relation="imports")
+        for f in range(4):
+            fn = f"{module}_fn{f}"
+            add(fn, f"action{a}_{f}()", source)
+            G.add_edge(module, fn, relation="contains")
+            G.add_edge(fn, "supabase_admin_createadminclient", relation="calls")
+            for r in range(3):
+                route = f"route{a}_{f}_{r}"
+                add(route, "route.ts", f"app/api/r{a}/{f}/{r}/route.ts")
+                G.add_edge(route, module, relation="imports_from")
+                G.add_edge(route, fn, relation="calls")
+    return G
+
+
+def _slurps_own_graph() -> nx.DiGraph:
+    from pathlib import Path
+
+    from slurp.indexer import index_project
+    from slurp.loader import build_graph
+
+    return build_graph(index_project(Path(__file__).resolve().parent.parent / "slurp"))
+
+
+class TestAffectedFilesAgree:
+    ADMIN = "lib/supabase/admin.ts"
+
+    def test_prismastats_shape(self):
+        G = _prismastats_admin_graph()
+        result = analyze_impact(G, self.ADMIN)
+        out = format_impact(result, G)
+        assert len(result.direct_dependents) == 3 + 3 * 4  # modules + functions
+        assert len(result.affected_files) == 3 + 3 * 4 * 3  # actions + routes
+        assert _headline_files(out) == len(result.affected_files)
+        assert _listed_files(out) == len(result.affected_files)
+
+    def test_the_list_counts_transitive_dependents_within_hops(self):
+        G = _prismastats_admin_graph()
+        one = analyze_impact(G, self.ADMIN, hops=1)
+        assert one.affected_files == [f"lib/supabase/actions{a}.ts" for a in range(3)]
+        assert _listed_files(format_impact(one, G)) == 3
+        two = analyze_impact(G, self.ADMIN, hops=2)
+        assert "app/api/r0/0/0/route.ts" in two.affected_files
+        assert _listed_files(format_impact(two, G)) == len(two.affected_files)
+
+    def test_json_counts_each_affected_files_dependents(self):
+        G = _prismastats_admin_graph()
+        payload = impact_to_dict(analyze_impact(G, self.ADMIN))
+        per_file = payload["dependents_per_file"]
+        assert sorted(per_file) == payload["affected_files"]
+        # Each actions file holds its module and four functions; each route one node.
+        assert per_file["lib/supabase/actions0.ts"] == 5
+        assert per_file["app/api/r0/0/0/route.ts"] == 1
+        assert sum(per_file.values()) == (len(payload["direct_dependents"])
+                                          + len(payload["transitive_dependents"]))
+
+    def test_every_file_of_slurps_own_graph(self):
+        # slurp/_graphutils.py printed "affects 12 files" over a list of 11 in v1.2.0.
+        G = _slurps_own_graph()
+        files = sorted({G.nodes[n]["source_file"] for n in G.nodes
+                        if G.nodes[n].get("source_file")})
+        assert "_graphutils.py" in files
+        for path in files:
+            result = analyze_impact(G, path)
+            out = format_impact(result, G)
+            n = len(result.affected_files)
+            assert _headline_files(out) == n, path
+            assert _listed_files(out) == n, path
+            assert len(impact_to_dict(result)["affected_files"]) == n, path

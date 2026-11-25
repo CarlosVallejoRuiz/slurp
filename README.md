@@ -1062,14 +1062,18 @@ Direct: 130 · Transitive: 48 · Tests: 0 · Impact score: 0.0843
 ```
 
 The risk, the dependents and the affected files count production code only, as in
-`slurp explain` and `slurp diff`. Tests that call into the file get their own block —
-`TESTS — 58 tests in 10 files call into this file`, with the files that hold most — and
-import nodes are not counted as definitions. A **SAFE TO EDIT** block lists the
-definitions in the file that nothing calls at all, not even a test — the other half of
-the question. A node only tests call is listed under **NO PRODUCTION CALLERS** instead:
-LOW, but its tests break if it changes. A node called only from inside the same file is
-in neither: contained is not the same as safe. `--output json` carries `safe_nodes`,
-`test_only_nodes`, `test_dependents` and `test_files`.
+`slurp explain` and `slurp diff`. The risk is rated on the direct dependents; the affected
+files are every file holding a dependent within `--hops`, direct or transitive, and the
+headline, the AFFECTED FILES list and `affected_files` in `--output json` count the same
+ones; each file's count (`dependents_per_file` in JSON) adds both kinds. Tests that call
+into the file get their own block — `TESTS — 58 tests in 10 files call into this file`,
+with the files that hold most — and import nodes are not counted as definitions. A
+**SAFE TO EDIT** block lists the definitions in the file that nothing calls at all, not
+even a test — the other half of the question. A node only tests call is listed under
+**NO PRODUCTION CALLERS** instead: LOW, but its tests break if it changes. A node called
+only from inside the same file is in neither: contained is not the same as safe.
+`--output json` carries `safe_nodes`, `test_only_nodes`, `test_dependents` and
+`test_files`.
 
 **Risk is `UNKNOWN` when the file's language has no call graph.** slurp extracts calls
 for Python, TypeScript/JavaScript, Go, Java and Rust; the other eleven languages get

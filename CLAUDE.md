@@ -493,6 +493,16 @@ uv sync --extra rust            # solo una
     `risk_reason`, `safe_nodes` vacío, y en `explain` el rol, la prosa y
     ARCHITECTURE dicen "unknown" en vez de "isolated"/"nothing"; el contexto del
     LLM lleva una NOTE para que no lo describa como código muerto.
+  - **Un solo cálculo de ficheros afectados** (v1.2.1, #79): los ficheros con algún
+    dependiente de producción dentro de `--hops`, directo o transitivo
+    (`dependents_per_file`, de más a menos; sus claves son `affected_files`). De ahí salen el
+    titular "affects N files", la lista AFFECTED FILES y el JSON. Hasta v1.2.0 la lista
+    contaba solo los ficheros de los dependientes directos: PrismaStats `admin.ts` decía
+    "affects 69 files" y la lista sumaba 34 (10 + "24 more"); los 35 de diferencia eran
+    ficheros solo transitivos (páginas y rutas que importan los `*-actions.ts`). El 69 era el
+    correcto (respeta `--hops`, como `impact_score`); el JSON no cambia de significado. El
+    riesgo sigue saliendo solo de los directos. `TestAffectedFilesAgree` lo comprueba sobre la
+    forma de PrismaStats y sobre cada fichero del grafo de slurp.
   - Rutas por **sufijo normalizado**, con la coincidencia exacta ganando
     siempre, para que un `vendor/lib/core.py` no secuestre la consulta.
   - **Un fichero desconocido no es un error**: resultado vacío, exit 0 y un

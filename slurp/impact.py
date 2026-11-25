@@ -38,6 +38,9 @@ class ImpactResult:
     highest_risk_node: str = ""
     risk_level: str = "LOW"
     affected_files: list[str] = field(default_factory=list)
+    # How many dependents, direct and transitive, each affected file holds —
+    # most first. Its keys are affected_files: one calculation for both.
+    dependents_per_file: dict[str, int] = field(default_factory=dict)
     impact_score: float = 0.0
     # Nodes in the file nothing calls, not even a test, which is the other half
     # of the question: not only what is dangerous, but what is free to touch.
@@ -188,11 +191,15 @@ def analyze_impact(G: nx.DiGraph, file_path: str, hops: int = 2) -> ImpactResult
         result.safe_nodes = []
         result.test_only_nodes = []
 
-    files = {
-        _source_of(G, n) for n in direct | reached
-        if _source_of(G, n) and _normalise(_source_of(G, n)) != _normalise(file_path)
-    }
-    result.affected_files = sorted(files)
+    # DECISION (#79): the headline, the AFFECTED FILES list and the JSON count
+    # the same files — every file holding a production dependent within --hops,
+    # direct or transitive, as impact_score does. Until v1.2.0 the list counted
+    # only the files of direct dependents: PrismaStats's admin.ts "affects 69
+    # files" over a list that accounted for 34.
+    target = _normalise(file_path)
+    result.dependents_per_file = dict(_file_counts(
+        G, [n for n in direct | reached if _normalise(_source_of(G, n)) != target]))
+    result.affected_files = sorted(result.dependents_per_file)
 
     # Share of the project that would notice, direct and transitive alike.
     total_nodes = G.number_of_nodes() or 1
@@ -264,7 +271,7 @@ def format_impact(result: ImpactResult, G: nx.DiGraph, width: int = 69) -> str:
                      + f" ({share}% of codebase)")
         lines.append("")
 
-    counts = _file_counts(G, result.direct_dependents)
+    counts = sorted(result.dependents_per_file.items(), key=lambda kv: (-kv[1], kv[0]))
     if counts:
         lines.append(f"AFFECTED FILES (top {min(_TOP_FILES, len(counts))})")
         pad = max(len(_truncate(f)) for f, _ in counts[:_TOP_FILES])
@@ -340,6 +347,7 @@ def impact_to_dict(result: ImpactResult) -> dict:
         "transitive_dependents": result.transitive_dependents,
         "highest_risk_node": result.highest_risk_node,
         "affected_files": result.affected_files,
+        "dependents_per_file": result.dependents_per_file,
         "safe_nodes": result.safe_nodes,
         "dependents_per_node": result.dependents_per_node,
         "test_only_nodes": result.test_only_nodes,
