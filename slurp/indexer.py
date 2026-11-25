@@ -7,6 +7,7 @@ and Go (regex). Produces graphify-compatible graph.json format.
 from __future__ import annotations
 
 import ast
+import os
 import re
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
@@ -7059,8 +7060,9 @@ def iter_source_files(root: Path) -> Iterator[Path]:
         Paths of files whose extension has a registered indexer.
     """
     root_resolved = root.resolve()
-    for path in sorted(root.rglob("*")):
-        # Skip rules apply below the root only — see _should_skip.
+    for path in sorted(_walk_files(root)):
+        # Skip rules apply below the root only — see _should_skip. Skipped
+        # directories never reach here; this still drops minified bundles.
         if not path.is_file() or _should_skip(path.relative_to(root), root):
             continue
         try:
@@ -7072,6 +7074,24 @@ def iter_source_files(root: Path) -> Iterator[Path]:
             continue
         if path.suffix.lower() in _INDEXED_EXTENSIONS:
             yield path
+
+
+def _walk_files(root: Path) -> Iterator[Path]:
+    """Every file below *root*, skipped directories pruned before they are entered.
+
+    DECISION: until v1.1.1 discovery walked the whole tree with rglob and threw
+    away what fell under node_modules/, .next/ and the rest afterwards — on
+    PrismaStats ~50,000 paths visited for 185 files kept. os.walk lets the
+    directory list be cut in place, so a skipped directory is never opened.
+    Like rglob, it does not descend into symlinked directories; symlinks to
+    files are listed and the caller's containment check judges them. Only
+    names below the root are tested, never the root's own (see _should_skip).
+    """
+    for dirpath, dirnames, filenames in os.walk(root):
+        here = Path(dirpath)
+        dirnames[:] = [d for d in dirnames if not _is_skipped_dir(d, here / d)]
+        for name in filenames:
+            yield here / name
 
 
 def skipped_source_files(root: Path) -> dict[str, int]:

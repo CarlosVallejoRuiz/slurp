@@ -86,6 +86,17 @@ uv sync --extra rust            # solo una
   así que `_should_skip(rel, root)` recibe la raíz y sin ella no salta `out/`;
   `_is_skipped_dir(nombre, ruta)` es la regla por directorio. PrismaStats: 1796 → 1582
   nodos, exactamente los 214 de `.next/` y sus 136 relaciones, nada más cambia.
+- **Los directorios saltados se podan, no se recorren** (v1.1.1, #53): `_walk_files()`
+  usa `os.walk` y recorta `dirnames` en sitio con `_is_skipped_dir`, así que
+  `node_modules/` y compañía nunca se abren. Hasta v1.1.0 `rglob("*")` visitaba todo
+  (PrismaStats: 50.136 rutas para 185 ficheros) y filtraba después. Mismo conjunto y
+  mismo orden que antes (los dos ignoran directorios enlazados; los enlaces a fichero
+  los juzga la comprobación de contención): lo fija
+  `TestSkippedDirectoriesArePruned`, que espía `os.scandir` y compara con el
+  algoritmo antiguo. PrismaStats, mediana de 5: descubrimiento 1.204 → 49 ms;
+  `slurp index` 4,91 s (v1.1.0) → 2,89 s (#66) → 0,50 s (#53), grafo byte a byte
+  idéntico al de solo #66. `slurp index` llama dos veces a `iter_source_files`
+  (índice + resumen de parsers); con la poda la segunda cuesta ~50 ms.
 - Cada gramática es un extra **independiente**: su ausencia es una configuración
   soportada y debe degradar en silencio al fallback regex.
 - **Regex principal vs regex fallback**: Go, Lua, Elixir y PowerShell no tienen

@@ -5715,6 +5715,79 @@ class TestFrameworkBuildOutputIsSkipped:
 
 
 # ---------------------------------------------------------------------------
+# Skipped directories are pruned during the walk, never entered
+# ---------------------------------------------------------------------------
+
+def _tricky_tree(root: Path) -> None:
+    """Every case the walk must agree on: skip dirs, out/, symlinks, minified."""
+    for rel in ("src/app.py", "src/web/page.ts", "src/web/lib.min.js",
+                "node_modules/pkg/index.js", "node_modules/pkg/deep/x.js",
+                "pkg.egg-info/meta.py", ".next/server/a.js", "apps/web/.nuxt/b.ts",
+                "out/_next/static/c.js", "out/sw.js", "tools/out/real.py",
+                ".hidden/visible.py", "inner/d.py", "outside/e.py"):
+        _put(root, rel, "def f():\n    return 1\n")
+    proj_outside = root / "outside"
+    (root / "proj").mkdir()
+    for rel in ("src", "node_modules", "pkg.egg-info", ".next", "apps", "out", "tools",
+                ".hidden", "inner"):
+        (root / rel).rename(root / "proj" / rel)
+    (root / "proj" / "linkin").symlink_to(root / "proj" / "inner")   # dir link inside
+    (root / "proj" / "linkout").symlink_to(proj_outside)             # dir link outside
+    (root / "proj" / "filelink.py").symlink_to(proj_outside / "e.py")  # file link outside
+    (root / "proj" / "innerlink.py").symlink_to(root / "proj" / "inner" / "d.py")
+
+
+def _reference_files(root: Path) -> list[Path]:
+    """The v1.1.0 algorithm: walk everything with rglob, filter afterwards."""
+    from slurp.indexer import _INDEXED_EXTENSIONS
+
+    out, resolved = [], root.resolve()
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or _should_skip(path.relative_to(root), root):
+            continue
+        try:
+            path.resolve().relative_to(resolved)
+        except ValueError:
+            continue
+        if path.suffix.lower() in _INDEXED_EXTENSIONS:
+            out.append(path)
+    return out
+
+
+class TestSkippedDirectoriesArePruned:
+    def test_a_skipped_directory_is_never_opened(self, tmp_path, monkeypatch):
+        import os
+
+        _put(tmp_path, "src/app.py", "def f():\n    return 1\n")
+        for rel in ("node_modules/a/b/c.js", ".next/server/d.js", "out/_next/e.js",
+                    "pkg.egg-info/f.py", "web/.svelte-kit/g.ts"):
+            _put(tmp_path, rel, "function g() {}\n")
+        opened: list[str] = []
+        real_scandir = os.scandir
+
+        def spy(path="."):
+            opened.append(Path(path).relative_to(tmp_path).as_posix())
+            return real_scandir(path)
+
+        monkeypatch.setattr(os, "scandir", spy)
+        assert _indexed_files(tmp_path) == {"src/app.py"}
+        assert sorted(opened) == [".", "src", "web"]
+
+    def test_the_files_found_are_exactly_those_of_the_old_walk(self, tmp_path):
+        _tricky_tree(tmp_path)
+        root = tmp_path / "proj"
+        assert list(iter_source_files(root)) == _reference_files(root)
+        assert {p.relative_to(root).as_posix() for p in iter_source_files(root)} == {
+            "src/app.py", "src/web/page.ts", "tools/out/real.py", ".hidden/visible.py",
+            "inner/d.py", "innerlink.py"}
+
+    def test_the_root_itself_may_have_a_skipped_name(self, tmp_path):
+        _put(tmp_path, "node_modules/proj/app.py", "def f():\n    return 1\n")
+        root = tmp_path / "node_modules" / "proj"
+        assert _indexed_files(root) == {"app.py"}
+
+
+# ---------------------------------------------------------------------------
 # No private (_-prefixed) attribute survives into the written graph
 # ---------------------------------------------------------------------------
 
