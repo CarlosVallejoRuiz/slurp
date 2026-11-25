@@ -358,7 +358,7 @@ slurp "prisma models" --backend openai
 | `--model`, `-m` | `cl100k_base` | Tiktoken encoding for token counting. |
 | `--explain` | off | Print per-node score breakdown: final / structural / semantic. |
 | `--no-audit` | off | Skip writing to `.slurp/audit.jsonl`. |
-| `--neighbor-decay` | `0.7` | Score multiplier applied to neighbors of each selected node. |
+| `--neighbor-decay` | `0.7` | Score multiplier applied to neighbors of each selected node — to at most 10 of them per node, the most relevant on their own, so a hub with a hundred callers does not lend its score to all of them. |
 | `--min-score` | `0.15` | Minimum relevance score; nodes below this are excluded before selection. The same default applies to `export`, `benchmark`, `eval`, `diff --budget`, the MCP server and the library. On `slurp index` graphs every node is code and gets the +0.3 code boost, so 0.15 filters nothing there — the budget is the limit; on graphify graphs it keeps unrelated documents and concepts out. |
 | `--token-factor` | `1.0` | Multiply every token count, for a reader that does not tokenize like tiktoken. Also `$SLURP_TOKEN_FACTOR`; the flag wins. See *Counting tokens* below. |
 | `--viz` | off | Open an interactive graph visualization in the browser. |

@@ -565,6 +565,20 @@ uv sync --extra rust            # solo una
     las 31 preguntas tiene un test o un import entre sus `relevant_nodes`.
   - Efecto en bandas (cambio de comportamiento documentado en el README): slurp 137 nodos
     cambian en explain (69 HIGH→LOW, 34 MEDIUM→LOW, 34 HIGH→MEDIUM); PrismaStats 0.
+
+- **El boost de vecino llega como mucho a 10 vecinos** (v1.2, #64/#65, `budget._BOOST_FANOUT`):
+  los candidatos con más score propio, desempate por id; los tests e imports no ocupan
+  plaza (no son candidatos). Causa medida: en PrismaStats `createAdminClient` (0,839, 98
+  llamadores) prestaba 0,587 a todos, por encima de `useChatContext` (0,510, arch-05), y
+  sus 98 relaciones (valor 0,587) se comían lo que añade un presupuesto mayor (4000 → 8000:
+  +14 nodos, +148 relaciones; con el tope +68/+82). Alternativas medidas en el grupo de
+  ajuste (`scratchpad/v12/hubs-table.md`, 27 variantes): normalizar por grado (A/A'), valor
+  de relaciones ×ρ o tope de gasto en relaciones (C; ρ ≤ 0,5 deja 0 relaciones),
+  `neighbor_decay` global (D). k=3/5 pierden self-12 (check_reload, 7.º vecino de
+  load_graph), k=20 vuelve a perder arch-05 en JSON 4000. Elegido por ser el mecanismo
+  más simple que ataca la causa, no por el 1,000 del ajuste (16 preguntas, 27 variantes:
+  no significativo). Criterio de validación fijado antes de abrir el holdout: ver la
+  sección de resultados de v1.2.
   - Los módulos origen los reimportan, así que `from slurp.scorer import
     _tokenize` y `from slurp.explainer import _split_callers` siguen
     funcionando — los tests no hizo falta tocarlos.

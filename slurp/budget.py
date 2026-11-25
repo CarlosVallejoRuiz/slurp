@@ -105,6 +105,21 @@ def _scaled(raw: int, factor: float) -> int:
 _STRUCTURAL_RELATIONS = frozenset({"contains", "imports_from", "imports", "defines"})
 _STRUCTURAL_WEIGHT = 0.5
 
+# DECISION: a selected node passes its boost (score x neighbor_decay) to at most
+# its 10 candidate neighbours with the highest own score; the others keep their
+# own. Measured in v1.2 (#64/#65): on PrismaStats createAdminClient (0.839, 98
+# callers) lent 0.587 to every caller, above useChatContext (0.510), the node a
+# question asked for, and the callers filled the budget before it; with more
+# budget the 98 hub-to-caller relations, worth the same 0.587, took the room
+# meant for new nodes (4000 -> 8000 tokens added 14 nodes and 148 relations).
+# The cap removes that cause. 3, 5, 10 and 20 were tried on the tuning group
+# (scripts/retrieval.py): below 10 it cut a boost slurp's own graph needs (a
+# function reached through a 16-neighbour node, 7th among them), at 20 the hub's
+# callers crowded JSON at 4000 again. 10 was kept as the simplest mechanism that
+# removes the measured cause — not for its tuning score, which over 16 questions
+# and 27 variants tried is not significant.
+_BOOST_FANOUT = 10
+
 # Selection aims this far under the budget, so the final measurement rarely has
 # to trim: costing items one by one misses the tokens merged across their
 # boundaries and the digits of the header.
@@ -370,7 +385,8 @@ def build_context(
        warning — must fit, or BudgetTooSmallError names the minimum.
     2. Greedy selection over one queue of nodes and relationships, by value:
        a node's value is its score, raised to `parent * neighbor_decay` when a
-       selected neighbour boosts it; a relationship becomes eligible once both
+       selected neighbour boosts it (each node boosts at most _BOOST_FANOUT
+       neighbours, the most relevant on their own); a relationship becomes eligible once both
        its ends are in and is worth min(their values) x its relation weight. So
        at every score level the output holds the nodes and the relationships
        among them, and what is left out first is the structural edges of
@@ -482,10 +498,15 @@ def build_context(
             edge_value = min(effective[u], effective[v]) * _edge_weight(G, u, v)
             heapq.heappush(heap, (-edge_value, 1, ("e", u, v)))
 
-        # Neighbours inherit a decayed share of this node's relevance.
+        # Neighbours inherit a decayed share of this node's relevance: the
+        # _BOOST_FANOUT of them most relevant on their own, so a hub lends it to
+        # ten callers rather than to all of them.
         boosted = value * neighbor_decay
-        for nbr in set(G.predecessors(node)) | set(G.successors(node)):
-            if nbr in candidates and nbr not in processed and boosted > effective[nbr]:
+        heirs = sorted((nbr for nbr in set(G.predecessors(node)) | set(G.successors(node))
+                        if nbr in candidates and nbr not in processed),
+                       key=lambda n: (-scores.get(n, 0.0), n))[:_BOOST_FANOUT]
+        for nbr in heirs:
+            if boosted > effective[nbr]:
                 effective[nbr] = boosted
                 heapq.heappush(heap, (-boosted, 0, ("n", nbr)))
 

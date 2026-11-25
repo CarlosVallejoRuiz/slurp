@@ -801,3 +801,81 @@ class TestTestsAndImportsLeftOut:
 
     def test_hand_built_stats_have_no_breakdown_to_rebuild(self):
         assert left_out_from_stats({"nodes_selected": 1, "nodes_total": 2}) is None
+
+
+# ---------------------------------------------------------------------------
+# A node passes its boost to at most _BOOST_FANOUT neighbours (v1.2, #64/#65)
+# ---------------------------------------------------------------------------
+
+def _hub_and_relevant(spokes: int = 30) -> tuple[nx.DiGraph, dict[str, float]]:
+    """A hub scored high with many weak spokes, and an unrelated relevant node.
+
+    The shape measured on PrismaStats: createAdminClient (0.839, 98 callers)
+    lent 0.587 to every caller, above useChatContext (0.510), and the callers
+    filled the budget before it.
+    """
+    G = nx.DiGraph()
+    G.add_node("hub", label="hub", type="function", source_file="lib/hub.py")
+    G.add_node("relevant", label="relevant", type="function", source_file="lib/r.py")
+    scores = {"hub": 0.84, "relevant": 0.51}
+    for i in range(spokes):
+        G.add_node(f"s{i:02d}", label=f"spoke{i}", type="function", source_file=f"app/s{i}.py")
+        G.add_edge(f"s{i:02d}", "hub", relation="calls")
+        scores[f"s{i:02d}"] = round(0.30 + i * 0.001, 3)   # s29 is the most relevant
+    return G, scores
+
+
+def _entry_order(G: nx.DiGraph, scores: dict[str, float]) -> list[str]:
+    """Nodes in the order a growing budget lets them in."""
+    order: list[str] = []
+    for budget in range(100, 6000, 10):
+        try:
+            _t, sub, _s = build_context(G, scores, budget, min_score=0.0)
+        except BudgetTooSmallError:
+            continue
+        order.extend(n for n in sorted(sub.nodes, key=lambda n: (-scores[n], n))
+                     if n not in order)
+        if len(order) == G.number_of_nodes():
+            break
+    return order
+
+
+class TestBoostFanout:
+    def test_the_fanout_is_ten(self):
+        assert budget_mod._BOOST_FANOUT == 10
+
+    def test_a_hub_lends_its_boost_to_ten_neighbours_only(self):
+        G, scores = _hub_and_relevant(spokes=30)
+        order = _entry_order(G, scores)
+        # The hub, then the ten spokes it boosts to 0.84 * 0.7 = 0.588, then
+        # the relevant node at 0.51 — not after all thirty spokes.
+        assert order[0] == "hub"
+        assert order.index("relevant") == 11
+
+    def test_the_heirs_are_the_neighbours_with_the_highest_own_score(self):
+        G, scores = _hub_and_relevant(spokes=30)
+        order = _entry_order(G, scores)
+        assert set(order[1:11]) == {f"s{i:02d}" for i in range(20, 30)}
+
+    def test_ties_on_own_score_go_by_id(self):
+        G, scores = _hub_and_relevant(spokes=12)
+        for i in range(12):
+            scores[f"s{i:02d}"] = 0.3
+        order = _entry_order(G, scores)
+        assert set(order[1:11]) == {f"s{i:02d}" for i in range(10)}
+
+    def test_a_node_with_few_neighbours_boosts_them_all(self):
+        G, scores = _hub_and_relevant(spokes=8)
+        order = _entry_order(G, scores)
+        assert order.index("relevant") == 9
+
+    def test_left_out_neighbours_take_no_place_among_the_heirs(self):
+        # Ten tests around the hub must not use up its ten boosts.
+        G, scores = _hub_and_relevant(spokes=12)
+        for i in range(10):
+            G.add_node(f"t{i}", label=f"test_hub_{i}", type="function",
+                       source_file="tests/test_hub.py")
+            G.add_edge(f"t{i}", "hub", relation="calls")
+            scores[f"t{i}"] = 0.9
+        order = _entry_order(G, scores)
+        assert set(order[1:11]) == {f"s{i:02d}" for i in range(2, 12)}
