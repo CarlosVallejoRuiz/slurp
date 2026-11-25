@@ -1034,10 +1034,12 @@ graphs, `slurp impact` answers it beforehand from the graph you already have.
 slurp impact lib/supabase/admin.ts --graph graph.json
 ```
 
-Real output with v1.2.0 on PrismaStats's graphify graph, complete — the list stops at ten
-files by design and counts the rest:
+Real output with v1.2.1 on PrismaStats's graphify graph, complete — the list stops at ten
+files by design and counts the rest. `AGENTS.md` and `all_tsx_exports.txt` are text files:
+graphify's graph attributes three component nodes to each, and slurp lists the files the
+graph gives:
 
-<!-- example: impact · slurp v1.2.0 · slurp impact lib/supabase/admin.ts --graph graph.json -->
+<!-- example: impact · slurp v1.2.1 · slurp impact lib/supabase/admin.ts --graph graph.json -->
 ```
 ╭─ Impact Analysis — lib/supabase/admin.ts ─────╮
 │ 2 definitions · RISK: HIGH · affects 69 files │
@@ -1050,14 +1052,14 @@ AFFECTED FILES (top 10)
   lib/supabase/admin-actions.ts       31 dependents
   lib/supabase/cantera-actions.ts     14 dependents
   lib/supabase/dashboard-actions.ts   11 dependents
-  lib/supabase/reports-actions.ts     7 dependents
+  lib/supabase/reports-actions.ts     8 dependents
   app/api/mis-partidos/route.ts       6 dependents
   …entrenamientos/favoritos/route.ts  5 dependents
+  AGENTS.md                           3 dependents
+  all_tsx_exports.txt                 3 dependents
   app/admin/configuracion/actions.ts  3 dependents
-  …p/api/cantera/alineacion/route.ts  2 dependents
-  app/api/chat/route.ts               2 dependents
-  app/api/contact/route.ts            2 dependents
-  … and 24 more files
+  app/admin/clubes/page.tsx           2 dependents
+  … and 59 more files
 
 RECOMMENDATION
   Add integration tests before editing. 130 nodes depend on functions in this file.
