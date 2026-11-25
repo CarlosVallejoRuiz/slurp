@@ -813,6 +813,12 @@ def build_diff_viz_graph(G_old, G_new, diff, hops) -> nx.DiGraph
   centralidad media (máx. ~0,03): borrar createAdminClient (97 llamadores) daba 0,0012 "low".
   `dependents`, `unknown_nodes`, `risk_reason`: sin call graph, un "low" pasa a "unknown"
   (`diff_severity`). Titular y color del panel del CLI salen de la misma banda.
+- `removed_neighbors` (v1.1.1, #58) — vecinos directos de cada nodo borrado **en el grafo
+  viejo**, que es donde existe, filtrados a los que siguen en el nuevo. Entran en el
+  "risk neighborhood" de `format_diff` (y del `slurp_diff` del MCP), y el viz dibuja el
+  nodo borrado con sus aristas antiguas en vez de aislado. Antes se buscaba en el grafo
+  nuevo: borrar una función con 97 llamadores no listaba ninguno en riesgo. El rename de
+  `select_subgraph` del README pasó de 2 a 17 nodos en riesgo.
 - `has_changes` — property bool
 
 **Colores en viz:** verde=added, rojo=removed, amarillo=modified, gris=unchanged

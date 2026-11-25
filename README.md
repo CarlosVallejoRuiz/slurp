@@ -765,7 +765,7 @@ a review checklist, or your AI assistant:
 - **Impact score:** 0.1184 (🟢 low) — 1 production caller reached
 - 1 nodes added · 1 removed · 0 modified
 - 2 edges added · 17 removed
-- 2 nodes in risk neighborhood
+- 17 nodes in risk neighborhood
 
 ## Added Nodes (1)
 
@@ -795,6 +795,10 @@ Direct neighbors of changed nodes:
 
 - build_context (function) · centrality: 0.0058
 - budget (module) · centrality: 0.0031
+- _fed_html (function) · centrality: 0.0013
+- _handle_suggest (function) · centrality: 0.0012
+- test_audit_custom_audit_dir (function) · centrality: 0.0011
+- …
 
 ## What to review
 Most connected nodes in the blast radius — review these first:
@@ -811,6 +815,9 @@ Most connected nodes in the blast radius — review these first:
 > contains it, so one production caller is left broken (`mcp._handle_suggest`) and the
 > score is low. Until v1.0.7 the same kind of rename scored 0.0048 whatever it broke:
 > the score was a share of the whole graph. Since v1.1.0 it counts callers — see below.
+> The risk neighbourhood lists every node the deleted function touched, tests included,
+> read from the old graph where it still exists; until v1.1.1 it was looked up in the
+> new graph, so the same report listed 2 nodes at risk and none of its callers.
 
 The run finishes with a colour-coded summary panel and, if you did not pass
 `--viz`, the exact command to see the full picture:

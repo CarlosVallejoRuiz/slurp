@@ -27,6 +27,9 @@ class GraphDiff:
     # Changed nodes in a language with no call graph: their callers are unknown.
     unknown_nodes: list[str] = field(default_factory=list)
     risk_reason: str = ""
+    # Nodes still in the new graph that were direct neighbours of a removed
+    # node in the old one, where it still exists: its callers and callees.
+    removed_neighbors: list[str] = field(default_factory=list)
 
     @property
     def has_changes(self) -> bool:
@@ -129,6 +132,16 @@ def diff_graphs(old: nx.DiGraph, new: nx.DiGraph) -> GraphDiff:
     gaps.update({n: _call_graph_gap(new, n, new_calls) for n in changed})
     unknown = sorted(n for n, gap in gaps.items() if gap)
 
+    # DECISION: a deleted node exists only in the old graph, so its risk
+    # neighbourhood is read there. Until v1.1.1 the report looked for it in the
+    # new graph, found nothing, and deleting a function with 97 callers listed
+    # none of them as at risk. Neighbours deleted as well are not at risk.
+    removed_neighbors: set[str] = set()
+    for node in removed:
+        removed_neighbors.update(old.predecessors(node))
+        removed_neighbors.update(old.successors(node))
+    removed_neighbors &= new_nodes
+
     return GraphDiff(
         added_nodes=added_nodes,
         removed_nodes=removed_nodes,
@@ -139,6 +152,7 @@ def diff_graphs(old: nx.DiGraph, new: nx.DiGraph) -> GraphDiff:
         dependents=sorted(dependents),
         unknown_nodes=unknown,
         risk_reason=gaps[unknown[0]] if unknown else "",
+        removed_neighbors=sorted(removed_neighbors),
     )
 
 
@@ -322,9 +336,10 @@ def format_diff(diff: GraphDiff, G_new: nx.DiGraph, hops: int = 2) -> str:
         f"{len(diff.removed_edges)} removed"
     )
 
-    # At-risk: direct neighbors of added/modified nodes in G_new.
+    # At-risk: direct neighbors of added/modified nodes in G_new, and of
+    # removed nodes in the old graph (diff.removed_neighbors).
     affected_ids = set(diff.added_nodes) | set(diff.modified_nodes)
-    at_risk: set[str] = set()
+    at_risk: set[str] = set(diff.removed_neighbors)
     for nid in affected_ids:
         if nid in G_new:
             at_risk.update(G_new.predecessors(nid))
@@ -459,14 +474,19 @@ def build_diff_viz_graph(
     affected = affected_subgraph(G_new, diff, hops)
     viz_G: nx.DiGraph = affected.copy()
 
-    # Removed nodes aren't in G_new — add them from G_old as isolated nodes.
+    # Removed nodes aren't in G_new — add them from G_old, wired to the
+    # neighbours they had there, so the viz shows who depended on them. Only
+    # edges touching a removed node come back: the rest is the new graph.
+    removed_set = set(diff.removed_nodes)
     for nid in diff.removed_nodes:
         old_attrs = dict(G_old.nodes[nid]) if nid in G_old else {}
         viz_G.add_node(nid, **old_attrs)
+    for u, v in diff.removed_edges:
+        if (u in removed_set or v in removed_set) and u in viz_G and v in viz_G:
+            viz_G.add_edge(u, v, **(G_old.edges[u, v] if G_old.has_edge(u, v) else {}))
 
     # Stamp diff status as node type for colour-coding.
     added_set = set(diff.added_nodes)
-    removed_set = set(diff.removed_nodes)
     modified_set = set(diff.modified_nodes)
 
     for nid in viz_G.nodes:

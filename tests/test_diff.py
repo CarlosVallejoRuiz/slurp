@@ -1022,3 +1022,66 @@ class TestCliPanelMatchesHeadline:
         panel = _build_diff_panel(d, "old.json", "new.json", 2, suggest_viz=False)
         assert panel.border_style == border
         assert impact_headline(d.impact_score) in panel.renderable
+
+
+# ---------------------------------------------------------------------------
+# A deleted node's risk neighbourhood is read from the old graph (v1.1.1)
+# ---------------------------------------------------------------------------
+
+class TestRiskNeighbourhoodOfRemovedNodes:
+    """The new graph no longer holds a deleted node; the old one still does."""
+
+    def test_removed_neighbors_come_from_the_old_graph(self):
+        G = _hub_graph(3)
+        G.add_edge("hub", "leaf", relation="calls")
+        d = diff_graphs(G, _without(G, "hub"))
+        assert d.removed_neighbors == ["c0", "c1", "c2", "leaf"]
+
+    def test_a_neighbour_removed_as_well_is_not_at_risk(self):
+        G = _hub_graph(2)
+        d = diff_graphs(G, _without(_without(G, "hub"), "c0"))
+        assert d.removed_neighbors == ["c1"]
+
+    def test_the_report_counts_and_lists_the_callers_of_a_deleted_node(self):
+        G = _hub_graph(3)
+        new = _without(G, "hub")
+        out = format_diff(diff_graphs(G, new), new)
+        # Until v1.1.0: "0 nodes in risk neighborhood" and no section at all.
+        assert "- 3 nodes in risk neighborhood" in out
+        section = out.split("## Nodes at Risk")[1].split("\n## ")[0]
+        assert all(f"caller{i}" in section for i in range(3))
+
+    def test_a_changed_neighbour_is_reported_as_changed_not_at_risk(self):
+        G = _hub_graph(2)
+        new = _without(G, "hub")
+        new.nodes["c0"]["label"] = "renamed"
+        out = format_diff(diff_graphs(G, new), new)
+        assert "- 1 nodes in risk neighborhood" in out
+
+    def test_the_viz_keeps_a_removed_node_wired_to_its_old_neighbours(self):
+        G = _hub_graph(2)
+        new = _without(G, "hub")
+        viz, _, _ = build_diff_viz_graph(G, new, diff_graphs(G, new), hops=1)
+        assert viz.nodes["hub"]["type"] == "removed"
+        assert set(viz.predecessors("hub")) == {"c0", "c1"}
+        # Only edges that touch the removed node come back from the old graph.
+        assert not [e for e in viz.edges if "hub" not in e and e not in new.edges]
+
+    def test_mcp_slurp_diff_reports_the_same_neighbourhood(self, tmp_path):
+        import io
+
+        from slurp import mcp
+
+        G = _hub_graph(3)
+        paths = []
+        for name, graph in (("old", G), ("new", _without(G, "hub"))):
+            p = tmp_path / f"{name}.json"
+            p.write_text(json.dumps(nx.node_link_data(graph, edges="links")))
+            paths.append(str(p))
+        buf = io.StringIO()
+        mcp._handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                     "params": {"name": "slurp_diff",
+                                "arguments": {"old_graph": paths[0], "new_graph": paths[1]}}},
+                    None, buf, session_log=False)
+        text = json.loads(buf.getvalue())["result"]["content"][0]["text"]
+        assert "- 3 nodes in risk neighborhood" in text
