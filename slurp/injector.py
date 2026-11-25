@@ -20,6 +20,9 @@ _LANG_MAP: dict[str, str] = {
 # Extensions that use brace-balanced extraction instead of indentation.
 _BRACE_EXTS = frozenset({".ts", ".tsx", ".js", ".jsx", ".go"})
 
+# The longest block injected for one node.
+_MAX_BLOCK_LINES = 100
+
 
 def _parse_line(source_location: str | int | None) -> int | None:
     """Parse a source location like 'L42', '42', or integer 42 into a 1-based line number."""
@@ -42,16 +45,28 @@ def _extract_python(lines: list[str], start_line: int, max_lines: int) -> str | 
     indentation. Stops at the first non-blank line whose indentation is ≤ the
     header's indentation.
     """
+    return _python_block(lines, start_line, max_lines)[0]
+
+
+def _python_block(lines: list[str], start_line: int,
+                  max_lines: int) -> tuple[str | None, int | None]:
+    """The block _extract_python returns, and the line it was cut at, if it was.
+
+    Returns:
+        (text, cut_at): cut_at is the 1-based line where the block goes on past
+        *max_lines*, or None when the whole block fits.
+    """
     idx = start_line - 1
     if idx < 0 or idx >= len(lines):
-        return None
+        return None, None
 
     header = lines[idx]
     if not header.strip():
-        return None
+        return None, None
 
     base_indent = len(header) - len(header.lstrip())
     result = [header.rstrip()]
+    ended = False
 
     for line in lines[idx + 1 : idx + max_lines]:
         stripped = line.rstrip()
@@ -60,6 +75,7 @@ def _extract_python(lines: list[str], start_line: int, max_lines: int) -> str | 
             continue
         line_indent = len(line) - len(line.lstrip())
         if line_indent <= base_indent:
+            ended = True
             break
         result.append(stripped)
 
@@ -67,7 +83,16 @@ def _extract_python(lines: list[str], start_line: int, max_lines: int) -> str | 
     while result and result[-1] == "":
         result.pop()
 
-    return "\n".join(result) if result else None
+    cut_at = None
+    if not ended:
+        # The window ran out: the block goes on if the next line with content
+        # past it is still indented under the header.
+        rest = (ln for ln in lines[idx + max_lines:] if ln.strip())
+        following = next(rest, None)
+        if following is not None and len(following) - len(following.lstrip()) > base_indent:
+            cut_at = idx + max_lines + 1
+
+    return ("\n".join(result) if result else None), cut_at
 
 
 def _extract_brace_balanced(lines: list[str], start_line: int, max_lines: int) -> str | None:
@@ -78,13 +103,25 @@ def _extract_brace_balanced(lines: list[str], start_line: int, max_lines: int) -
     means balanced braces within a signature line (e.g. destructuring params)
     don't trigger early termination.
     """
+    return _brace_block(lines, start_line, max_lines)[0]
+
+
+def _brace_block(lines: list[str], start_line: int,
+                 max_lines: int) -> tuple[str | None, int | None]:
+    """The block _extract_brace_balanced returns, and the line it was cut at, if it was.
+
+    Returns:
+        (text, cut_at): cut_at is the 1-based line where the block goes on past
+        *max_lines*, or None when it closed (or the file ended) within them.
+    """
     idx = start_line - 1
     if idx < 0 or idx >= len(lines):
-        return None
+        return None, None
 
     result: list[str] = []
     depth = 0
     found_open = False
+    closed = False
 
     for line in lines[idx : idx + max_lines]:
         result.append(line.rstrip())
@@ -95,9 +132,11 @@ def _extract_brace_balanced(lines: list[str], start_line: int, max_lines: int) -
             elif ch == "}":
                 depth -= 1
         if found_open and depth == 0:
+            closed = True
             break
 
-    return "\n".join(result) if result else None
+    cut_at = idx + max_lines + 1 if not closed and idx + max_lines < len(lines) else None
+    return ("\n".join(result) if result else None), cut_at
 
 
 def extract_code_block(
@@ -117,24 +156,33 @@ def extract_code_block(
     Returns:
         Extracted code as a string, or None if file is missing or location invalid.
     """
+    return _code_block(file_path, source_location, max_lines)[0]
+
+
+def _code_block(
+    file_path: Path,
+    source_location: str | int | None,
+    max_lines: int,
+) -> tuple[str | None, int | None]:
+    """extract_code_block's text, and the 1-based line it was cut at (None if whole)."""
     if not file_path.exists():
-        return None
+        return None, None
 
     line_num = _parse_line(source_location)
     if line_num is None:
-        return None
+        return None, None
 
     try:
         content = file_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return None
+        return None, None
 
     lines = content.splitlines()
     ext = file_path.suffix.lower()
 
     if ext in _BRACE_EXTS:
-        return _extract_brace_balanced(lines, line_num, max_lines)
-    return _extract_python(lines, line_num, max_lines)
+        return _brace_block(lines, line_num, max_lines)
+    return _python_block(lines, line_num, max_lines)
 
 
 def inject_code(
@@ -159,7 +207,8 @@ def inject_code(
         max_nodes: Maximum subgraph size. Returns G unchanged if exceeded.
 
     Returns:
-        Copy of G with ``code_block`` set on nodes where extraction succeeded.
+        Copy of G with ``code_block`` set on nodes where extraction succeeded,
+        and ``code_block_note`` on those whose block was cut at 100 lines.
     """
     if G.number_of_nodes() > max_nodes:
         return G
@@ -187,9 +236,15 @@ def inject_code(
                 file=sys.stderr,
             )
             continue
-        label = attrs.get("label", str(nid))
-        code = extract_code_block(file_path, source_location, label)
+        code, cut_at = _code_block(file_path, source_location, _MAX_BLOCK_LINES)
         if code:
             result.nodes[nid]["code_block"] = code
+            if cut_at is not None:
+                # DECISION (#80): a cut block says so, and where it goes on.
+                # Until v1.2.0 it just stopped at line 100, mid-function, and
+                # the reader (an LLM) could take it for the whole body.
+                result.nodes[nid]["code_block_note"] = (
+                    f"… cut at {_MAX_BLOCK_LINES} lines; the block continues at "
+                    f"line {cut_at} of {source_file}")
 
     return result

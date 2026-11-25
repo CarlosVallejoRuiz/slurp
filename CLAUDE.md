@@ -1113,6 +1113,18 @@ slurp serve --graph graph.json
 
 ---
 
+### `slurp/injector.py`
+
+`--inject-code` corta cada bloque a 100 líneas (`_MAX_BLOCK_LINES`). **Un bloque cortado lo
+dice** (v1.2.1, #80): el nodo lleva `code_block_note` y el markdown lo imprime justo debajo
+de la valla de cierre — `… cut at 100 lines; the block continues at line N of FICHERO`.
+Hasta v1.2.0 el bloque acababa a media función sin aviso. La nota sale del mismo renderer,
+así que el presupuesto la cuenta. Sin nota: un bloque que cierra dentro de la ventana
+(aunque sea en la línea 100) o que acaba con el fichero. `extract_code_block` sigue
+devolviendo solo el texto; `_code_block` da además la línea del corte.
+
+---
+
 ### `slurp/graphfile.py`
 
 **Una sola escritura de `graph.json`** (v1.2.1, #84): `write_graph(path, data)`. La usan

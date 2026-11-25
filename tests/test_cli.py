@@ -2512,3 +2512,20 @@ class TestTestsAndImportsLeftOut:
         assert res.exit_code == 0, res.output
         assert "def login_user" in res.output
         assert "1 test node and 1 import node are left out by default" in res.output
+
+
+class TestInjectCodeSaysWhenItCuts:
+    def test_a_block_cut_at_100_lines_says_where_it_continues(self, tmp_path):
+        body = "".join(f"    step_{i} = {i}\n" for i in range(140))
+        (tmp_path / "pipeline.py").write_text(f"def run_pipeline():\n{body}", encoding="utf-8")
+        graph = {"nodes": [{"id": "p", "label": "run_pipeline", "type": "function",
+                            "source_file": "pipeline.py", "source_location": "L1"}],
+                 "links": []}
+        gpath = tmp_path / "graph.json"
+        gpath.write_text(json.dumps(graph), encoding="utf-8")
+        result = _runner().invoke(cli, ["run pipeline", "--graph", str(gpath), "--budget",
+                                        "8000", "--inject-code", "--no-audit"])
+        assert result.exit_code == 0, result.output
+        assert ("    step_98 = 98\n```\n… cut at 100 lines; the block continues at line "
+                "101 of pipeline.py\n") in result.output
+        assert "step_99" not in result.output

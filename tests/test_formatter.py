@@ -600,3 +600,23 @@ class TestCodeBlockMarkdown:
         out = format_subgraph(G, self._stats(G), format="json")
         # JSON format does not emit fenced code blocks
         assert "```" not in out
+
+
+class TestCutCodeBlockNote:
+    def test_the_note_follows_the_closing_fence(self):
+        G = nx.DiGraph()
+        G.add_node("fn", label="fn", type="function", file_path="src/a.py",
+                   code_block="def fn():\n    x = 1",
+                   code_block_note="… cut at 100 lines; the block continues at line 101 of src/a.py")
+        out = format_subgraph(G, {"nodes_selected": 1, "nodes_total": 1, "tokens_used": 0,
+                                  "tokens_budget": 9999, "coverage_pct": 100.0})
+        assert ("    x = 1\n```\n… cut at 100 lines; the block continues at line 101 of "
+                "src/a.py\n") in out
+
+    def test_the_note_is_costed_like_the_rest_of_the_node(self):
+        from slurp.formatter import item_text
+
+        G = nx.DiGraph()
+        G.add_node("fn", label="fn", file_path="src/a.py", code_block="pass",
+                   code_block_note="… cut at 100 lines; the block continues at line 101")
+        assert "continues at line 101" in item_text(G, ("n", "fn"))

@@ -534,3 +534,66 @@ class TestInjectCodeContainment:
         assert res.exit_code == 0, res.output
         assert "hunter2" not in res.output
         assert "evil" in res.stderr
+
+
+# ---------------------------------------------------------------------------
+# #80 — a block cut at 100 lines says so
+# ---------------------------------------------------------------------------
+
+def _long_python(body_lines: int) -> str:
+    return "def huge():\n" + "".join(f"    x_{i} = {i}\n" for i in range(body_lines)) \
+        + "\n\ndef after():\n    pass\n"
+
+
+def _long_ts(body_lines: int) -> str:
+    return ("export function huge(): number {\n"
+            + "".join(f"  const x{i} = {i};\n" for i in range(body_lines))
+            + "  return 0;\n}\n\nexport function after(): number { return 1 }\n")
+
+
+def _injected(tmp_path: Path, name: str, text: str, line: str = "L1") -> dict:
+    (tmp_path / name).write_text(text, encoding="utf-8")
+    G = nx.DiGraph()
+    G.add_node("n", label="huge", source_file=name, source_location=line)
+    return dict(inject_code(G, tmp_path).nodes["n"])
+
+
+class TestCutBlocksSaySo:
+    def test_a_long_python_function_is_cut_with_a_note(self, tmp_path):
+        attrs = _injected(tmp_path, "mod.py", _long_python(150))
+        assert attrs["code_block"].count("\n") == 99  # 100 lines
+        assert attrs["code_block_note"] == (
+            "… cut at 100 lines; the block continues at line 101 of mod.py")
+
+    def test_a_long_brace_function_is_cut_with_a_note(self, tmp_path):
+        text = "// header\n\n" + _long_ts(150)
+        attrs = _injected(tmp_path, "mod.ts", text, line="L3")
+        assert attrs["code_block"].count("\n") == 99
+        assert attrs["code_block_note"] == (
+            "… cut at 100 lines; the block continues at line 103 of mod.ts")
+
+    def test_a_python_function_that_ends_at_the_limit_has_no_note(self, tmp_path):
+        attrs = _injected(tmp_path, "mod.py", _long_python(99))  # header + 99 = 100
+        assert attrs["code_block"].count("\n") == 99
+        assert "code_block_note" not in attrs
+
+    def test_a_brace_function_that_closes_at_the_limit_has_no_note(self, tmp_path):
+        attrs = _injected(tmp_path, "mod.ts", _long_ts(97))  # 1 + 97 + 2 = 100 lines
+        assert attrs["code_block"].endswith("}")
+        assert "code_block_note" not in attrs
+
+    def test_a_block_the_file_ends_has_no_note(self, tmp_path):
+        # An unclosed block in a short file: the file ends there, nothing is left out.
+        text = "export function huge(): number {\n" + "  const x = 1;\n" * 20
+        attrs = _injected(tmp_path, "mod.ts", text)
+        assert attrs["code_block"].count("\n") == 20
+        assert "code_block_note" not in attrs
+
+    def test_a_short_function_has_no_note(self, tmp_path):
+        G, root = _make_graph(tmp_path)
+        assert "code_block_note" not in inject_code(G, root).nodes["n1"]
+
+    def test_extract_code_block_still_returns_the_text(self, tmp_path):
+        (tmp_path / "mod.py").write_text(_long_python(150), encoding="utf-8")
+        code = extract_code_block(tmp_path / "mod.py", "L1")
+        assert isinstance(code, str) and code.count("\n") == 99

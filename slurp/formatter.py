@@ -124,6 +124,8 @@ def _md_node_lines(G: nx.DiGraph, nid: str, scores: dict[str, float] | None) -> 
         lines.append(f"```{_file_lang(fpath)}")
         lines.append(code_block)
         lines.append("```")
+        if note := attrs.get("code_block_note"):
+            lines.append(note)
     lines.append("")
     return lines
 

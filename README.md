@@ -305,7 +305,7 @@ Add `--inject-code` to embed the actual function body next to each node:
 slurp "recalcularPlayerStats" --graph graphify-out/graph.json --budget 2000 --inject-code --min-score 0.8 --project-root .
 ```
 
-<!-- example: inject-code · slurp v1.2.0 · slurp "recalcularPlayerStats" --graph graphify-out/graph.json --budget 2000 --inject-code --min-score 0.8 --project-root . -->
+<!-- example: inject-code · slurp v1.2.1 · slurp "recalcularPlayerStats" --graph graphify-out/graph.json --budget 2000 --inject-code --min-score 0.8 --project-root . -->
 ````
 ### recalcularPlayerStats() · score: 0.91
 → File: lib/supabase/admin-actions.ts
@@ -324,12 +324,13 @@ export async function recalcularPlayerStats(playerNombre: string, clubId: string
     ...
     }
 ```
+… cut at 100 lines; the block continues at line 1240 of lib/supabase/admin-actions.ts
 ````
 
 > The language tag is inferred from the file path, so the block is fenced as
 > `typescript` here without being told. Add `--project-root` when the graph does
-> not sit at the root of the source tree. A body is cut after 100 lines:
-> `recalcularPlayerStats` is longer, so its block ends inside the function.
+> not sit at the root of the source tree. A body is cut after 100 lines, and the line
+> under the block says so and where the rest is: `recalcularPlayerStats` is longer.
 
 Pipe the output directly into your LLM prompt, save it to a file, or use `slurp export` to format it as a ready-to-paste system prompt block.
 
