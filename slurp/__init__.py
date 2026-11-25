@@ -1,3 +1,3 @@
 """Slurp — token-budget-aware graph navigation for AI coding agents."""
 
-__version__ = "1.0.7"
+__version__ = "1.1.0"
