@@ -554,8 +554,11 @@ Parámetros:
 **slurp_suggest**
 
 ```
-Follow-up queries after a slurp_query answer that looks incomplete. Reads the nodes that fell just outside the budget and proposes two or three queries that reach them: a drill-down into the top result, a related cluster, or a heavily-used neighbour. Pass the same query and budget you used. An empty answer means the budget already covered the neighbourhood.
+Follow-up queries after a slurp_query answer that looks incomplete. Reads the nodes that fell just outside the budget and proposes two or three queries that reach them: a drill-down into the top result, a related cluster, or a heavily-used neighbour. Pass the same query and budget you used. When the budget already covered the neighbourhood, the answer says "No follow-up suggested" instead of proposing queries.
 ```
+
+Corregido en #90: la versión aprobada decía "An empty answer means the budget already
+covered the neighbourhood", pero la herramienta responde con una frase.
 
 **slurp_diff**
 

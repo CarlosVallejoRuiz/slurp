@@ -264,13 +264,15 @@ _DIFF_TOOL_DEFINITION = {
 
 _SUGGEST_TOOL_DEFINITION = {
     "name": "slurp_suggest",
+    # #90: the approved text said "An empty answer means…"; the tool answers a sentence.
     "description": (
-    "Follow-up queries after a slurp_query answer that looks incomplete. Reads the "
-    "nodes that fell just outside the budget and proposes two or three queries that "
-    "reach them: a drill-down into the top result, a related cluster, or a "
-    "heavily-used neighbour. Pass the same query and budget you used. An empty "
-    "answer means the budget already covered the neighbourhood."
-),
+        "Follow-up queries after a slurp_query answer that looks incomplete. Reads the "
+        "nodes that fell just outside the budget and proposes two or three queries that "
+        "reach them: a drill-down into the top result, a related cluster, or a "
+        "heavily-used neighbour. Pass the same query and budget you used. When the "
+        "budget already covered the neighbourhood, the answer says \"No follow-up "
+        "suggested\" instead of proposing queries."
+    ),
     "annotations": {"title": "Slurp follow-up queries", **_READ_ONLY},
     "inputSchema": {
         "type": "object",

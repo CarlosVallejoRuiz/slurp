@@ -210,9 +210,9 @@ implementación obligó a concretar:
    que `scripts/readme_examples.py` lo quita al normalizar.
 6. **El lock queda en `graphify-out/`** (`.graph.json.lock`, `.slurp-graph.json.lock`). En un
    proyecto que versiona `graphify-out/` aparecerá como fichero sin seguir.
-7. **La descripción aprobada de `slurp_suggest`** dice "An empty answer means the budget
+7. **La descripción aprobada de `slurp_suggest`** decía "An empty answer means the budget
    already covered the neighbourhood", pero la herramienta responde con una frase en ese caso
-   ("No follow-up suggested: …"), no vacía.
+   ("No follow-up suggested: …"), no vacía. Corregido en #90.
 8. **Los fragmentos de Codex, Gemini CLI y Cursor** se imprimen tal como los describe el
    diseño; no se han probado contra esos clientes (fase 2 del diseño).
 

@@ -143,6 +143,20 @@ class TestToolTexts:
             "Keep true (default) for the structural answer; false asks the configured LLM "
             "for prose.")
 
+    def test_suggest_says_what_it_answers_when_there_is_nothing_to_suggest(self, slurp_state):
+        # #90: with nothing to suggest the tool answers a sentence, not an empty text.
+        import networkx as nx
+
+        description = self._tools(slurp_state)["slurp_suggest"]["description"]
+        assert "empty answer" not in description
+        assert '"No follow-up suggested"' in description
+        lone = nx.DiGraph()
+        lone.add_node("auth", label="authenticate", type="function", source_file="a.py")
+        resp = _call(_req("tools/call", {"name": "slurp_suggest",
+                                         "arguments": {"query": "authenticate"}}),
+                     _initialized("2025-11-25"), G=lone)
+        assert resp["result"]["content"][0]["text"].startswith("No follow-up suggested")
+
     def test_always_load_only_on_slurp_query(self, slurp_state):
         tools = self._tools(slurp_state)
         assert tools["slurp_query"]["_meta"] == {"anthropic/alwaysLoad": True}
