@@ -1,0 +1,176 @@
+{
+  "directed": false,
+  "multigraph": false,
+  "graph": {},
+  "nodes": [
+    {
+      "label": "app.py",
+      "file_type": "code",
+      "source_file": "app.py",
+      "source_location": "L1",
+      "id": "app",
+      "community": 0,
+      "norm_label": "app.py"
+    },
+    {
+      "label": "main()",
+      "file_type": "code",
+      "source_file": "app.py",
+      "source_location": "L4",
+      "id": "app_main",
+      "community": 0,
+      "norm_label": "main()"
+    },
+    {
+      "label": "client.ts",
+      "file_type": "code",
+      "source_file": "lib/client.ts",
+      "source_location": "L1",
+      "id": "lib_client",
+      "community": 1,
+      "norm_label": "client.ts"
+    },
+    {
+      "label": "send()",
+      "file_type": "code",
+      "source_file": "lib/client.ts",
+      "source_location": "L1",
+      "id": "lib_client_send",
+      "community": 1,
+      "norm_label": "send()"
+    },
+    {
+      "label": "util.py",
+      "file_type": "code",
+      "source_file": "lib/util.py",
+      "source_location": "L1",
+      "id": "lib_util",
+      "community": 0,
+      "norm_label": "util.py"
+    },
+    {
+      "label": "helper()",
+      "file_type": "code",
+      "source_file": "lib/util.py",
+      "source_location": "L1",
+      "id": "lib_util_helper",
+      "community": 0,
+      "norm_label": "helper()"
+    },
+    {
+      "label": "Store",
+      "file_type": "code",
+      "source_file": "lib/util.py",
+      "source_location": "L5",
+      "id": "lib_util_store",
+      "community": 2,
+      "norm_label": "store"
+    },
+    {
+      "label": ".save()",
+      "file_type": "code",
+      "source_file": "lib/util.py",
+      "source_location": "L6",
+      "id": "lib_util_store_save",
+      "community": 2,
+      "norm_label": ".save()"
+    }
+  ],
+  "links": [
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "app.py",
+      "source_location": "L4",
+      "weight": 1.0,
+      "source": "app",
+      "target": "app_main",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports_from",
+      "context": "import",
+      "confidence": "EXTRACTED",
+      "source_file": "app.py",
+      "source_location": "L1",
+      "weight": 1.0,
+      "source": "app",
+      "target": "lib_util",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "context": "import",
+      "confidence": "EXTRACTED",
+      "source_file": "app.py",
+      "source_location": "L1",
+      "weight": 1.0,
+      "source": "app",
+      "target": "lib_util_helper",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "app.py",
+      "source_location": "L5",
+      "weight": 1.0,
+      "source": "app_main",
+      "target": "lib_util_helper",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "lib/client.ts",
+      "source_location": "L1",
+      "weight": 1.0,
+      "source": "lib_client",
+      "target": "lib_client_send",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "lib/util.py",
+      "source_location": "L1",
+      "weight": 1.0,
+      "source": "lib_util",
+      "target": "lib_util_helper",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "lib/util.py",
+      "source_location": "L5",
+      "weight": 1.0,
+      "source": "lib_util",
+      "target": "lib_util_store",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "lib/util.py",
+      "source_location": "L7",
+      "weight": 1.0,
+      "source": "lib_util_store_save",
+      "target": "lib_util_helper",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "lib/util.py",
+      "source_location": "L6",
+      "weight": 1.0,
+      "source": "lib_util_store",
+      "target": "lib_util_store_save",
+      "confidence_score": 1.0
+    }
+  ],
+  "hyperedges": []
+}

@@ -85,6 +85,19 @@ def build_graph(data: dict) -> nx.DiGraph:
 
 def _load_json(path: Path) -> nx.DiGraph:
     """Load a JSON graph file (graphify or generic format)."""
+    return _build_graph(read_graph_json(path))
+
+
+def read_graph_json(path: Path) -> dict:
+    """Read and validate a JSON graph file, without building the graph.
+
+    The refresh needs the parsed dict as well as the graph — the manifest, the
+    keys that tell whose graph it is — and reading it once serves both.
+
+    Raises:
+        SlurpLoadError: Missing file, invalid JSON, not an object, no nodes, or a
+            node without id or label.
+    """
     if not path.exists():
         raise SlurpLoadError(f"Graph file not found: {path}")
 
@@ -113,7 +126,7 @@ def _load_json(path: Path) -> nx.DiGraph:
                 f"Node '{node['id']}' is missing required field 'label': {path}"
             )
 
-    return _build_graph(data)
+    return data
 
 
 # ---------------------------------------------------------------------------
