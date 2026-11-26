@@ -1,6 +1,7 @@
 """CLI entry point for Slurp."""
 
 import json
+import os
 import tempfile
 import webbrowser
 from io import StringIO
@@ -2140,13 +2141,20 @@ def init(yes: bool, keep_graphify: bool, instructions: str) -> None:
     local_files = [(settings_path, settings_root, ".claude/settings.local.json")]
     local_files += [(p, root, p.name) for p in written if p.name == "CLAUDE.local.md"]
     in_git = clients.git_root(root) is not None
+    # DECISION (found in the agent measurement): Claude Code ignores a
+    # .claude/settings.local.json that git tracks — PrismaStats versions it — so
+    # the approval above silently never applies. init says so plainly, with the
+    # exact command, and never takes the file out of git itself: that changes
+    # the user's repository.
+    settings_tracked = in_git and settings_path.exists() and clients.git_tracked(settings_path)
     for path, base, entry in local_files:
         if not in_git or not path.exists():
             continue
         if clients.git_tracked(path):
-            unversioned_risk.append(f"{_rel_display(path, root)} is tracked by git — "
-                                    f"`git rm --cached {_rel_display(path, root)}` to stop "
-                                    "versioning it")
+            if path != settings_path:
+                unversioned_risk.append(f"{_rel_display(path, root)} is tracked by git — "
+                                        f"`git rm --cached {_rel_display(path, root)}` to stop "
+                                        "versioning it")
             continue
         if clients.git_ignored(path):
             continue
@@ -2190,9 +2198,14 @@ def init(yes: bool, keep_graphify: bool, instructions: str) -> None:
         summary.append(f"[yellow]{escape(settings.warnings[0])}[/]")
         summary.append(escape(settings.fragment))
     else:
-        state = "updated" if settings.written else "already approves slurp"
+        if settings_tracked:
+            state = "written, but Claude Code ignores it while git tracks it (see below)"
+        elif settings.written:
+            state = "updated (enabledMcpjsonServers, permissions.allow mcp__slurp__*)"
+        else:
+            state = "already approves slurp (enabledMcpjsonServers, permissions.allow)"
         summary.append(f"[bold]Claude Code[/]: {escape(_rel_display(settings_path, root))} "
-                       f"{state} (enabledMcpjsonServers, permissions.allow mcp__slurp__*)")
+                       f"{state}")
         summary.extend(f"[yellow]{escape(w)}[/]" for w in settings.warnings)
     if written:
         summary.append(f"[bold]Instructions[/]: {', '.join(_rel_display(p, root) for p in written)}")
@@ -2206,6 +2219,12 @@ def init(yes: bool, keep_graphify: bool, instructions: str) -> None:
 
     _echo_rich(Panel("\n".join(summary), title="slurp is ready", border_style="green",
                      padding=(1, 2)))
+    if settings_tracked:
+        name = _rel_display(settings_path, settings_root)
+        click.echo(f"⚠ Claude Code ignores {name} while git tracks it, so the approval slurp "
+                   "init wrote there will not apply: Claude Code will keep asking before it "
+                   "uses slurp.\n  Stop versioning it (slurp init does not do it for you):\n"
+                   f"    git rm --cached {os.path.relpath(settings_path, root)}\n")
     click.echo("Other agents (printed, not written — copy what you use):")
     for name, fragment in clients.client_fragments(command, graph_path).items():
         click.echo(f"\n{name}:\n{fragment}")

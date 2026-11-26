@@ -153,6 +153,45 @@ class TestClaudeCodeApprovals:
         res = _init(root, monkeypatch, "--yes")
         assert "git rm --cached" in res.output
 
+    def test_a_tracked_settings_file_gets_a_warning_that_says_the_approval_will_not_apply(
+            self, tmp_path, monkeypatch):
+        # Found in the agent measurement: Claude Code ignores a settings.local.json
+        # git tracks (PrismaStats versions it), so init's approval never applied.
+        root = _project(tmp_path / "p")
+        (root / ".claude").mkdir()
+        (root / ".claude" / "settings.local.json").write_text("{}", encoding="utf-8")
+        _git(root, "add", "-f", ".claude/settings.local.json")
+        res = _init(root, monkeypatch, "--yes")
+        assert res.exit_code == 0, res.output
+        lines = [line.strip() for line in res.output.splitlines()]
+        assert ("⚠ Claude Code ignores .claude/settings.local.json while git tracks it, so the "
+                "approval slurp init wrote there will not apply: Claude Code will keep asking "
+                "before it uses slurp.") in lines
+        assert "git rm --cached .claude/settings.local.json" in lines
+        assert "already approves" not in res.output and "updated (" not in res.output
+        # init never takes it out of git itself.
+        tracked = subprocess.run(["git", "-C", str(root), "ls-files", ".claude/settings.local.json"],
+                                 capture_output=True, text=True, check=True).stdout
+        assert tracked.strip() == ".claude/settings.local.json"
+
+    def test_from_a_subdirectory_the_command_names_the_file_from_there(self, tmp_path,
+                                                                     monkeypatch):
+        repo = _project(tmp_path / "repo")
+        (repo / ".claude").mkdir()
+        (repo / ".claude" / "settings.local.json").write_text("{}", encoding="utf-8")
+        _git(repo, "add", "-f", ".claude/settings.local.json")
+        sub = repo / "services" / "api"
+        sub.mkdir(parents=True)
+        (sub / "api.py").write_text("def api():\n    pass\n", encoding="utf-8")
+        res = _init(sub, monkeypatch, "--yes")
+        lines = [line.strip() for line in res.output.splitlines()]
+        assert "git rm --cached ../../.claude/settings.local.json" in lines
+
+    def test_no_warning_when_the_file_is_not_tracked(self, tmp_path, monkeypatch):
+        root = _project(tmp_path / "p")
+        res = _init(root, monkeypatch, "--yes")
+        assert "Claude Code ignores" not in res.output
+
 
 class TestInstructions:
     def test_local_by_default(self, tmp_path, monkeypatch):
