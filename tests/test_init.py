@@ -257,3 +257,63 @@ class TestNeverOverwritesAGraphOfAnotherTool:
         assert "slurp" in json.loads(old.read_text(encoding="utf-8"))
         assert "Rebuild slurp's graph" in res.output and "slurp ≤ 1.2" in res.output
         assert "stays as it is" not in res.output
+
+
+class TestLockFileOfAVersionedGraphDirectory:
+    """#89: the lock beside slurp's graph stays out of git when graphify-out/ is versioned."""
+
+    def _graphify_repo(self, tmp_path: Path, gitignore: str | None = "node_modules/\n") -> Path:
+        root = tmp_path / "g"
+        shutil.copytree(FIXTURE, root)
+        if gitignore is not None:
+            (root / ".gitignore").write_text(gitignore, encoding="utf-8")
+        _git(root, "init", "-q")
+        _git(root, "add", "-A")
+        _git(root, "commit", "-q", "-m", "graphify output is versioned here")
+        return root
+
+    def test_the_lock_is_ignored_when_graphify_out_is_versioned(self, tmp_path, monkeypatch):
+        root = self._graphify_repo(tmp_path)
+        res = _init(root, monkeypatch, "--yes")
+        assert res.exit_code == 0, res.output
+        lines = (root / ".gitignore").read_text(encoding="utf-8").splitlines()
+        assert "graphify-out/.slurp-graph.json.lock" in lines
+        assert (root / "graphify-out" / ".slurp-graph.json.lock").exists()
+        status = subprocess.run(["git", "-C", str(root), "status", "--porcelain"],
+                                capture_output=True, text=True, check=True).stdout
+        assert ".slurp-graph.json.lock" not in status
+
+    def test_not_when_graphify_out_is_not_versioned(self, tmp_path, monkeypatch):
+        root = tmp_path / "g"
+        shutil.copytree(FIXTURE, root)
+        (root / ".gitignore").write_text("graphify-out/\n", encoding="utf-8")
+        _git(root, "init", "-q")
+        assert _init(root, monkeypatch, "--yes").exit_code == 0
+        assert ".lock" not in (root / ".gitignore").read_text(encoding="utf-8")
+
+    def test_the_same_rules_as_slurp_dir(self, tmp_path, monkeypatch):
+        # A negation is the user's decision; a missing .gitignore is not created.
+        root = self._graphify_repo(tmp_path, gitignore="!graphify-out/.slurp-graph.json.lock\n")
+        assert _init(root, monkeypatch, "--yes").exit_code == 0
+        text = (root / ".gitignore").read_text(encoding="utf-8")
+        assert text.count(".slurp-graph.json.lock") == 1
+        bare = self._graphify_repo(tmp_path / "bare", gitignore=None)
+        assert _init(bare, monkeypatch, "--yes").exit_code == 0
+        assert not (bare / ".gitignore").exists()
+
+    def test_never_twice(self, tmp_path, monkeypatch):
+        root = self._graphify_repo(tmp_path)
+        assert _init(root, monkeypatch, "--yes").exit_code == 0
+        assert _init(root, monkeypatch, "--yes").exit_code == 0
+        text = (root / ".gitignore").read_text(encoding="utf-8")
+        assert text.count("graphify-out/.slurp-graph.json.lock") == 1
+
+    def test_no_lock_entry_for_a_graph_slurp_only_reads(self, tmp_path, monkeypatch):
+        root = self._graphify_repo(tmp_path)
+        assert _init(root, monkeypatch, "--yes", "--keep-graphify").exit_code == 0
+        assert ".lock" not in (root / ".gitignore").read_text(encoding="utf-8")
+
+    def test_the_summary_names_it(self, tmp_path, monkeypatch):
+        root = self._graphify_repo(tmp_path)
+        res = _init(root, monkeypatch, "--yes")
+        assert "graphify-out/.slurp-graph.json.lock" in res.output

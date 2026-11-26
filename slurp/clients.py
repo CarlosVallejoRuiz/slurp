@@ -78,6 +78,14 @@ def git_tracked(path: Path) -> bool:
     return proc is not None and proc.returncode == 0
 
 
+def git_tracks_any(directory: Path) -> bool:
+    """Whether git tracks at least one file under *directory* (it is versioned)."""
+    if not directory.is_dir():
+        return False
+    proc = _git(directory, "ls-files", "--", ".")
+    return proc is not None and proc.returncode == 0 and bool(proc.stdout.strip())
+
+
 # ---------------------------------------------------------------------------
 # .claude/settings.local.json
 # ---------------------------------------------------------------------------

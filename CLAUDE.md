@@ -1373,7 +1373,9 @@ antes de escribir nada (v1.3, diseño §5.2 y §5.4):
 5. **`.gitignore`**: `.slurp/` (como siempre) y, si git no los ignora ya
    (`git check-ignore`), `.claude/settings.local.json` (en el `.gitignore` de la raíz git) y
    `CLAUDE.local.md`. Sin `.gitignore` → aviso; un `settings.local.json` versionado → aviso
-   con `git rm --cached` (PrismaStats lo versiona).
+   con `git rm --cached` (PrismaStats lo versiona). Si el directorio del grafo está
+   versionado (`git ls-files`), también el lock de al lado (`graphify-out/.slurp-graph.json.lock`,
+   #89), con las reglas de `.slurp/`; nunca con `--keep-graphify` (ese grafo no se bloquea).
 6. **Resumen** con los fragmentos de Codex, Gemini CLI y Cursor, impresos, no escritos.
 
 | Flag | Default | Descripción |

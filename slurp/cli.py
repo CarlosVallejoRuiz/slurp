@@ -2155,6 +2155,22 @@ def init(yes: bool, keep_graphify: bool, instructions: str) -> None:
         else:
             unversioned_risk.append(f"{_rel_display(path, root)} is not ignored by git and "
                                     f"there is no .gitignore to add it to")
+    # #89: the advisory lock beside slurp's graph (never deleted, see
+    # graphfile.GraphLock) would show up as untracked in a project that versions
+    # the graph's directory — graphify-out/ in some. Same rules as .slurp/. A graph
+    # slurp only reads (--keep-graphify) is never locked.
+    if in_git and not (existing_kind == "foreign" and keep_graphify):
+        from slurp.graphfile import GraphLock
+
+        lock_path = GraphLock(graph_path).path
+        try:
+            lock_entry = lock_path.relative_to(root).as_posix()
+        except ValueError:
+            lock_entry = ""
+        if lock_entry and clients.git_tracks_any(lock_path.parent) \
+                and not clients.git_ignored(lock_path) \
+                and clients.ensure_ignored(Path(".gitignore"), lock_entry):
+            ignored_now.append(lock_entry)
 
     # --- Summary ------------------------------------------------------------
     summary: list[str] = [
