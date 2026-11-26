@@ -1409,7 +1409,9 @@ class TestInitCommand:
 
     # --- reusing an existing graph -----------------------------------------
 
-    def test_offers_to_reuse_existing_graph(self, tmp_path, monkeypatch):
+    def test_a_graph_slurp_did_not_build_gets_slurps_beside_it(self, tmp_path, monkeypatch):
+        # v1.3: slurp's own graph by default (it stays current); the other one
+        # is left as it is and --keep-graphify is offered in the plan.
         self._make_project(tmp_path)
         out = tmp_path / "graphify-out"
         out.mkdir()
@@ -1418,11 +1420,13 @@ class TestInitCommand:
             encoding="utf-8",
         )
         monkeypatch.chdir(tmp_path)
-        result = _runner().invoke(cli, ["init"], input="y\ny\ny\n")
-        assert result.exit_code == 0
-        assert "Reuse" in result.output
+        result = _runner().invoke(cli, ["init"], input="y\n")
+        assert result.exit_code == 0, result.output
+        assert "--keep-graphify" in result.output
+        assert (out / "slurp-graph.json").is_file()
 
-    def test_reusing_existing_graph_does_not_reindex(self, tmp_path, monkeypatch):
+    def test_an_existing_graph_slurp_did_not_build_is_never_reindexed(self, tmp_path,
+                                                                     monkeypatch):
         self._make_project(tmp_path)
         out = tmp_path / "graphify-out"
         out.mkdir()
@@ -1436,7 +1440,7 @@ class TestInitCommand:
         data = json.loads((out / "graph.json").read_text(encoding="utf-8"))
         assert [n["id"] for n in data["nodes"]] == ["sentinel"]
 
-    def test_declining_reuse_reindexes(self, tmp_path, monkeypatch):
+    def test_keep_graphify_serves_the_existing_graph(self, tmp_path, monkeypatch):
         self._make_project(tmp_path)
         out = tmp_path / "graphify-out"
         out.mkdir()
@@ -1445,10 +1449,11 @@ class TestInitCommand:
             encoding="utf-8",
         )
         monkeypatch.chdir(tmp_path)
-        result = _runner().invoke(cli, ["init"], input="y\nn\ny\n")
-        assert result.exit_code == 0
-        data = json.loads((out / "graph.json").read_text(encoding="utf-8"))
-        assert [n["id"] for n in data["nodes"]] != ["sentinel"]
+        result = _runner().invoke(cli, ["init", "--keep-graphify"], input="y\n")
+        assert result.exit_code == 0, result.output
+        assert not (out / "slurp-graph.json").exists()
+        assert self._read_mcp(tmp_path)["mcpServers"]["slurp"]["args"][-1] == str(
+            (out / "graph.json").resolve())
 
     # --- .mcp.json ---------------------------------------------------------
 
@@ -2223,15 +2228,15 @@ class TestIndexKeepsForeignGraphs:
         assert set(data) == {"nodes", "links", "built_at_commit", "slurp"}
         assert "graphify_sentinel" not in json.dumps(data)
 
-    def test_init_declining_reuse_still_asks_before_overwriting(self, tmp_path, monkeypatch):
+    def test_init_never_overwrites_graphifys_graph(self, tmp_path, monkeypatch):
+        # v1.3: slurp's graph goes beside it, in graphify-out/slurp-graph.json.
         out = self._project(tmp_path)
         before = out.read_bytes()
         monkeypatch.chdir(tmp_path)
-        # proceed? y · reuse? n · overwrite graphify's graph? n
-        result = _runner().invoke(cli, ["init"], input="y\nn\nn\n")
-        assert result.exit_code != 0
+        result = _runner().invoke(cli, ["init"], input="y\n")
+        assert result.exit_code == 0, result.output
         assert out.read_bytes() == before
-        assert not (tmp_path / ".mcp.json").exists()
+        assert (out.parent / "slurp-graph.json").is_file()
 
     def test_init_yes_reuses_graphify_graph(self, tmp_path, monkeypatch):
         out = self._project(tmp_path)

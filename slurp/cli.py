@@ -1905,15 +1905,26 @@ def _watch(graph_path: Path) -> None:
 @cli.command("init")
 @click.option("--yes", "-y", is_flag=True, default=False,
               help="Accept every prompt (for CI and scripting).")
-def init(yes: bool) -> None:
-    """Set up slurp in this project — index it and write .mcp.json.
+@click.option("--keep-graphify", "keep_graphify", is_flag=True, default=False,
+              help="With a graph slurp did not build (graphify's), serve that one instead of "
+                   "building slurp's own beside it. slurp will not refresh it.")
+@click.option("--instructions", "instructions",
+              type=click.Choice(["local", "versioned", "none"]), default="local",
+              show_default=True,
+              help="Where the paragraph telling your agent when to use slurp goes: "
+                   "CLAUDE.local.md (local), CLAUDE.md/AGENTS.md (versioned), or nowhere.")
+def init(yes: bool, keep_graphify: bool, instructions: str) -> None:
+    """Set up slurp in this project — index it and register it with your agent.
 
-    Detects the project language, builds graph.json, and registers slurp as an
-    MCP server so your AI coding assistant can query it. Needs no flags: run
-    `slurp init` from the project root.
+    Detects the project language, builds slurp's own graph (kept current before
+    every answer), registers slurp as an MCP server in .mcp.json, approves it
+    for Claude Code in .claude/settings.local.json and tells the agent when to
+    use it. Needs no flags: run `slurp init` from the project root.
     """
     import json as _json
-    import sys
+
+    from slurp import clients
+    from slurp.refresh import GraphTracker
 
     root = Path(".").resolve()
     mcp_path = Path(".mcp.json")
@@ -1921,6 +1932,30 @@ def init(yes: bool) -> None:
     language, counts = _detect_language(root)
     existing_graph = _find_graph()
     command, install_kind = _detect_slurp_command()
+
+    # DECISION (v1.3, design §5.2, decision 4): slurp's own graph by default,
+    # because only that one stays current by itself. A graph slurp built is
+    # reused; one it did not build (graphify's) is left as it is and slurp's
+    # goes beside it, unless --keep-graphify serves that one, read-only.
+    existing_kind = ""
+    if existing_graph is not None:
+        try:
+            existing_kind = "own" if GraphTracker(existing_graph).refreshable else "foreign"
+        except SlurpLoadError:
+            existing_kind = "foreign"
+    reuse = existing_kind == "own" or (existing_kind == "foreign" and keep_graphify)
+    if reuse:
+        assert existing_graph is not None
+        graph_path = existing_graph.resolve()
+    elif existing_kind == "foreign":
+        graph_path = root / "graphify-out" / "slurp-graph.json"
+    else:
+        graph_path = root / "graphify-out" / "graph.json"
+    variant = "graphify" if existing_kind == "foreign" and keep_graphify else "own"
+
+    settings_root = clients.git_root(root) or root
+    settings_path = settings_root / ".claude" / "settings.local.json"
+    instruction_plan = clients.plan_instructions(root, instructions, variant)
 
     # --- Plan ---------------------------------------------------------------
     plan: list[str] = []
@@ -1933,12 +1968,35 @@ def init(yes: bool) -> None:
         plan.append(f"[bold]Language:[/]  {language}  ([dim]{breakdown} files[/])")
     plan.append(f"[bold]Project:[/]   {root}")
     plan.append("")
-    if existing_graph is not None:
-        plan.append(f"  1. Reuse existing graph at [cyan]{existing_graph}[/] (or re-index)")
+    if existing_kind == "own":
+        plan.append(f"  1. Reuse slurp's graph at [cyan]{existing_graph}[/] "
+                    "(refreshed before every answer)")
+    elif existing_kind == "foreign" and keep_graphify:
+        plan.append(f"  1. Serve the existing graph at [cyan]{existing_graph}[/] — slurp "
+                    "won't refresh it")
+    elif existing_kind == "foreign":
+        plan.append(f"  1. Build slurp's own graph at [cyan]{_rel_display(graph_path, root)}[/] "
+                    "(refreshed before every answer)")
+        plan.append(f"     {existing_graph} was not built by slurp and stays as it is.")
+        plan.append("     [dim]Keep that graph instead (slurp won't refresh it): "
+                    "--keep-graphify[/]")
     else:
-        plan.append("  1. Index this project into [cyan]graphify-out/graph.json[/]")
+        plan.append("  1. Index this project into [cyan]graphify-out/graph.json[/] "
+                    "(refreshed before every answer)")
     verb = "Update" if mcp_path.exists() else "Create"
     plan.append(f"  2. {verb} [cyan].mcp.json[/] registering slurp as an MCP server")
+    plan.append(f"  3. Approve the slurp server and its tools for Claude Code in "
+                f"[cyan]{_rel_display(settings_path, root)}[/]")
+    if instructions == "none":
+        plan.append("  4. No instructions for the agent (--instructions none)")
+    else:
+        where = ", ".join(_rel_display(p, root) for p in instruction_plan.targets) or "—"
+        kind = "local, not versioned" if instructions == "local" else "versioned"
+        plan.append(f"  4. Tell the agent when to use slurp in [cyan]{where}[/] ({kind})")
+    plan.append("     [dim]Elsewhere: --instructions local (CLAUDE.local.md) | versioned "
+                "(CLAUDE.md / AGENTS.md) | none[/]")
+    plan.append("  5. .gitignore: .slurp/, .claude/settings.local.json, CLAUDE.local.md "
+                "[dim](only if .gitignore exists)[/]")
     plan.append("")
     plan.append(f"[dim]slurp binary: {command}  ({install_kind})[/]")
 
@@ -1951,73 +2009,18 @@ def init(yes: bool) -> None:
         )
 
     if not yes and not click.confirm("Proceed?", default=True):
-        click.echo("Cancelled — nothing was changed.")
+        click.echo("Cancelled — nothing was changed. Re-run with --keep-graphify or "
+                   "--instructions local|versioned|none to change the plan.")
         raise click.Abort()
 
     # --- Step 1: graph ------------------------------------------------------
-    reuse = False
-    if existing_graph is not None:
-        reuse = yes or click.confirm(
-            f"Reuse the existing graph at {existing_graph}?", default=True
-        )
-
-    if reuse and existing_graph is not None:
-        graph_path = existing_graph.resolve()
+    if reuse:
         data = _json.loads(graph_path.read_text(encoding="utf-8"))
         n_nodes = len(data.get("nodes", []))
         n_edges = len(data.get("links", data.get("edges", [])))
         click.echo(f"Using existing graph: {graph_path}")
     else:
-        from slurp.graphfile import GraphChangedError, GraphLock, graph_identity, write_graph
-        from slurp.indexer import iter_source_files
-        from slurp.refresh import index_with_manifest
-
-        graph_path = root / "graphify-out" / "graph.json"
-        if _is_foreign_graph(graph_path):
-            # Declining reuse must not silently replace graphify's graph.
-            _confirm_replacing_foreign_graph(
-                graph_path,
-                "answer yes to reuse it, or run "
-                f"`slurp index . -o {graph_path.parent / 'slurp-graph.json'}` "
-                "and point .mcp.json at that file",
-            )
-        files = list(iter_source_files(root))
-
-        # DECISION: the live progress bar is disabled off-TTY so piped output
-        # and CliRunner captures stay free of ANSI control sequences.
-        is_tty = hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
-        if not is_tty:
-            click.echo(f"Indexing {len(files)} files...")
-
-        from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn
-
-        with Progress(
-            TextColumn("[cyan]Indexing[/]"),
-            BarColumn(),
-            TaskProgressColumn(),
-            TextColumn("[dim]{task.completed}/{task.total} files[/]"),
-            disable=not is_tty,
-        ) as progress:
-            task = progress.add_task("index", total=len(files))
-            lock = GraphLock(graph_path)
-            lock.acquire(on_wait=lambda: click.echo(
-                f"waiting for another slurp process to finish writing {graph_path}…",
-                err=True))
-            try:
-                expected = graph_identity(graph_path)
-                graph = index_with_manifest(root, graph_path, Path(".slurpignore"),
-                                            on_file=lambda _p: progress.advance(task))
-                try:
-                    write_graph(graph_path, graph, expected=expected)
-                except GraphChangedError:
-                    raise click.ClickException(
-                        f"{graph_path} changed while slurp was indexing — another tool "
-                        "wrote it. Nothing was written; run `slurp init` again.") from None
-            finally:
-                lock.release()
-
-        n_nodes = len(graph["nodes"])
-        n_edges = len(graph["links"])
+        n_nodes, n_edges = _init_index(root, graph_path)
 
     # --- Step 2: .mcp.json --------------------------------------------------
     existing_cfg: dict | None = None
@@ -2047,8 +2050,35 @@ def init(yes: bool) -> None:
     if write_mcp:
         mcp_path.write_text(config_json + "\n", encoding="utf-8")
 
-    # --- Step 3: keep .slurp/ out of git -------------------------------------
-    gitignored = _ensure_gitignored(Path(".gitignore"))
+    # --- Step 3: Claude Code approvals ---------------------------------------
+    settings = clients.merge_claude_settings(settings_path)
+
+    # --- Step 4: the paragraph for the agent ---------------------------------
+    written = clients.write_instructions(instruction_plan)
+
+    # --- Step 5: keep local files out of git ---------------------------------
+    ignored_now: list[str] = []
+    unversioned_risk: list[str] = []
+    if _ensure_gitignored(Path(".gitignore")):
+        ignored_now.append(".slurp/")
+    local_files = [(settings_path, settings_root, ".claude/settings.local.json")]
+    local_files += [(p, root, p.name) for p in written if p.name == "CLAUDE.local.md"]
+    in_git = clients.git_root(root) is not None
+    for path, base, entry in local_files:
+        if not in_git or not path.exists():
+            continue
+        if clients.git_tracked(path):
+            unversioned_risk.append(f"{_rel_display(path, root)} is tracked by git — "
+                                    f"`git rm --cached {_rel_display(path, root)}` to stop "
+                                    "versioning it")
+            continue
+        if clients.git_ignored(path):
+            continue
+        if clients.ensure_ignored(base / ".gitignore", entry):
+            ignored_now.append(entry)
+        else:
+            unversioned_risk.append(f"{_rel_display(path, root)} is not ignored by git and "
+                                    f"there is no .gitignore to add it to")
 
     # --- Summary ------------------------------------------------------------
     summary: list[str] = [
@@ -2063,13 +2093,74 @@ def init(yes: bool) -> None:
         summary.append("[yellow].mcp.json left untouched.[/] Add this entry manually:")
     # JSON contains square brackets, which rich would parse as markup tags.
     summary.append(escape(config_json))
-    if gitignored:
-        summary.append("")
-        summary.append("[bold].gitignore[/]: added .slurp/ (logs and config stay out of git)")
+    summary.append("")
+    if settings.invalid:
+        summary.append(f"[yellow]{escape(settings.warnings[0])}[/]")
+        summary.append(escape(settings.fragment))
+    else:
+        state = "updated" if settings.written else "already approves slurp"
+        summary.append(f"[bold]Claude Code[/]: {escape(_rel_display(settings_path, root))} "
+                       f"{state} (enabledMcpjsonServers, permissions.allow mcp__slurp__*)")
+        summary.extend(f"[yellow]{escape(w)}[/]" for w in settings.warnings)
+    if written:
+        summary.append(f"[bold]Instructions[/]: {', '.join(_rel_display(p, root) for p in written)}")
+        if any(p.name == "CLAUDE.local.md" for p in written):
+            summary.append("[dim]  An ignored CLAUDE.local.md exists only in this worktree; "
+                           "run `slurp init` in other worktrees too.[/]")
+    summary.extend(f"[yellow]{escape(w)}[/]" for w in instruction_plan.warnings)
+    if ignored_now:
+        summary.append(f"[bold].gitignore[/]: added {', '.join(ignored_now)}")
+    summary.extend(f"[yellow]{escape(w)}[/]" for w in unversioned_risk)
 
     _echo_rich(Panel("\n".join(summary), title="slurp is ready", border_style="green",
                      padding=(1, 2)))
-    click.echo("Next: restart your AI coding assistant to activate slurp")
+    click.echo("Other agents (printed, not written — copy what you use):")
+    for name, fragment in clients.client_fragments(command, graph_path).items():
+        click.echo(f"\n{name}:\n{fragment}")
+    click.echo("\nNext: restart your AI coding assistant to activate slurp")
+
+
+def _init_index(root: Path, graph_path: Path) -> tuple[int, int]:
+    """Build slurp's graph for `slurp init`, with a progress bar on a terminal."""
+    import sys
+
+    from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn
+
+    from slurp.graphfile import GraphChangedError, GraphLock, graph_identity, write_graph
+    from slurp.indexer import iter_source_files
+    from slurp.refresh import index_with_manifest
+
+    files = list(iter_source_files(root))
+    # DECISION: the live progress bar is disabled off-TTY so piped output
+    # and CliRunner captures stay free of ANSI control sequences.
+    is_tty = hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
+    if not is_tty:
+        click.echo(f"Indexing {len(files)} files...")
+
+    with Progress(
+        TextColumn("[cyan]Indexing[/]"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TextColumn("[dim]{task.completed}/{task.total} files[/]"),
+        disable=not is_tty,
+    ) as progress:
+        task = progress.add_task("index", total=len(files))
+        lock = GraphLock(graph_path)
+        lock.acquire(on_wait=lambda: click.echo(
+            f"waiting for another slurp process to finish writing {graph_path}…", err=True))
+        try:
+            expected = graph_identity(graph_path)
+            graph = index_with_manifest(root, graph_path, Path(".slurpignore"),
+                                        on_file=lambda _p: progress.advance(task))
+            try:
+                write_graph(graph_path, graph, expected=expected)
+            except GraphChangedError:
+                raise click.ClickException(
+                    f"{graph_path} changed while slurp was indexing — another tool "
+                    "wrote it. Nothing was written; run `slurp init` again.") from None
+        finally:
+            lock.release()
+    return len(graph["nodes"]), len(graph["links"])
 
 
 @cli.command()
