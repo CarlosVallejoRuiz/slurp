@@ -483,7 +483,7 @@ uv sync --extra rust            # solo una
     `util.ts`/`util.js` también queda cerrado (ver la entrada de v1.3 más abajo). Lo de
     arriba sigue valiendo para grafos sin manifiesto.
 
-- **v1.3 (en desarrollo, `main`, sin bump): slurp por MCP sin intervención** (#76, #77,
+- **v1.3.0: slurp por MCP sin intervención** (#76, #77,
   diseño `docs/design/mcp-autonomo.md`, verificación `docs/design/mcp-autonomo/verificacion.md`).
   - **Manifiesto** (`slurp/manifest.py`, clave `"slurp"` de `graph.json`): los ficheros que
     el índice **recorrió** (no los `source_file`) con `[mtime_ns, size, ino, blake2b-128]`,
@@ -733,8 +733,8 @@ en un grafo de 3.421 — y otros de versiones antiguas sin decirlo.
 - Un ejemplo nuevo = una entrada en `EXAMPLES` del script + el marcador en el doc.
 - **El aviso de solo lectura** ("N files this graph covers changed after it was built…",
   v1.3) se quita al normalizar (`READONLY_HINT`): depende de las mtimes del checkout de
-  PrismaStats, no de slurp. Una salida de la v1.3 sin publicar lleva en el marcador
-  `slurp v1.3 (unreleased)`; se cambia por la versión al publicar.
+  PrismaStats, no de slurp. Una salida de una versión sin publicar lleva en el marcador
+  `slurp vX.Y (unreleased)`; se cambia por la versión al publicar.
 - **El script no fija `PYTHONHASHSEED`** (desde v1.2.1). Hasta v1.2.0 lo fijaba a 0 porque la
   sugerencia de riesgo de `--suggest` desempataba por orden de set (#78). Si un ejemplo
   cambia entre dos ejecuciones del script, es un orden de set colándose en una salida: se
@@ -749,7 +749,8 @@ por debajo de la carpeta que abre el editor (`~/Desktop/Slurp/`). Todos los coma
 de este documento (`uv run pytest`, `ruff check`, `uv build`, `git`) se ejecutan
 desde `~/Desktop/Slurp/slurp/`, que es donde vive este CLAUDE.md.
 
-**Estado actual:** v1.2.1 publicada; v1.3 en desarrollo en `main` (sin bump ni tag) · 3054 tests · `ruff check .` limpio. #21 (docstrings como
+**Estado actual:** v1.3.0 · 3082 tests · `ruff check .` limpio. Medición con agentes de la
+v1.3: `docs/design/mcp-autonomo/resultados/conclusiones.md`. #21 (docstrings como
 descripción) vive en la rama `v1.2-21-docstrings` (2722 tests), sin fusionar: se retoma con
 BM25 en la v1.3 (ver "Resultados de v1.2").
 

@@ -4,7 +4,7 @@
 
 # slurp
 
-![tests](https://img.shields.io/badge/tests-2738%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-3082%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 ![pypi](https://img.shields.io/badge/PyPI-slurp--graph-orange)
@@ -1197,7 +1197,7 @@ Real output, after an MCP client sent two `slurp_query` calls to
 `slurp serve --graph graph.json` on slurp's own graph — `auth flow` at budget 4000 and
 `mcp server` at 2000:
 
-<!-- example: session · slurp v1.3 (unreleased) · slurp session --last 2, after two slurp_query calls over slurp serve -->
+<!-- example: session · slurp v1.3.0 · slurp session --last 2, after two slurp_query calls over slurp serve -->
 ```
                    MCP Session Log — last 2 (.slurp/session.log)                    
 ┏━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━━┳━━━━━━━┓
@@ -1793,7 +1793,7 @@ another; see [Choosing a budget](#choosing-a-budget).
 | `slurp_explain(node_name, no_llm=true)` | *What is this, and what breaks if I change it?* | a query has pointed it at a function and it is about to modify it. Structural by default: no API key, no cost |
 | `slurp_diff(old_graph, new_graph, hops=2)` | *What does this change affect?* | it is reviewing a change or preparing a merge and needs the blast radius |
 | `slurp_suggest(query, budget=4000, include_tests=false, include_imports=false)` | *What else should I look at?* | an answer felt incomplete and it wants the queries that would reach what the budget left out |
-| `slurp_impact(file_path, hops=2)` | *What breaks if I edit this file?* | it is about to edit a file and wants the blast radius first — no second snapshot required |
+| `slurp_impact(file_path, hops=2)` (also `target` or `path`) | *What breaks if I edit this file?* | it is about to edit a file and wants the blast radius first — no second snapshot required |
 
 All five are declared `readOnlyHint` and `idempotentHint`. Claude Code uses those hints to
 run the calls in parallel and to retry them after a reconnection, not to approve them;
@@ -1909,37 +1909,49 @@ Pass a custom path with `--ignore-file path/to/.slurpignore`.
 - ✅ **v1.1.1** — Maintenance: `slurp index` skips the build output of web frameworks (`.next/`, `.nuxt/`, `.svelte-kit/`, `.turbo/`, `.vercel/`, `.output/`, and `out/` when it holds a Next.js static export) and prunes skipped directories instead of walking them (PrismaStats: 4.9 s → 0.5 s, 214 fewer nodes of compiled `.next/` code); `slurp diff` reads a deleted node's risk neighbourhood from the old graph, where it still exists; `slurp config set` adds `.slurp/` to `.gitignore` as `slurp init` does; `scripts/latency.py` reproduces the Performance figures; the sdist ships only the package, its docs and the MIT `LICENSE`, which the wheel now carries too
 - ✅ **v1.2.0** — Better selection, measured: test code and import nodes no longer take places in a subgraph (`--include-tests` / `--include-imports` let them back), and a node lends its neighbour boost to at most ten neighbours, so a hub's callers no longer fill the budget — recall at `--budget 4000` in markdown 0.867 → 0.967 on PrismaStats and 0.688 → 0.875 on slurp's own graph; risk bands in `slurp explain`, `slurp impact` and `slurp diff` count production callers only, with tests shown apart; `_is_test` follows each language's test-runner conventions; `scripts/retrieval.py` measures recall on a fixed tuning/held-out split of the questions
 - ✅ **v1.2.1** — Fixes: `slurp index --smart` no longer runs a full index on every run when `.slurpignore` excludes a whole file; every command that writes `graph.json` replaces it atomically, so the MCP server never loads half a graph; `slurp impact`'s AFFECTED FILES list counts the files its headline counts; `--suggest` gives the same suggestions in every run; `--inject-code` says when it cuts a block at 100 lines; `slurp index` treats graphs written by v1.3 as its own
-- 🔧 **v1.3 (in development)** — slurp over MCP with no intervention: the graph follows the working tree (a manifest in `graph.json`, checked before every answer in 0.4 ms, refreshed within 2 s, graphify's graphs left read-only); `slurp init` builds slurp's own graph, approves the server and its tools for Claude Code and tells the agent when to use them; `--watch` polls instead of depending on watchdog; the MCP server negotiates protocol revisions up to 2026-07-28; the session log records every call
+- ✅ **v1.3.0** — slurp over MCP with no intervention: the graph follows the working tree in the CLI and over MCP (a manifest in `graph.json`, checked before every answer in 0.4 ms, refreshed within 2 s, graphify's graphs left read-only); `slurp init` builds slurp's own graph, approves the server and its tools for Claude Code and tells the agent when to use them; `--watch` polls instead of depending on watchdog; the MCP server negotiates protocol revisions up to 2026-07-28; the session log records every call; measured with agents: 9 of 10 sessions called slurp unprompted, with no approval asked
 
-### Upgrading to v1.3 (in development, unreleased)
+### Upgrading to v1.3.0
 
-v1.3 makes slurp usable over MCP with no intervention: the graph follows the working tree,
-and `slurp init` sets Claude Code up to call slurp without approvals. What changes if you
-already use slurp:
+v1.3.0 makes slurp usable over MCP with no intervention: the graph follows the working tree,
+in the CLI and over MCP, and `slurp init` sets Claude Code up to call slurp without asking
+for approval. No change to scoring, selection or the budget. What changes if you already use
+slurp:
 
-- **`graph.json` carries a manifest** — a top-level `"slurp"` key with the files the index
-  read (stat and content hash), the directories it walked, the ignore file and the parsers.
-  PrismaStats's graph grows by 39 KB (0.77 → 0.81 MB). **slurp ≤ 1.2.0 sees these graphs as
-  written by another tool**: its `slurp index` asks before overwriting one (`--force`
-  skips the question). v1.2.1 already treats them as its own; it drops the manifest when it
-  rewrites one, and v1.3 rebuilds it with one full index.
-- **The MCP server and the query commands refresh slurp's own graph, and rewrite
-  `graph.json`.** See [Keeping the graph current](#keeping-the-graph-current). Turn it off
-  with `--no-refresh` or `SLURP_REFRESH=0`; change the 2 s limit with `--refresh-timeout` or
-  `SLURP_REFRESH_TIMEOUT`. graphify's graphs are never touched.
+- **The graph is always fresh, in the CLI and over MCP.** The MCP server and the query
+  commands check slurp's own graph before every answer (0.4 ms on PrismaStats) and refresh
+  it when files changed — edits, new, deleted and renamed files, `.slurpignore` — rewriting
+  `graph.json` within 2 s. See [Keeping the graph current](#keeping-the-graph-current). Turn
+  it off with `--no-refresh` or `SLURP_REFRESH=0`; change the 2 s limit with
+  `--refresh-timeout` or `SLURP_REFRESH_TIMEOUT`. graphify's graphs are never touched: they
+  are served read-only.
+- **Compatibility with slurp ≤ 1.2.0.** `graph.json` carries a manifest — a top-level
+  `"slurp"` key with the files the index read (stat and content hash), the directories it
+  walked, the ignore file and the parsers. PrismaStats's graph grows by 39 KB (0.77 → 0.81
+  MB). **slurp ≤ 1.2.0 sees these graphs as written by another tool**: its `slurp index`
+  asks before overwriting one (`--force` skips the question). v1.2.1 already treats them as
+  its own; it drops the manifest when it rewrites one, and v1.3.0 rebuilds it with one full
+  index.
 - **Answers may start with a warning** — a refresh still running, a refresh that failed, or
   files a read-only graph covers that changed since it was built. The graph's state is also
   in each MCP answer's `_meta` (`dev.imjuank.slurp/graph`); the `graph_reloaded` field the
   server added until v1.2.1 is gone.
 - **`slurp index --smart` needs no git** for graphs with a manifest, and detects
   `.slurpignore` changes. Git and `built_at_commit` remain for graphs from slurp ≤ 1.2.
-- **`--watch` polls instead of listening for file-system events, and `watchdog` is no
-  longer a dependency.** It also sees new, deleted and renamed files and `.slurpignore`, and
-  refreshes once per burst of changes.
-- **`slurp init`** builds slurp's own graph by default — in `graphify-out/slurp-graph.json`
-  when graphify's graph is there (`--keep-graphify` keeps serving graphify's) — writes
-  `.claude/settings.local.json` and `CLAUDE.local.md`, and adds them and `.slurp/` to an
-  existing `.gitignore`.
+- **`--watch` without watchdog.** It polls instead of listening for file-system events, and
+  `watchdog` is no longer a dependency. It also sees new, deleted and renamed files and
+  `.slurpignore`, and refreshes once per burst of changes.
+- **`slurp init` with no friction.** It builds slurp's own graph by default — in
+  `graphify-out/slurp-graph.json` when graphify's graph is there (`--keep-graphify` keeps
+  serving graphify's) — registers the server in `.mcp.json`, approves it and its tools for
+  Claude Code in `.claude/settings.local.json`, tells the agent when to use slurp in
+  `CLAUDE.local.md` (nothing is written when a `CLAUDE.md` or `AGENTS.md` already mentions
+  slurp), and adds those files and `.slurp/` to an existing `.gitignore`.
+- **Claude Code ignores a `.claude/settings.local.json` that git tracks**, so in a project
+  that versions it the approval `slurp init` writes there does not apply and Claude Code
+  keeps asking before it uses slurp. `init` says so and prints the exact command —
+  `git rm --cached .claude/settings.local.json` — and leaves taking the file out of git to
+  you.
 - **Auto-discovery looks for `graphify-out/slurp-graph.json` before
   `graphify-out/graph.json`.** A project with both now uses slurp's.
 - **The MCP server negotiates the protocol revision** (2024-11-05 to 2026-07-28) and answers
@@ -1948,7 +1960,10 @@ already use slurp:
   `-32602`. A graph that changed on disk and cannot be reloaded is answered from the
   previous graph with a warning, no longer as an error.
 - **The server's instructions and tool descriptions are new**, written for the model; only
-  `slurp_query` is marked `anthropic/alwaysLoad`.
+  `slurp_query` is marked `anthropic/alwaysLoad`. The instructions name the argument of the
+  two tools a client loads later — `slurp_impact(file_path=...)`,
+  `slurp_explain(node_name=...)` — and `slurp_impact` also accepts `target` and `path`, the
+  names agents guessed in the measurement below (`file_path` wins if both are given).
 - **`readOnlyHint` does not approve anything in Claude Code** — it parallelises and retries
   read-only calls; approvals come from `.claude/settings.local.json`, which `slurp init`
   writes. The tools stay marked read-only although a call may refresh `graph.json`: that
@@ -1957,6 +1972,35 @@ already use slurp:
   calls included), `start` and `end` events, and `slurp session --sessions`. Older lines
   are still read; `slurp session` shows a Tool column.
 - `.slurp/audit.jsonl` records the graph's state (`"graph"`) with each query.
+
+#### Measured with agents
+
+Before the release, ten `claude -p` sessions (Claude Code 2.1.331, Claude Opus 5.5) each
+did one task in a fresh clone set up with `slurp init --yes` — five on slurp itself, five on
+PrismaStats. No prompt mentioned slurp. Against a criterion fixed before measuring:
+
+- **9 of 10 sessions called slurp on their own** (8 needed), all 9 before their first edit.
+- **0 approvals**: no slurp tool was denied, and in an interactive session Claude Code
+  asked for none either.
+- **All 10 tasks were completed**: the project's checks pass and the diff does what the
+  task asked.
+
+Its limits:
+
+- **n = 10, from a single run**, and the model varies from one run to the next.
+- **The refresh was barely exercised.** Agents call slurp when they start, before editing:
+  15 of the 16 calls found the graph current and one refreshed it, in 325 ms. The evidence
+  for the always-fresh graph is
+  [verificacion.md](https://github.com/CarlosVallejoRuiz/slurp/blob/v1.3.0/docs/design/mcp-autonomo/verificacion.md)
+  (concurrent re-indexing, 0 half-written reads in 4,155), not this measurement.
+- **The one session without slurp (sl-1)** had a prompt that named both symbols to change
+  and the component they live in. The agent grepped for them: with the names given, the
+  task was finding them, not working out where the code lives, which is what
+  `slurp_query` is for.
+- Only 4 of the 26 files edited had a `slurp_impact` or `slurp_explain` first.
+
+Per-session table and the rest of the findings, in Spanish:
+[conclusiones.md](https://github.com/CarlosVallejoRuiz/slurp/blob/v1.3.0/docs/design/mcp-autonomo/resultados/conclusiones.md).
 
 ### Upgrading to v1.2.1
 
