@@ -5,6 +5,13 @@
 - **Fecha y situación:** propuesta del 2026-11-26, **aprobada por el autor ese mismo día** con
   la variante del corte por relevancia (§4.5). Ver «Decisiones del autor» abajo.
 - **Alcance de la fase 1:** solo diseño. No se midió el recall de ningún proyecto open source.
+- **Fase 2, ejecutada el 2026-11-26.** Resultados en `presupuesto-optimo/resultados/`:
+  - `conclusiones.md`, con la recomendación;
+  - `tablas.md`, las curvas en SVG y `puerta.md`.
+- **En resumen:**
+  - la regla pasa su criterio, pero solo por la censura, así que no se recomienda;
+  - el corte por relevancia no es elegible;
+  - el 4000 se mantiene.
 - **Lo único medido hasta ahora:**
   - tamaños con `slurp index`;
   - los filtros de commits;

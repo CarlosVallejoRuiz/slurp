@@ -300,7 +300,7 @@ def _fmt_rule(fit: dict) -> str:
 
 def svg(curves: dict, fmt: str, stars: dict) -> str:
     """Recall against mean real tokens, one line per project (log x axis)."""
-    w, h, ml, mb, mt, mr = 900, 520, 60, 50, 20, 170
+    w, h, ml, mb, mt, mr = 900, 640, 60, 170, 20, 20       # legend below the plot
     x0, x1 = math.log10(500), math.log10(70000)
 
     def px(t: float) -> float:
@@ -311,7 +311,7 @@ def svg(curves: dict, fmt: str, stars: dict) -> str:
     palette = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2",
                "#7f7f7f", "#bcbd22", "#17becf", "#393b79", "#637939", "#8c6d31", "#843c39"]
     out = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" '
-           f'font-family="sans-serif" font-size="11">',
+           f'viewBox="0 0 {w} {h}" font-family="sans-serif" font-size="11">',
            f'<rect width="{w}" height="{h}" fill="white"/>']
     for t in (1000, 2000, 4000, 8000, 16000, 32000, 64000):
         out.append(f'<line x1="{px(t):.1f}" y1="{mt}" x2="{px(t):.1f}" y2="{h - mb}" '
@@ -321,7 +321,7 @@ def svg(curves: dict, fmt: str, stars: dict) -> str:
         out.append(f'<line x1="{ml}" y1="{py(r):.1f}" x2="{w - mr}" y2="{py(r):.1f}" '
                    f'stroke="#eee"/><text x="{ml - 8}" y="{py(r) + 4:.1f}" '
                    f'text-anchor="end">{r:.1f}</text>')
-    out.append(f'<text x="{(ml + w - mr) / 2}" y="{h - 12}" text-anchor="middle">'
+    out.append(f'<text x="{(ml + w - mr) / 2}" y="{h - mb + 34}" text-anchor="middle">'
                f'tokens reales medios de la salida ({fmt})</text>')
     out.append(f'<text x="14" y="{(mt + h - mb) / 2}" transform="rotate(-90 14 '
                f'{(mt + h - mb) / 2})" text-anchor="middle">recall medio</text>')
@@ -335,12 +335,11 @@ def svg(curves: dict, fmt: str, stars: dict) -> str:
         b = stars[proj]
         out.append(f'<circle cx="{px(c[b]["tokens"]):.1f}" cy="{py(c[b]["recall"]):.1f}" r="4" '
                    f'fill="{color}"/>')
-        out.append(f'<line x1="{w - mr + 10}" y1="{mt + 14 * i + 8}" x2="{w - mr + 30}" '
-                   f'y2="{mt + 14 * i + 8}" stroke="{color}" stroke-width="2"{dash}/>'
-                   f'<text x="{w - mr + 35}" y="{mt + 14 * i + 12}">{proj}</text>')
-    out.append(f'<text x="{w - mr + 10}" y="{mt + 14 * len(curves) + 16}">— derivación, '
-               f'- - validación</text><text x="{w - mr + 10}" y="{mt + 14 * len(curves) + 30}">'
-               f'● presupuesto óptimo B*</text></svg>')
+        lx, ly = ml + (i % 4) * 200, h - mb + 64 + (i // 4) * 18
+        out.append(f'<line x1="{lx}" y1="{ly - 4}" x2="{lx + 22}" y2="{ly - 4}" stroke="{color}" '
+                   f'stroke-width="2"{dash}/><text x="{lx + 28}" y="{ly}">{proj}</text>')
+    out.append(f'<text x="{ml}" y="{h - 12}">continua: derivación · discontinua: validación · '
+               f'●: presupuesto óptimo B*</text></svg>')
     return "\n".join(out)
 
 

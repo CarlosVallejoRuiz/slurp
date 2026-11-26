@@ -1051,6 +1051,19 @@ relaciones: `--budget 8000` daba 19k–42k tokens reales.
   - **Remedido en v1.2** (tests/imports fuera, boost a 10 vecinos): md PS 0,967 de 4000 a
     16000, slurp 0,875 → 0,938 (8000) → 1,000 (16000); JSON y YAML alcanzan a markdown en
     6000. 4000 sigue por defecto. Tabla en README › Choosing a budget.
+  - **Estudio del presupuesto óptimo** (2026-11-26, `docs/design/presupuesto-optimo/`):
+    - **Qué se midió:** 14 proyectos y 1.525 preguntas sacadas de commits (el asunto como
+      pregunta, las definiciones cambiadas como relevantes, el grafo del commit padre).
+    - **Resultado:** el recall sube unos 10 puntos por cada duplicación, de 1000 a 32000, sin
+      codo. Solo «satura» cuando caben todos los candidatos.
+    - **Regla:** B ≈ 850·√candidatos. Pasó su criterio solo por la censura, porque equivale a
+      32000; no se implementa.
+    - **Corte por relevancia:** un `min_score` por consulta. Ninguna forma cumple los márgenes,
+      porque los relevantes suelen estar en el suelo de scores.
+    - **4000:** se mantiene. Encuentra el ~55 % de las definiciones cambiadas.
+    - **Conclusión:** la palanca es el orden. El primer relevante cae, en mediana, en el puesto
+      4–270, frente a 3,5–4 en los juegos etiquetados.
+    - **Banco reutilizable:** `run_study.py` + `analyze.py`.
 - **Factor de tokens** (`token_factor`, `--token-factor`, `$SLURP_TOKEN_FACTOR`, por
   defecto 1,0, rango 0,1–10): multiplica toda medida (piezas, cabecera, texto final),
   redondeando hacia arriba. Medido aquí contra `messages.count_tokens` de Anthropic:

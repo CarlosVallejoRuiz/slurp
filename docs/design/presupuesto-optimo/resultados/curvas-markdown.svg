@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="640" viewBox="0 0 900 640" font-family="sans-serif" font-size="11">
+<rect width="900" height="640" fill="white"/>
+<line x1="175.0" y1="20" x2="175.0" y2="470" stroke="#eee"/><text x="175.0" y="485" text-anchor="middle">1k</text>
+<line x1="290.0" y1="20" x2="290.0" y2="470" stroke="#eee"/><text x="290.0" y="485" text-anchor="middle">2k</text>
+<line x1="405.1" y1="20" x2="405.1" y2="470" stroke="#eee"/><text x="405.1" y="485" text-anchor="middle">4k</text>
+<line x1="520.1" y1="20" x2="520.1" y2="470" stroke="#eee"/><text x="520.1" y="485" text-anchor="middle">8k</text>
+<line x1="635.1" y1="20" x2="635.1" y2="470" stroke="#eee"/><text x="635.1" y="485" text-anchor="middle">16k</text>
+<line x1="750.1" y1="20" x2="750.1" y2="470" stroke="#eee"/><text x="750.1" y="485" text-anchor="middle">32k</text>
+<line x1="865.1" y1="20" x2="865.1" y2="470" stroke="#eee"/><text x="865.1" y="485" text-anchor="middle">64k</text>
+<line x1="60" y1="470.0" x2="880" y2="470.0" stroke="#eee"/><text x="52" y="474.0" text-anchor="end">0.0</text>
+<line x1="60" y1="380.0" x2="880" y2="380.0" stroke="#eee"/><text x="52" y="384.0" text-anchor="end">0.2</text>
+<line x1="60" y1="290.0" x2="880" y2="290.0" stroke="#eee"/><text x="52" y="294.0" text-anchor="end">0.4</text>
+<line x1="60" y1="200.0" x2="880" y2="200.0" stroke="#eee"/><text x="52" y="204.0" text-anchor="end">0.6</text>
+<line x1="60" y1="110.0" x2="880" y2="110.0" stroke="#eee"/><text x="52" y="114.0" text-anchor="end">0.8</text>
+<line x1="60" y1="20.0" x2="880" y2="20.0" stroke="#eee"/><text x="52" y="24.0" text-anchor="end">1.0</text>
+<text x="470.0" y="504" text-anchor="middle">tokens reales medios de la salida (markdown)</text>
+<text x="14" y="245.0" transform="rotate(-90 14 245.0)" text-anchor="middle">recall medio</text>
+<polyline points="170.6,188.5 232.5,132.3 269.3,112.2 310.9,76.3 338.4,64.4 376.8,39.8 404.6,25.6 428.1,20.0 428.1,20.0 428.1,20.0 428.1,20.0 428.1,20.0" fill="none" stroke="#1f77b4" stroke-width="1.6"/>
+<circle cx="376.8" cy="39.8" r="4" fill="#1f77b4"/>
+<line x1="60" y1="530" x2="82" y2="530" stroke="#1f77b4" stroke-width="2"/><text x="88" y="534">ky</text>
+<polyline points="171.8,371.7 239.0,308.4 286.9,296.3 354.1,294.1 401.9,284.2 469.1,242.2 516.8,230.7 584.0,160.1 629.4,82.9 689.2,22.2 726.4,20.0 744.0,20.0" fill="none" stroke="#ff7f0e" stroke-width="1.6"/>
+<circle cx="689.2" cy="22.2" r="4" fill="#ff7f0e"/>
+<line x1="260" y1="530" x2="282" y2="530" stroke="#ff7f0e" stroke-width="2"/><text x="288" y="534">prismastats</text>
+<polyline points="172.0,260.7 239.4,231.5 287.0,208.5 354.2,185.4 401.9,168.4 469.1,137.9 516.8,122.5 584.1,99.0 631.8,68.5 699.1,33.1 746.7,20.0 822.8,20.0" fill="none" stroke="#2ca02c" stroke-width="1.6"/>
+<circle cx="699.1" cy="33.1" r="4" fill="#2ca02c"/>
+<line x1="460" y1="530" x2="482" y2="530" stroke="#2ca02c" stroke-width="2"/><text x="488" y="534">hono</text>
+<polyline points="171.1,283.9 239.2,222.9 286.9,162.3 354.1,122.0 401.8,122.0 469.1,102.3 516.8,75.7 582.0,68.4 628.0,58.9 693.6,52.6 740.4,49.6 831.7,20.0" fill="none" stroke="#d62728" stroke-width="1.6"/>
+<circle cx="582.0" cy="68.4" r="4" fill="#d62728"/>
+<line x1="660" y1="530" x2="682" y2="530" stroke="#d62728" stroke-width="2"/><text x="688" y="534">slurp</text>
+<polyline points="171.3,342.3 238.9,321.9 286.6,294.9 354.0,270.1 401.7,233.7 469.0,208.2 516.7,174.2 584.0,154.2 631.8,134.2 699.0,120.5 746.8,106.8 861.8,64.3" fill="none" stroke="#9467bd" stroke-width="1.6"/>
+<circle cx="699.0" cy="120.5" r="4" fill="#9467bd"/>
+<line x1="60" y1="548" x2="82" y2="548" stroke="#9467bd" stroke-width="2"/><text x="88" y="552">jsoup</text>
+<polyline points="171.6,365.9 239.3,345.3 287.0,333.1 354.2,318.8 401.9,298.5 469.1,269.0 516.8,231.4 584.1,212.2 631.8,197.4 699.1,182.3 746.8,142.3 861.8,63.6" fill="none" stroke="#8c564b" stroke-width="1.6"/>
+<circle cx="746.8" cy="142.3" r="4" fill="#8c564b"/>
+<line x1="260" y1="548" x2="282" y2="548" stroke="#8c564b" stroke-width="2"/><text x="288" y="552">caddy</text>
+<polyline points="171.3,355.4 239.3,327.8 286.9,312.7 354.1,287.8 401.8,262.4 469.1,231.9 516.8,210.4 584.1,187.5 631.8,172.6 699.1,144.6 746.8,128.7 861.8,108.8" fill="none" stroke="#e377c2" stroke-width="1.6"/>
+<circle cx="699.1" cy="144.6" r="4" fill="#e377c2"/>
+<line x1="460" y1="548" x2="482" y2="548" stroke="#e377c2" stroke-width="2"/><text x="488" y="552">tokio</text>
+<polyline points="171.5,379.2 239.2,357.7 286.8,346.4 354.1,317.2 401.8,302.5 469.1,276.5 516.8,266.2 584.0,233.8 631.8,213.3 699.0,192.9 746.8,165.6 861.8,153.4" fill="none" stroke="#7f7f7f" stroke-width="1.6"/>
+<circle cx="746.8" cy="165.6" r="4" fill="#7f7f7f"/>
+<line x1="660" y1="548" x2="682" y2="548" stroke="#7f7f7f" stroke-width="2"/><text x="688" y="552">sqlalchemy</text>
+<polyline points="171.9,250.7 239.4,217.6 286.7,185.7 350.8,148.4 394.1,119.3 453.5,84.1 494.4,66.5 550.4,34.4 587.5,20.0 624.3,20.0 625.3,20.0 625.3,20.0" fill="none" stroke="#bcbd22" stroke-width="1.6" stroke-dasharray="5,3"/>
+<circle cx="550.4" cy="34.4" r="4" fill="#bcbd22"/>
+<line x1="60" y1="566" x2="82" y2="566" stroke="#bcbd22" stroke-width="2" stroke-dasharray="5,3"/><text x="88" y="570">gin</text>
+<polyline points="171.7,302.6 239.3,261.8 287.0,241.5 354.2,208.6 401.9,195.7 469.1,153.1 516.8,128.1 584.1,103.7 631.8,76.5 699.0,20.6 746.6,20.0 771.7,20.0" fill="none" stroke="#17becf" stroke-width="1.6" stroke-dasharray="5,3"/>
+<circle cx="699.0" cy="20.6" r="4" fill="#17becf"/>
+<line x1="260" y1="566" x2="282" y2="566" stroke="#17becf" stroke-width="2" stroke-dasharray="5,3"/><text x="288" y="570">click</text>
+<polyline points="171.7,395.1 239.1,370.8 286.9,342.4 354.1,303.8 401.9,280.6 469.1,261.2 516.8,242.4 584.1,211.9 631.8,178.5 699.1,151.6 746.8,115.4 861.8,50.4" fill="none" stroke="#393b79" stroke-width="1.6" stroke-dasharray="5,3"/>
+<circle cx="746.8" cy="115.4" r="4" fill="#393b79"/>
+<line x1="460" y1="566" x2="482" y2="566" stroke="#393b79" stroke-width="2" stroke-dasharray="5,3"/><text x="488" y="570">ripgrep</text>
+<polyline points="171.5,335.7 239.0,322.3 286.8,317.0 354.1,293.1 401.8,277.3 469.0,248.7 516.8,226.5 584.0,179.1 631.8,160.9 699.0,136.5 746.8,122.3 861.8,102.1" fill="none" stroke="#637939" stroke-width="1.6" stroke-dasharray="5,3"/>
+<circle cx="699.0" cy="136.5" r="4" fill="#637939"/>
+<line x1="660" y1="566" x2="682" y2="566" stroke="#637939" stroke-width="2" stroke-dasharray="5,3"/><text x="688" y="570">excalidraw</text>
+<polyline points="170.6,231.1 238.7,217.1 286.4,198.3 353.8,176.2 401.6,164.8 468.9,149.6 516.7,143.1 584.0,137.2 631.7,133.5 699.0,122.3 746.8,104.5 861.8,78.3" fill="none" stroke="#8c6d31" stroke-width="1.6" stroke-dasharray="5,3"/>
+<circle cx="699.0" cy="122.3" r="4" fill="#8c6d31"/>
+<line x1="60" y1="584" x2="82" y2="584" stroke="#8c6d31" stroke-width="2" stroke-dasharray="5,3"/><text x="88" y="588">commons-lang</text>
+<polyline points="171.7,359.4 239.3,340.7 287.0,336.9 354.2,320.8 401.9,315.1 469.1,287.8 516.8,269.1 584.1,252.2 631.8,234.0 699.1,217.0 746.8,203.8 861.8,170.3" fill="none" stroke="#843c39" stroke-width="1.6" stroke-dasharray="5,3"/>
+<circle cx="699.1" cy="217.0" r="4" fill="#843c39"/>
+<line x1="260" y1="584" x2="282" y2="584" stroke="#843c39" stroke-width="2" stroke-dasharray="5,3"/><text x="288" y="588">prometheus</text>
+<text x="60" y="628">continua: derivación · discontinua: validación · ●: presupuesto óptimo B*</text></svg>
