@@ -33,6 +33,7 @@ SIMPLICITY = 0.25        # a rule must cut the constant's geometric cost by 25 %
 CUT_SAVINGS = 0.25       # the cut must save 25 % of the reference's tokens
 HALF_STEP = 0.25         # half a grid step, in log2 (the grid grows by ~√2)
 DEFAULT_BUDGET = 4000
+MIN_QUESTIONS = 40       # a derivation project needs this many to enter a fit (§2.4)
 
 GROUPS = {
     "derivation": ["ky", "prismastats", "hono", "slurp", "jsoup", "caddy", "tokio", "sqlalchemy"],
@@ -256,6 +257,11 @@ def accept_cut(cells: list[dict], key: str) -> dict:
 
 # --- the whole study -------------------------------------------------------------------
 
+def fit_set(counts: dict[str, int]) -> list[str]:
+    """Derivation projects with enough scorable questions to enter a fit (§2.4)."""
+    return [p for p in GROUPS["derivation"] if counts.get(p, 0) >= MIN_QUESTIONS]
+
+
 def load(results: Path, name: str) -> list[dict]:
     path = results / f"{name}.jsonl"
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
@@ -344,13 +350,17 @@ def analyse(results: Path) -> tuple[dict, str, dict]:
     gate = method_gate({n: {fmt: (opt[n][fmt]["b_star"], ref_opt[n][fmt]["b_star"])
                             for fmt in FORMATS} for n in refs})
 
+    counts = {p: len([r for r in recs[p] if r.get("present")]) for p in projects}
+    fitting = fit_set(counts)
+
     def cells_of(group: str) -> dict:
+        names = fitting if group == "derivation" else GROUPS[group]
         return {p: {"features": feats[p],
                     "b_star": {fmt: opt[p][fmt]["b_star"] for fmt in FORMATS},
                     "censored": {fmt: opt[p][fmt]["censored"] for fmt in FORMATS}}
-                for p in GROUPS[group]}
+                for p in names}
 
-    summary: dict = {"method_gate": gate, "projects": {}}
+    summary: dict = {"method_gate": gate, "projects": {}, "fit_projects": fitting}
     for p in projects:
         summary["projects"][p] = {
             "group": "derivación" if p in GROUPS["derivation"] else "validación",
@@ -393,7 +403,7 @@ def analyse(results: Path) -> tuple[dict, str, dict]:
     # §4.5 the relevance cut, against the recommended budget as ceiling.
     def cut_cells(group: str, ceiling) -> list[dict]:
         out = []
-        for p in GROUPS[group]:
+        for p in (fitting if group == "derivation" else GROUPS[group]):
             for fmt in FORMATS:
                 b_ref = ceiling(p, fmt)
                 keys = recs[p][0]["cut"].keys()

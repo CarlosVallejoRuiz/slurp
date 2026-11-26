@@ -468,3 +468,11 @@ class TestLlmCheck:
     def test_budget_multiples(self, L):
         assert [L["_round_up"](4000 * m) for m in (0.5, 1, 2, 4)] == [2000, 4000, 8000, 16000]
         assert L["_round_up"](16000 * 4) == 64000 and L["_round_up"](300) == 1000
+
+
+class TestFitSet:
+    def test_projects_under_40_questions_do_not_enter_the_fit(self, A):
+        counts = {"ky": 120, "prismastats": 68, "hono": 120, "slurp": 38, "jsoup": 120,
+                  "caddy": 120, "tokio": 120, "sqlalchemy": 120}
+        assert A["fit_set"](counts) == ["ky", "prismastats", "hono", "jsoup", "caddy", "tokio",
+                                        "sqlalchemy"]
