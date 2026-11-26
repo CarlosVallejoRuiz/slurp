@@ -235,3 +235,106 @@ class TestQuestionMetadata:
         assert a == Q["seeded_order"](items, "hono", 12)
         assert a != Q["seeded_order"](items, "tokio", 12)
         assert sorted(a) == items
+
+
+# --- measure.py: the harness -----------------------------------------------------
+
+FIXTURE = Path(__file__).parent / "fixtures" / "graphify_project" / "graphify-out" / "graph.json"
+
+
+@pytest.fixture(scope="module")
+def M():
+    return runpy.run_path(str(DESIGN / "measure.py"))
+
+
+class TestThresholds:
+    def _scores(self):
+        # A floor of 0.30 and a few nodes that share terms with the query.
+        return [0.70, 0.66, 0.62, 0.50, 0.48, 0.47, 0.40, 0.31] + [0.30] * 20
+
+    def test_relative_to_the_best(self, M):
+        t = M["thresholds"](self._scores())
+        assert t["C1:0.5"] == pytest.approx(0.35)
+        assert t["C1:0.8"] == pytest.approx(0.56)
+
+    def test_above_the_floor(self, M):
+        t = M["thresholds"](self._scores())
+        assert t["C2:0.1"] == pytest.approx(0.30 + 0.1 * 0.40)
+        assert t["C2:0.4"] == pytest.approx(0.30 + 0.4 * 0.40)
+
+    def test_sharp_drop_keeps_at_least_five(self, M):
+        t = M["thresholds"](self._scores())
+        # Drops: 0.04 0.04 0.12 0.02 0.01 0.07 0.09 0.01 ... over a range of 0.40.
+        # The 0.12 drop is at i=3, before the first five: the first from i=5 on that
+        # reaches 0.15 * 0.40 = 0.06 is after s_6 = 0.47.
+        assert t["C3:0.15"] == pytest.approx(0.47)
+        assert t["C3:0.3"] is None            # no drop of 0.12 from the fifth on
+
+    def test_no_signal_no_cut_from_a_drop(self, M):
+        t = M["thresholds"]([0.3] * 10)
+        assert t["C3:0.05"] is None
+        assert t["C1:0.5"] == pytest.approx(0.15)
+
+    def test_every_combination_of_the_design(self, M):
+        t = M["thresholds"](self._scores())
+        assert len(t) == 7 + 6 + 5
+
+
+class TestHarness:
+    def _question(self, G):
+        nodes = sorted(G.nodes)
+        return {"id": "q1", "question": "authenticate user token", "relevant_nodes": nodes[:2],
+                "names_symbol": False}
+
+    def test_identical_to_run_retrieval_eval(self, M, sample_graph_json):
+        from slurp.loader import load_graph
+        G = load_graph(sample_graph_json)
+        q = self._question(G)
+        r = M["measure_question"](G, q, grid=[200, 400, 2000], control=None, cuts=False)
+        assert M["verify"](G, q, r, budgets=[200, 400, 2000]) == []
+
+    def test_identical_on_a_real_graph(self, M):
+        from slurp.loader import load_graph
+        G = load_graph(FIXTURE)
+        q = {"id": "q2", "question": "parse the configuration file",
+             "relevant_nodes": sorted(G.nodes)[5:8], "names_symbol": False}
+        r = M["measure_question"](G, q, grid=[1000, 4000], control=None, cuts=False)
+        assert M["verify"](G, q, r, budgets=[1000, 4000]) == []
+
+    def test_a_cut_stays_under_its_ceiling_and_no_cut_is_the_base(self, M):
+        from slurp.loader import load_graph
+        G = load_graph(FIXTURE)
+        q = {"id": "q3", "question": "parse the configuration file",
+             "relevant_nodes": sorted(G.nodes)[5:8], "names_symbol": False}
+        grid = [1000, 2000, 4000]
+        r = M["measure_question"](G, q, grid=grid, control=None, cuts=True)
+        for key, by_fmt in r["cut"].items():
+            for fmt, row in by_fmt.items():
+                for b, (_recall, tokens, _nodes) in row.items():
+                    assert tokens <= int(b), (key, fmt, b)
+        # C3 with no drop large enough does not cut: the base, exactly.
+        nocut = [k for k, v in M["thresholds"]([0.3] * 5).items() if v is None]
+        assert nocut and all(k.startswith("C3") for k in nocut)
+
+    def test_the_record(self, M, sample_graph_json):
+        from slurp.loader import load_graph
+        G = load_graph(sample_graph_json)
+        r = M["measure_question"](G, self._question(G), grid=[400], control=800, cuts=True)
+        assert set(r["base"]) == {"markdown", "json"}
+        assert set(r["base"]["markdown"]) == {"400", "800"}
+        recall, tokens, nodes = r["base"]["markdown"]["400"]
+        assert 0 <= recall <= 1 and 0 < tokens <= 400 and nodes >= 0
+        assert len(r["cut"]) == 18 and set(r["cut"]["C1:0.5"]["json"]) == {"400"}
+        assert r["present"] == 2 and r["graph_nodes"] == G.number_of_nodes()
+
+
+class TestStudyRun:
+    def test_the_groups_are_the_approved_ones(self):
+        R = runpy.run_path(str(DESIGN / "run_study.py"))
+        assert R["GROUPS"] == {
+            "derivation": ["ky", "prismastats", "hono", "slurp", "jsoup", "caddy", "tokio",
+                           "sqlalchemy"],
+            "validation": ["gin", "click", "ripgrep", "excalidraw", "commons-lang",
+                           "prometheus"]}
+        assert sorted(R["ORDER"]) == sorted(R["GROUPS"]["derivation"] + R["GROUPS"]["validation"])
+        assert R["WORKERS"] == 4 and R["N_QUESTIONS"] == 120
