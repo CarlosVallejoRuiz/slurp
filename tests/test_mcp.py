@@ -656,7 +656,8 @@ class TestHandlerSessionLog:
         assert not (tmp_path / ".slurp").exists()
         assert "result" in json.loads(out.getvalue())
 
-    def test_failed_query_is_not_logged(self, sample_graph, tmp_path, monkeypatch):
+    def test_a_failed_call_is_logged_with_its_error(self, sample_graph, tmp_path, monkeypatch):
+        # v1.3: every call is a line, failures included (they were left out).
         (tmp_path / ".slurp").mkdir()
         monkeypatch.chdir(tmp_path)
         msg = {
@@ -664,7 +665,8 @@ class TestHandlerSessionLog:
             "params": {"name": "slurp_query", "arguments": {}},  # missing query
         }
         _handle(msg, sample_graph, io.StringIO(), session_log=True)
-        assert read_session_log(tmp_path / ".slurp") == []
+        [entry] = read_session_log(tmp_path / ".slurp")
+        assert entry["error"] == "Missing required argument: 'query'"
 
     def test_logging_does_not_alter_the_response(self, sample_graph, tmp_path, monkeypatch):
         (tmp_path / ".slurp").mkdir()

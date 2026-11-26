@@ -1507,16 +1507,26 @@ def advisor_cmd(
               help="Number of most recent entries to show.")
 @click.option("--tail", is_flag=True, default=False,
               help="Follow the log in real time (Ctrl+C to stop).")
+@click.option("--sessions", "sessions", is_flag=True, default=False,
+              help="One line per server session: client, calls per tool, edits, refresh time.")
 @click.option("--log-dir", "log_dir", default=".slurp", show_default=True,
               help="Directory containing session.log.")
-def session_cmd(last: int, tail: bool, log_dir: str) -> None:
-    """Show queries your AI assistant sent to the slurp MCP server."""
+def session_cmd(last: int, tail: bool, sessions: bool, log_dir: str) -> None:
+    """Show what your AI assistant asked the slurp MCP server."""
     import time
 
-    from slurp.mcp import SESSION_LOG_FILE, read_session_log
+    from slurp.session import SESSION_LOG_FILE, read_session_log, summarize_sessions
 
     log_path = Path(log_dir) / SESSION_LOG_FILE
-    entries = read_session_log(Path(log_dir), last=last)
+    if sessions:
+        summaries = summarize_sessions(read_session_log(Path(log_dir)))[-last:]
+        if not summaries:
+            click.echo(f"No sessions in {log_path} yet (lines written before v1.3 carry none).")
+            return
+        _echo_rich(_build_sessions_table(summaries, log_path))
+        return
+    entries = [e for e in read_session_log(Path(log_dir))
+               if e.get("event") in (None, "call")][-last:] if last > 0 else []
 
     if not entries:
         if not Path(log_dir).is_dir():
@@ -1557,6 +1567,17 @@ def session_cmd(last: int, tail: bool, log_dir: str) -> None:
         click.echo("\nStopped.")
 
 
+def _asked(entry: dict) -> str:
+    """What a session log line asked, in one cell: the query, the file, the node."""
+    args = entry.get("args") or {}
+    for key in ("query", "file_path", "node_name"):
+        if args.get(key) or entry.get(key):
+            return str(args.get(key) or entry.get(key))
+    if args.get("new_graph"):
+        return f"{args.get('old_graph')} → {args.get('new_graph')}"
+    return ""
+
+
 def _build_session_table(entries: list[dict], log_path: Path) -> Table:
     """Render session log entries as a rich table."""
     table = Table(
@@ -1564,20 +1585,56 @@ def _build_session_table(entries: list[dict], log_path: Path) -> Table:
         show_header=True,
     )
     table.add_column("Time")
-    table.add_column("Query", max_width=36)
+    table.add_column("Tool")
+    table.add_column("Asked", max_width=36)
     table.add_column("Budget", justify="right")
     table.add_column("Nodes", justify="right")
     table.add_column("Tokens", justify="right")
+    table.add_column("Graph")
 
     # No savings: see log_session. A savings_pct left by a pre-1.1.0 log was a
-    # fixed-cost-per-node guess and is not shown.
+    # fixed-cost-per-node guess and is not shown. Lines without a tool are v1
+    # lines: slurp_query was the only tool logged.
     for e in entries:
+        budget = e.get("budget")
         table.add_row(
             str(e.get("ts", "")),
-            str(e.get("query", "")),
-            f"{e.get('budget', 0):,}",
-            str(e.get("nodes", 0)),
-            f"{e.get('tokens', 0):,}",
+            str(e.get("tool", "slurp_query")),
+            _asked(e),
+            f"{budget:,}" if isinstance(budget, int) else "",
+            str(e["nodes"]) if "nodes" in e else "",
+            f"{e['tokens']:,}" if "tokens" in e else "",
+            str(e.get("graph", "")) + (" ✗" if e.get("error") else ""),
+        )
+    return table
+
+
+def _duration(seconds: float) -> str:
+    minutes, secs = divmod(int(round(seconds)), 60)
+    return f"{minutes}m {secs}s" if minutes else f"{secs}s"
+
+
+def _build_sessions_table(summaries: list, log_path: Path) -> Table:
+    """`slurp session --sessions`: one row per server process (design §7)."""
+    table = Table(title=f"MCP Sessions — {len(summaries)} ({log_path})", show_header=True)
+    for name, justify in (("Started", "left"), ("Client", "left"), ("Duration", "right"),
+                          ("Calls", "left"), ("1st call", "right"), ("Changed before", "right"),
+                          ("Edited after impact/explain", "right"), ("Warned", "right"),
+                          ("p95 refresh", "right")):
+        table.add_column(name, justify=justify)  # type: ignore[arg-type]
+    for s in summaries:
+        calls = " · ".join(f"{tool.removeprefix('slurp_')} {n}"
+                           for tool, n in sorted(s.calls.items(), key=lambda kv: (-kv[1], kv[0])))
+        table.add_row(
+            s.started,
+            s.client or "—",
+            _duration(s.duration_s),
+            calls or "none",
+            f"+{_duration(s.first_call_s)}" if s.first_call_s is not None else "—",
+            str(s.changed_before_first_call),
+            f"{s.edited_after_impact_or_explain} of {s.edited}",
+            str(s.warned),
+            f"{s.p95_refresh_ms:.0f} ms" if s.p95_refresh_ms is not None else "—",
         )
     return table
 
@@ -1590,10 +1647,11 @@ def _format_session_line(line: str) -> str:
         e = _json.loads(line)
     except ValueError:
         return line.rstrip("\n")
-    return (
-        f"{e.get('ts', '')}  {e.get('query', '')!r}  "
-        f"{e.get('nodes', 0)} nodes · {e.get('tokens', 0):,} tokens"
-    )
+    if e.get("event") in ("start", "end"):
+        return f"{e.get('ts', '')}  — session {e.get('event')} —"
+    nodes = f"  {e['nodes']} nodes · {e.get('tokens', 0):,} tokens" if "nodes" in e else ""
+    graph = f"  [{e['graph']}]" if e.get("graph") else ""
+    return f"{e.get('ts', '')}  {e.get('tool', 'slurp_query')}  {_asked(e)!r}{nodes}{graph}"
 
 
 def _rel_display(path: Path, root: Path) -> str:

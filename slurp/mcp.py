@@ -7,6 +7,8 @@ No external dependencies — stdlib only for the transport layer.
 
 import json
 import sys
+import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import TextIO
@@ -30,6 +32,9 @@ from slurp.explainer import (
     resolve_config,
 )
 from slurp.graphfile import ABSENT, graph_identity
+# read_session_log lives in slurp.session since v1.3; slurp.mcp still offers it.
+from slurp.session import SESSION_LOG_FILE, SessionLog, call_entry
+from slurp.session import read_session_log as read_session_log  # noqa: F401
 from slurp.loader import SlurpLoadError, load_graph
 from slurp.refresh import DEFAULT_TIMEOUT_S, Freshness, GraphTracker, Refresher, resolve_refresh
 from slurp.impact import analyze_impact, format_impact
@@ -339,7 +344,6 @@ def _tools_for(variant: str, version: str | None) -> list[dict]:
 
 
 
-SESSION_LOG_FILE = "session.log"
 
 
 class GraphState:
@@ -501,40 +505,6 @@ def log_session(
         print(f"slurp: session log write failed: {exc}", file=sys.stderr)
         return False
     return True
-
-
-def read_session_log(log_dir: Path | None = None, last: int | None = None) -> list[dict]:
-    """Read entries from the session log, oldest first.
-
-    Args:
-        log_dir: Directory holding session.log (default: ./.slurp).
-        last: Return only the most recent N entries; None returns all.
-
-    Returns:
-        List of entry dicts. Empty if the file or directory does not exist.
-        Malformed lines are skipped rather than raising.
-    """
-    log_dir = Path(".slurp") if log_dir is None else log_dir
-    log_path = log_dir / SESSION_LOG_FILE
-    if not log_path.exists():
-        return []
-
-    entries: list[dict] = []
-    for line in log_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            parsed = json.loads(line)
-        except ValueError:
-            # INTENTIONAL: the session log is append-only JSONL written by a
-            # long-running server, so a truncated final line is expected after
-            # a crash. One unreadable line must not hide the rest of the log.
-            continue
-        if isinstance(parsed, dict):
-            entries.append(parsed)
-
-    return entries[-last:] if last is not None and last > 0 else entries
 
 
 # ---------------------------------------------------------------------------
@@ -739,43 +709,70 @@ _HANDLERS = {
 }
 
 
-def _call_tool(params: dict, G, session_log: bool, state: "GraphState | None",
-               invalid_as_tool_error: bool) -> tuple[dict | None, tuple[int, str] | None]:
-    """Answer one tools/call: freshness first, then the tool, then the envelope.
+@dataclass
+class _Outcome:
+    """One tools/call, answered: the result or the JSON-RPC error, and what to log."""
 
-    Returns:
-        (result, None) or (None, (JSON-RPC error code, message)).
-    """
+    name: str = ""
+    args: dict = field(default_factory=dict)
+    result: dict | None = None
+    error: tuple[int, str] | None = None
+    fresh: Freshness | None = None
+    info: dict = field(default_factory=dict)
+    failure: str = ""
+
+
+def _logged_args(name: str, args: dict, info: dict) -> dict:
+    """The arguments of a call, in short, for the session log."""
+    keys = {"slurp_query": ("query", "budget"), "slurp_suggest": ("query", "budget"),
+            "slurp_impact": ("file_path", "hops"), "slurp_explain": ("node_name",),
+            "slurp_diff": ("old_graph", "new_graph")}.get(name, ())
+    out = {k: info[k] if k in info else args.get(k) for k in keys
+           if k in info or k in args}
+    if name == "slurp_explain" and info.get("file"):
+        out["file"] = info["file"]   # the file of the node it resolved to
+    return out
+
+
+def _call_tool(params: dict, G, state: "GraphState | None",
+               invalid_as_tool_error: bool) -> _Outcome:
+    """Answer one tools/call: freshness first, then the tool, then the envelope."""
     name = params.get("name")
+    outcome = _Outcome(name=str(name))
     if name not in _TOOL_NAMES:
         # An unknown tool is a protocol error in every revision.
-        return None, (-32602, f"Unknown tool: {name!r}")
+        outcome.error = (-32602, f"Unknown tool: {name!r}")
+        return outcome
     args = params.get("arguments") or {}
     if not isinstance(args, dict):
-        return None, (-32602, "'arguments' must be an object")
+        outcome.error = (-32602, "'arguments' must be an object")
+        return outcome
+    outcome.args = args
 
-    fresh: Freshness | None = None
     if name != "slurp_diff":   # diff reads two files named by the caller
         if state is not None:
-            fresh = state.prepare()
+            outcome.fresh = state.prepare()
             G = state.graph
         if G is None:
-            return None, (-32603, "Graph not loaded")
+            outcome.error = (-32603, "Graph not loaded")
+            return outcome
+    fresh = outcome.fresh
 
     try:
-        text, info = _HANDLERS[name](args, G)
+        text, outcome.info = _HANDLERS[name](args, G)
     except _Invalid as exc:
+        outcome.failure = str(exc)
         # DECISION (v1.3, design §6, decision 10): revision 2025-11-25 asks for
         # input validation errors as tool errors, so the model reads the message
         # and corrects the call; earlier revisions keep JSON-RPC -32602.
         if not invalid_as_tool_error:
-            return None, (-32602, str(exc))
+            outcome.error = (-32602, str(exc))
+            return outcome
         result: dict = {"content": [{"type": "text", "text": str(exc)}], "isError": True}
     except _Failed as exc:
+        outcome.failure = str(exc)
         result = {"content": [{"type": "text", "text": str(exc)}], "isError": True}
     else:
-        if name == "slurp_query" and session_log:
-            log_session(info["query"], info["budget"], info["stats"])
         # DECISION: the model reads only `content`, so a warning about the graph
         # goes first in the text; the machine-readable state goes in _meta.
         if fresh is not None and fresh.warnings:
@@ -786,17 +783,20 @@ def _call_tool(params: dict, G, session_log: bool, state: "GraphState | None",
     # Only present when federating, so single-graph responses are unchanged.
     if state is not None and state.graphs_count > 1 and not result.get("isError"):
         result["graphs_count"] = state.graphs_count
-    return result, None
+    outcome.result = result
+    return outcome
 
 
 class Session:
     """What one stdio connection negotiated — stdio means one client per process."""
 
-    def __init__(self) -> None:
+    def __init__(self, log: SessionLog | None = None) -> None:
         #: The legacy revision fixed by `initialize`, or None before it.
         self.protocol: str | None = None
         #: clientInfo from `initialize`, or from the latest 2026-07-28 request.
         self.client: dict | None = None
+        #: The session log of this process (written only if .slurp/ exists).
+        self.log = log
 
 
 def _variant(state: "GraphState | None") -> str:
@@ -921,12 +921,21 @@ def _handle(msg: dict, G, out, session_log: bool = True, state: "GraphState | No
 
     elif method == "tools/call":
         tool_errors = modern or (version is not None and version >= "2025-11-25")
-        result, error = _call_tool(params, G, session_log, state, tool_errors)
-        if error is not None:
-            _write(_err(msg_id, *error), out)
+        started = time.perf_counter()
+        outcome = _call_tool(params, G, state, tool_errors)
+        if outcome.error is not None:
+            _write(_err(msg_id, *outcome.error), out)
         else:
-            assert result is not None
-            reply(result)
+            assert outcome.result is not None
+            reply(outcome.result)
+        if session_log and outcome.name in _TOOL_NAMES:
+            if session.log is None:
+                session.log = SessionLog()
+            session.log.call(call_entry(
+                client=session.client, protocol=version, tool=outcome.name,
+                args=_logged_args(outcome.name, outcome.args, outcome.info),
+                ms=(time.perf_counter() - started) * 1000, fresh=outcome.fresh,
+                info=outcome.info, error=outcome.failure))
 
     else:
         _write(_err(msg_id, -32601, f"Method not found: {method!r}"), out)
@@ -991,9 +1000,14 @@ def serve(
         if tracker.note:
             print(f"slurp: {tracker.path} is served read-only: {tracker.note}",
                   file=sys.stderr)
+    log = SessionLog() if session_log else None
+    if log is not None:
+        log.start(state.trackers)
     # The startup check runs in the background: `initialize` never waits on it.
     state.start()
-    _serve_lines(inp, out, state, session_log=session_log, session=Session())
+    _serve_lines(inp, out, state, session_log=session_log, session=Session(log))
+    if log is not None:
+        log.end()
 
 
 class _Lines:

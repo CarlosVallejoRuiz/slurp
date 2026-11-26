@@ -1949,7 +1949,8 @@ class TestSessionCommand:
         self._write_log(tmp_path / ".slurp", ["auth flow"])
         monkeypatch.chdir(tmp_path)
         result = _runner().invoke(cli, ["session"])
-        for col in ("Time", "Query", "Budget", "Nodes", "Tokens"):
+        # v1.3: a Tool column (every tool is logged) and "Asked" for the query, file or node.
+        for col in ("Time", "Tool", "Asked", "Budget", "Nodes", "Tokens", "Graph"):
             assert col in result.output
 
     def test_shows_the_query_text(self, tmp_path, monkeypatch):
