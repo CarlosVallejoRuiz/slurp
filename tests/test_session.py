@@ -217,3 +217,27 @@ class TestSummaries:
         assert res.exit_code == 0, res.output
         for text in ("cc 1", "5m 0s", "+4s", "query 2", "2 of 3", "500 ms"):
             assert text in res.output, text
+
+
+class TestEndEventWhenTheClientStopsTheServer:
+    def test_sigterm_still_writes_the_end_event(self, project):
+        # Found while preparing the agent measurement: Claude Code stops its MCP
+        # servers with a signal, not by closing stdin, so the end event never came.
+        import signal
+        import subprocess
+        import sys
+
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "from slurp.cli import cli; cli()", "serve", "--graph",
+             str(project / "graphify-out" / "graph.json")],
+            cwd=project, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, text=True)
+        proc.stdin.write(INIT + "\n")
+        proc.stdin.flush()
+        assert json.loads(proc.stdout.readline())["id"] == 0
+        _put(project, "lib/edited.py", "def edited():\n    return 1\n")
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=30)
+        log = read_session_log(project / ".slurp")
+        assert log[-1]["event"] == "end"
+        assert log[-1]["changed"]["files"] == ["lib/edited.py"]

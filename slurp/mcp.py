@@ -1007,9 +1007,43 @@ def serve(
         log.start(state.trackers)
     # The startup check runs in the background: `initialize` never waits on it.
     state.start()
-    _serve_lines(inp, out, state, session_log=session_log, session=Session(log))
-    if log is not None:
-        log.end()
+    restore = _stop_on_signals()
+    try:
+        _serve_lines(inp, out, state, session_log=session_log, session=Session(log))
+    finally:
+        restore()
+        if log is not None:
+            log.end()
+
+
+def _stop_on_signals():
+    """End the read loop on SIGTERM/SIGHUP as on EOF, so the session log gets its end event.
+
+    DECISION: Claude Code stops its MCP servers with a signal rather than by
+    closing stdin (found while preparing the agent measurement): without this
+    the process died mid-read and the end event — the files edited during the
+    session — was never written. Returns a function restoring the previous
+    handlers. Outside the main thread signals cannot be set, and nothing changes.
+    """
+    import signal
+
+    def stop(signum, frame):
+        raise SystemExit(0)
+
+    previous = {}
+    for name in ("SIGTERM", "SIGHUP"):
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            previous[sig] = signal.signal(sig, stop)
+        except ValueError:     # not the main thread
+            pass
+
+    def restore() -> None:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+    return restore
 
 
 class _Lines:
