@@ -75,7 +75,9 @@ def main() -> int:
         out.append(f"| {fam}{' ← elegida' if fam == r['family'] else ''} | {e:.3f} |")
     out += ["", f"- Regla: {s['rule_formula']}.",
             f"- JSON: {'factor k = ' + format(r['k'], '.2f') + ' sobre markdown' if r['json_mode'] == 'k' else 'ajuste propio'} "
-            f"(LOPO k {r['json_lopo']['k']:.3f}, propio {r['json_lopo']['separate']:.3f}).",
+            + (f"(LOPO k {r['json_lopo']['k']:.3f}, propio {r['json_lopo']['separate']:.3f})."
+               if r["json_lopo"]["k"] is not None else
+               "(sin validación cruzada posible: menos de dos proyectos saturan en los dos formatos)."),
             f"- Constante a batir (R0 en derivación): markdown {s['constant']['markdown']}, JSON {s['constant']['json']}."]
 
     def judge_table(title: str, v: dict) -> list[str]:

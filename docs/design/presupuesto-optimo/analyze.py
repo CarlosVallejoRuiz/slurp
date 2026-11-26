@@ -177,8 +177,17 @@ def fit_rule(cells: dict) -> dict:
             errs.append(abs(math.log2(round_up(2 ** (pred(both[i][0]) + k))) - both[i][2]))
         return statistics.fmean(errs)
 
-    k_err, sep_err = k_lopo(), _lopo(family, js)
-    json_mode = "separate" if sep_err < k_err else "k"
+    if not both:
+        raise SystemExit("no derivation project saturates in both formats: no JSON factor")
+    # DECISION: JSON gets its own fit only if cross-validation shows it is better
+    # (§4.2). With fewer than two projects saturated in both formats it cannot run,
+    # and the simpler option, the factor k, stands.
+    if len(both) >= 2 and len(js) >= 2:
+        k_err, sep_err = k_lopo(), _lopo(family, js)
+        json_mode = "separate" if sep_err < k_err else "k"
+    else:
+        k_err = sep_err = None
+        json_mode = "k"
     log2_k = statistics.fmean(yj - ym for _, ym, yj in both)
     js_pred = _fit(family, js)
 

@@ -476,3 +476,17 @@ class TestFitSet:
                   "caddy": 120, "tokio": 120, "sqlalchemy": 120}
         assert A["fit_set"](counts) == ["ky", "prismastats", "hono", "jsoup", "caddy", "tokio",
                                         "sqlalchemy"]
+
+
+class TestFitWithFewUncensoredCells:
+    def test_json_falls_back_to_the_factor_when_cross_validation_cannot_run(self, A):
+        cells = {}
+        for i, n in enumerate([200, 1000, 2000]):
+            cells[f"p{i}"] = {"features": {"N": n, "C": n / 2, "T": n * 60, "tau": 0.4,
+                                           "lang": "TypeScript"},
+                              "b_star": {"markdown": [6000, 24000, 24000][i],
+                                         "json": [12000, 32000, 24000][i]},
+                              "censored": {"markdown": False, "json": i > 0}}
+        fit = A["fit_rule"](cells)
+        assert fit["json_mode"] == "k" and fit["json_lopo"] == {"k": None, "separate": None}
+        assert fit["k"] == pytest.approx(2.0)          # only p0 has both formats: 12000 / 6000
