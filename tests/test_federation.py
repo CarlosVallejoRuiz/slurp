@@ -415,7 +415,8 @@ class TestMcpFederation:
 
         bigger = _graph([("handler", "h"), ("router", "r"), ("extra", "e")])
         paths[1].write_text(json.dumps(bigger), encoding="utf-8")
-        os.utime(paths[1], (state.mtimes[1] + 10, state.mtimes[1] + 10))
+        future = os.stat(paths[1]).st_mtime + 10
+        os.utime(paths[1], (future, future))
 
         assert state.check_reload() is True
         assert state.graph.number_of_nodes() == 5

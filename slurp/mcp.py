@@ -29,7 +29,9 @@ from slurp.explainer import (
     format_explanation,
     resolve_config,
 )
+from slurp.graphfile import ABSENT, graph_identity
 from slurp.loader import SlurpLoadError, load_graph
+from slurp.refresh import DEFAULT_TIMEOUT_S, Freshness, GraphTracker, Refresher, resolve_refresh
 from slurp.impact import analyze_impact, format_impact
 from slurp.suggester import format_suggestions, suggest_queries
 from slurp.scorer import clear_pagerank_cache, score_nodes
@@ -279,34 +281,58 @@ SESSION_LOG_FILE = "session.log"
 
 
 class GraphState:
-    """Owns the served graph and reloads it when the file changes on disk.
+    """Owns the served graph and keeps it current (docs/design/mcp-autonomo.md §2).
 
-    The server loads the graph once at startup; without this, an edit to
-    graph.json (a re-index, a `slurp index --watch` cycle) is invisible and the
-    server keeps answering from the version it read at boot.
+    Before each call, :meth:`prepare` checks slurp's own graph against the
+    working tree through its manifest and refreshes it when something changed
+    (slurp.refresh), reloads it when another process rewrote the file, and
+    leaves graphify's graphs as they are. The swap to a new graph happens here,
+    on the server's thread, and drops the caches keyed on the old one.
     """
 
     #: How many source graphs this state serves. Federated states override it.
     graphs_count = 1
 
-    def __init__(self, graph_path: Path, graph) -> None:
+    def __init__(self, graph_path: Path, graph=None, *, refresh: bool = True,
+                 timeout: float = DEFAULT_TIMEOUT_S) -> None:
+        del graph  # loaded by the tracker, from the file, with what it is made of
         self.graph_path = graph_path
-        self.graph = graph
-        self.mtime = self._current_mtime()
+        self.trackers = [GraphTracker(graph_path)]
+        self.refresher = Refresher(self.trackers, timeout, refresh, on_swap=self._swapped)
+        self.graph = self._current()
 
-    def _current_mtime(self) -> float | None:
-        """mtime of the graph file, or None if it is unreadable right now."""
-        try:
-            return self.graph_path.stat().st_mtime
-        except OSError:
-            return None
+    @property
+    def identity(self):
+        """What the served file was when last read or written: (mtime_ns, inode, size)."""
+        return self.trackers[0].identity
 
-    def check_reload(self) -> bool:
-        """Reload the graph if the file changed since it was last read.
+    def _current(self):
+        return self.trackers[0].graph
+
+    def _swapped(self) -> None:
+        """A tracker serves a new graph: point at it and drop what the old one cached.
 
         DECISION: caches keyed on the graph object or on node ids must die with
-        the old graph — a reload that kept them would serve fresh nodes with
-        stale ranks and stale token counts.
+        the old graph — keeping them would serve fresh nodes with stale ranks
+        and stale token counts.
+        """
+        self.graph = self._current()
+        clear_pagerank_cache()
+        clear_node_token_cache()
+        clear_left_out_cache()
+
+    def start(self) -> None:
+        """Check and refresh in the background; `initialize` does not wait for it."""
+        self.refresher.start()
+
+    def prepare(self) -> Freshness:
+        """Make the graph as current as the time limit allows, and say how current."""
+        return self.refresher.prepare()
+
+    def check_reload(self) -> bool:
+        """Reload the graph if another process replaced the file (no re-index).
+
+        A missing file is not a reload: the graph in memory keeps being served.
 
         Returns:
             True if the graph was reloaded, False if it was already current.
@@ -315,83 +341,49 @@ class GraphState:
             SlurpLoadError: If the changed file could not be loaded. The
                 previously loaded graph is kept so the server stays usable.
         """
-        current = self._current_mtime()
-        if current is None or current == self.mtime:
-            return False
-
-        reloaded = load_graph(self.graph_path)  # may raise; old graph survives
-        self.graph = reloaded
-        self.mtime = current
-        clear_pagerank_cache()
-        clear_node_token_cache()
-        clear_left_out_cache()
-        return True
+        changed = False
+        for tracker in self.trackers:
+            if graph_identity(tracker.path) == ABSENT or not tracker.disk_changed():
+                continue
+            tracker.load()  # may raise; the old graph survives
+            changed = True
+        if changed:
+            self._swapped()
+        return changed
 
 
 class FederatedGraphState(GraphState):
-    """Serves several graphs merged into one, reloading when any of them changes.
+    """Serves several graphs merged into one, each member kept current on its own.
 
     Node ids are namespaced by project, so a query can cross project boundaries
-    without ids colliding. See slurp.federation.
+    without ids colliding (slurp.federation). Only slurp's own members are
+    refreshed, in order, sharing one time limit; the merge is redone whenever
+    any member changes.
     """
 
-    def __init__(self, graph_paths: list[Path], labels: list[str] | None = None) -> None:
-        from slurp.federation import derive_labels, load_graphs, merge_graphs
-        from slurp.loader import build_graph
+    def __init__(self, graph_paths: list[Path], labels: list[str] | None = None, *,
+                 refresh: bool = True, timeout: float = DEFAULT_TIMEOUT_S) -> None:
+        from slurp.federation import derive_labels
 
         self.graph_paths = list(graph_paths)
         self.labels = list(labels) if labels else derive_labels(self.graph_paths)
-        self._merge_graphs = merge_graphs
-        self._load_graphs = load_graphs
-        self._build_graph = build_graph
-
         self.graph_path = self.graph_paths[0]
-        self.graph = self._rebuild()
-        self.mtimes = self._current_mtimes()
-        self.mtime = self.mtimes[0] if self.mtimes else None
+        self.trackers = [GraphTracker(p) for p in self.graph_paths]
+        for tracker in self.trackers:
+            if tracker.data is None:
+                raise ValueError(f"{tracker.path}: a federation reads graph.json files only")
+        self.refresher = Refresher(self.trackers, timeout, refresh, on_swap=self._swapped)
+        self.graph = self._current()
 
     @property
     def graphs_count(self) -> int:  # type: ignore[override]
         return len(self.graph_paths)
 
-    def _rebuild(self):
-        merged = self._merge_graphs(self._load_graphs(self.graph_paths), self.labels)
-        return self._build_graph(merged)
+    def _current(self):
+        from slurp.federation import merge_graphs
+        from slurp.loader import build_graph
 
-    def _current_mtimes(self) -> list[float | None]:
-        result: list[float | None] = []
-        for path in self.graph_paths:
-            try:
-                result.append(path.stat().st_mtime)
-            except OSError:
-                result.append(None)
-        return result
-
-    def check_reload(self) -> bool:
-        """Re-merge every graph if any one of them changed on disk.
-
-        A federated graph is only as fresh as its stalest member, so a change to
-        any single file invalidates the whole merge.
-
-        Returns:
-            True if the graphs were re-merged.
-
-        Raises:
-            SlurpLoadError: If the changed set could not be re-read. The
-                previously merged graph is kept so the server stays usable.
-        """
-        current = self._current_mtimes()
-        if any(m is None for m in current) or current == self.mtimes:
-            return False
-
-        rebuilt = self._rebuild()  # may raise; old graph survives
-        self.graph = rebuilt
-        self.mtimes = current
-        self.mtime = current[0]
-        clear_pagerank_cache()
-        clear_node_token_cache()
-        clear_left_out_cache()
-        return True
+        return build_graph(merge_graphs([t.data for t in self.trackers], self.labels))
 
 
 # ---------------------------------------------------------------------------
@@ -517,39 +509,78 @@ def _write(obj: dict, out) -> None:
 # ---------------------------------------------------------------------------
 
 
-_RELOAD_FAILED = (
-    "graph.json changed on disk but could not be reloaded: {kind}: {exc}. "
-    "Still serving the previously loaded graph — fix the file and query again."
-)
+class _Invalid(Exception):
+    """Arguments the call cannot work with (JSON-RPC -32602)."""
 
 
-def _handle_explain(msg_id, args: dict, G, out) -> None:
-    """Answer a slurp_explain call against the graph already loaded.
+class _Failed(Exception):
+    """The tool ran and failed: a result with isError and a readable message."""
+
+
+def _positive_int(args: dict, name: str, default: int) -> int:
+    value = args.get(name, default)
+    # JSON numbers may arrive as floats; whole-number floats are accepted.
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise _Invalid(f"'{name}' must be a positive integer")
+    return value
+
+
+def _required_text(args: dict, name: str) -> str:
+    value = args.get(name)
+    if not value or not isinstance(value, str):
+        raise _Invalid(f"Missing required argument: {name!r}")
+    return value
+
+
+def _tool_query(args: dict, G) -> tuple[str, dict]:
+    """slurp_query: the subgraph for a query, within a token budget."""
+    query = _required_text(args, "query")
+    budget = _positive_int(args, "budget", 4000)
+    flags = _include_flags(args)
+    if isinstance(flags, str):
+        raise _Invalid(flags)
+    include_tests, include_imports = flags
+    # DECISION: any failure inside scoring/selection/formatting used to
+    # propagate out of the read loop and kill the server, leaving the
+    # in-flight request unanswered and the client staring at a dead pipe.
+    # Report it as a tool error instead so the session survives.
+    try:
+        scores = score_nodes(G, query)
+        # Read per call, like the LLM config: export SLURP_TOKEN_FACTOR in the
+        # server's environment (.mcp.json "env") to budget in Claude tokens.
+        text, _subG, stats = build_context(G, scores, budget=budget, min_score=_MIN_SCORE,
+                                           query=query, token_factor=resolve_token_factor(),
+                                           include_tests=include_tests,
+                                           include_imports=include_imports)
+    except BudgetTooSmallError as exc:
+        # The caller's budget argument cannot work: an invalid parameter.
+        raise _Invalid(str(exc)) from None
+    except Exception as exc:
+        raise _Failed(f"slurp_query failed: {type(exc).__name__}: {exc}") from None
+    return text, {"query": query, "budget": budget, "stats": stats}
+
+
+def _tool_explain(args: dict, G) -> tuple[str, dict]:
+    """slurp_explain: one node's role, callers, and risk.
 
     Every failure past argument validation becomes a tool error rather than an
     exception: a missing node or an unreachable provider is the caller's
     problem to read, not a reason to take the session down.
     """
-    node_name = args.get("node_name")
-    if not node_name or not isinstance(node_name, str):
-        _write(_err(msg_id, -32602, "Missing required argument: 'node_name'"), out)
-        return
-
+    node_name = _required_text(args, "node_name")
     no_llm = args.get("no_llm", True)
     if not isinstance(no_llm, bool):
-        _write(_err(msg_id, -32602, "'no_llm' must be a boolean"), out)
-        return
+        raise _Invalid("'no_llm' must be a boolean")
 
     try:
         scores = score_nodes(G, node_name)
         node_id = find_node(G, node_name, scores)
     except SlurpExplainError as exc:
-        _write(_tool_err(msg_id, f"slurp_explain failed: {exc}"), out)
-        return
+        raise _Failed(f"slurp_explain failed: {exc}") from None
     except Exception as exc:
-        _write(_tool_err(
-            msg_id, f"slurp_explain failed: {type(exc).__name__}: {exc}"), out)
-        return
+        raise _Failed(f"slurp_explain failed: {type(exc).__name__}: {exc}") from None
 
     # DECISION: the config is resolved per call rather than at startup. A user
     # who exports an API key mid-session gets prose without restarting the
@@ -572,57 +603,32 @@ def _handle_explain(msg_id, args: dict, G, out) -> None:
             result.warning = f"LLM not used: {refused}"
         text = format_explanation(result)
     except Exception as exc:
-        _write(_tool_err(
-            msg_id, f"slurp_explain failed: {type(exc).__name__}: {exc}"), out)
-        return
+        raise _Failed(f"slurp_explain failed: {type(exc).__name__}: {exc}") from None
+    attrs = G.nodes.get(node_id, {})
+    return text, {"node_name": node_name, "node": node_id,
+                  "file": str(attrs.get("source_file") or attrs.get("file_path") or "")}
 
-    _write(_ok(msg_id, {"content": [{"type": "text", "text": text}]}), out)
 
-
-def _handle_impact(msg_id, args: dict, G, out) -> None:
-    """Answer a slurp_impact call against the graph already loaded."""
-    file_path = args.get("file_path")
-    if not file_path or not isinstance(file_path, str):
-        _write(_err(msg_id, -32602, "Missing required argument: 'file_path'"), out)
-        return
-
-    hops = args.get("hops", 2)
-    if isinstance(hops, float) and hops.is_integer():
-        hops = int(hops)
-    if not isinstance(hops, int) or hops < 1:
-        _write(_err(msg_id, -32602, "'hops' must be a positive integer"), out)
-        return
-
+def _tool_impact(args: dict, G) -> tuple[str, dict]:
+    """slurp_impact: what editing a file could break, from the graph already loaded."""
+    file_path = _required_text(args, "file_path")
+    hops = _positive_int(args, "hops", 2)
     try:
         result = analyze_impact(G, file_path, hops=hops)
         text = format_impact(result, G)
     except Exception as exc:
-        _write(_tool_err(
-            msg_id, f"slurp_impact failed: {type(exc).__name__}: {exc}"), out)
-        return
-
-    _write(_ok(msg_id, {"content": [{"type": "text", "text": text}]}), out)
+        raise _Failed(f"slurp_impact failed: {type(exc).__name__}: {exc}") from None
+    return text, {"file_path": file_path, "hops": hops, "risk": result.risk_level}
 
 
-def _handle_suggest(msg_id, args: dict, G, out) -> None:
-    """Answer a slurp_suggest call by re-running the cut and reading its edge."""
-    query = args.get("query")
-    if not query or not isinstance(query, str):
-        _write(_err(msg_id, -32602, "Missing required argument: 'query'"), out)
-        return
-
-    budget = args.get("budget", 4000)
-    if isinstance(budget, float) and budget.is_integer():
-        budget = int(budget)
-    if not isinstance(budget, int) or budget <= 0:
-        _write(_err(msg_id, -32602, "'budget' must be a positive integer"), out)
-        return
+def _tool_suggest(args: dict, G) -> tuple[str, dict]:
+    """slurp_suggest: re-run the cut and read its edge."""
+    query = _required_text(args, "query")
+    budget = _positive_int(args, "budget", 4000)
     flags = _include_flags(args)
     if isinstance(flags, str):
-        _write(_err(msg_id, -32602, flags), out)
-        return
+        raise _Invalid(flags)
     include_tests, include_imports = flags
-
     try:
         scores = score_nodes(G, query)
         subG, _stats = select_subgraph(G, scores, budget=budget, min_score=_MIN_SCORE,
@@ -632,57 +638,87 @@ def _handle_suggest(msg_id, args: dict, G, out) -> None:
         text = format_suggestions(suggest_queries(
             G, query, scores, subG, exclude=_left_out(G, include_tests, include_imports)))
     except BudgetTooSmallError as exc:
-        _write(_err(msg_id, -32602, str(exc)), out)
-        return
+        raise _Invalid(str(exc)) from None
     except Exception as exc:
-        _write(_tool_err(
-            msg_id, f"slurp_suggest failed: {type(exc).__name__}: {exc}"), out)
-        return
-
+        raise _Failed(f"slurp_suggest failed: {type(exc).__name__}: {exc}") from None
     if not text:
         text = ("No follow-up suggested: the budget already covers this "
                 "neighbourhood.")
-    _write(_ok(msg_id, {"content": [{"type": "text", "text": text}]}), out)
+    return text, {"query": query, "budget": budget}
 
 
-def _handle_diff(msg_id, args: dict, out) -> None:
-    """Answer a slurp_diff call by comparing two graph files on disk."""
-    old_path = args.get("old_graph")
-    new_path = args.get("new_graph")
-    for label, value in (("old_graph", old_path), ("new_graph", new_path)):
-        if not value or not isinstance(value, str):
-            _write(_err(msg_id, -32602, f"Missing required argument: {label!r}"), out)
-            return
-
-    hops = args.get("hops", 2)
-    if isinstance(hops, float) and hops.is_integer():
-        hops = int(hops)
-    if not isinstance(hops, int) or hops < 1:
-        _write(_err(msg_id, -32602, "'hops' must be a positive integer"), out)
-        return
-
+def _tool_diff(args: dict, G=None) -> tuple[str, dict]:
+    """slurp_diff: compare two graph files on disk."""
+    old_path = _required_text(args, "old_graph")
+    new_path = _required_text(args, "new_graph")
+    hops = _positive_int(args, "hops", 2)
     try:
         old_graph = load_graph(Path(old_path))
         new_graph = load_graph(Path(new_path))
     except SlurpLoadError as exc:
-        _write(_tool_err(msg_id, f"slurp_diff could not load a graph: {exc}"), out)
-        return
+        raise _Failed(f"slurp_diff could not load a graph: {exc}") from None
     except OSError as exc:
-        _write(_tool_err(msg_id, f"slurp_diff could not read a graph: {exc}"), out)
-        return
+        raise _Failed(f"slurp_diff could not read a graph: {exc}") from None
     except Exception as exc:
-        _write(_tool_err(
-            msg_id, f"slurp_diff failed: {type(exc).__name__}: {exc}"), out)
-        return
-
+        raise _Failed(f"slurp_diff failed: {type(exc).__name__}: {exc}") from None
     try:
         text = format_diff(diff_graphs(old_graph, new_graph), new_graph, hops=hops)
     except Exception as exc:
-        _write(_tool_err(
-            msg_id, f"slurp_diff failed: {type(exc).__name__}: {exc}"), out)
+        raise _Failed(f"slurp_diff failed: {type(exc).__name__}: {exc}") from None
+    return text, {"old_graph": old_path, "new_graph": new_path}
+
+
+_HANDLERS = {
+    "slurp_query": _tool_query,
+    "slurp_explain": _tool_explain,
+    "slurp_impact": _tool_impact,
+    "slurp_suggest": _tool_suggest,
+    "slurp_diff": _tool_diff,
+}
+
+
+def _call_tool(msg_id, params: dict, G, out, session_log: bool,
+               state: "GraphState | None") -> None:
+    """Answer one tools/call: freshness first, then the tool, then the envelope."""
+    name = params.get("name")
+    if name not in _TOOL_NAMES:
+        _write(_err(msg_id, -32602, f"Unknown tool: {name!r}"), out)
+        return
+    args = params.get("arguments") or {}
+    if not isinstance(args, dict):
+        _write(_err(msg_id, -32602, "'arguments' must be an object"), out)
         return
 
-    _write(_ok(msg_id, {"content": [{"type": "text", "text": text}]}), out)
+    fresh: Freshness | None = None
+    if name != "slurp_diff":   # diff reads two files named by the caller
+        if state is not None:
+            fresh = state.prepare()
+            G = state.graph
+        if G is None:
+            _write(_err(msg_id, -32603, "Graph not loaded"), out)
+            return
+
+    try:
+        text, info = _HANDLERS[name](args, G)
+    except _Invalid as exc:
+        _write(_err(msg_id, -32602, str(exc)), out)
+        return
+    except _Failed as exc:
+        result: dict = {"content": [{"type": "text", "text": str(exc)}], "isError": True}
+    else:
+        if name == "slurp_query" and session_log:
+            log_session(info["query"], info["budget"], info["stats"])
+        # DECISION: the model reads only `content`, so a warning about the graph
+        # goes first in the text; the machine-readable state goes in _meta.
+        if fresh is not None and fresh.warnings:
+            text = "\n".join(fresh.warnings) + "\n\n" + text
+        result = {"content": [{"type": "text", "text": text}]}
+    if fresh is not None:
+        result["_meta"] = fresh.meta()
+    # Only present when federating, so single-graph responses are unchanged.
+    if state is not None and state.graphs_count > 1 and not result.get("isError"):
+        result["graphs_count"] = state.graphs_count
+    _write(_ok(msg_id, result), out)
 
 
 def _handle(msg: dict, G, out, session_log: bool = True, state: "GraphState | None" = None) -> None:
@@ -744,128 +780,7 @@ def _handle(msg: dict, G, out, session_log: bool = True, state: "GraphState | No
         _write(_ok(msg_id, {"prompts": []}), out)
 
     elif method == "tools/call":
-        name = params.get("name")
-        if name not in _TOOL_NAMES:
-            _write(_err(msg_id, -32602, f"Unknown tool: {name!r}"), out)
-            return
-
-        args: dict = params.get("arguments") or {}
-
-        if name == "slurp_diff":
-            _handle_diff(msg_id, args, out)
-            return
-
-        if name == "slurp_impact":
-            if state is not None:
-                try:
-                    state.check_reload()
-                except Exception as exc:
-                    _write(_tool_err(msg_id, _RELOAD_FAILED.format(
-                        kind=type(exc).__name__, exc=exc)), out)
-                    return
-                G = state.graph
-            if G is None:
-                _write(_err(msg_id, -32603, "Graph not loaded"), out)
-                return
-            _handle_impact(msg_id, args, G, out)
-            return
-
-        if name == "slurp_suggest":
-            if state is not None:
-                try:
-                    state.check_reload()
-                except Exception as exc:
-                    _write(_tool_err(msg_id, _RELOAD_FAILED.format(
-                        kind=type(exc).__name__, exc=exc)), out)
-                    return
-                G = state.graph
-            if G is None:
-                _write(_err(msg_id, -32603, "Graph not loaded"), out)
-                return
-            _handle_suggest(msg_id, args, G, out)
-            return
-
-        if name == "slurp_explain":
-            # The same graph slurp_query serves, reload check included.
-            if state is not None:
-                try:
-                    state.check_reload()
-                except Exception as exc:
-                    _write(_tool_err(msg_id, _RELOAD_FAILED.format(
-                        kind=type(exc).__name__, exc=exc)), out)
-                    return
-                G = state.graph
-            if G is None:
-                _write(_err(msg_id, -32603, "Graph not loaded"), out)
-                return
-            _handle_explain(msg_id, args, G, out)
-            return
-
-        query = args.get("query")
-        if not query or not isinstance(query, str):
-            _write(_err(msg_id, -32602, "Missing required argument: 'query'"), out)
-            return
-
-        budget = args.get("budget", 4000)
-        # JSON numbers may arrive as floats; coerce whole-number floats to int
-        if isinstance(budget, float) and budget.is_integer():
-            budget = int(budget)
-        if not isinstance(budget, int) or budget <= 0:
-            _write(_err(msg_id, -32602, "'budget' must be a positive integer"), out)
-            return
-        flags = _include_flags(args)
-        if isinstance(flags, str):
-            _write(_err(msg_id, -32602, flags), out)
-            return
-        include_tests, include_imports = flags
-
-        graph_reloaded = False
-        if state is not None:
-            try:
-                graph_reloaded = state.check_reload()
-            except Exception as exc:
-                _write(_tool_err(msg_id, _RELOAD_FAILED.format(
-                    kind=type(exc).__name__, exc=exc)), out)
-                return
-            G = state.graph
-
-        if G is None:
-            _write(_err(msg_id, -32603, "Graph not loaded"), out)
-            return
-
-        # DECISION: any failure inside scoring/selection/formatting used to
-        # propagate out of the read loop and kill the server, leaving the
-        # in-flight request unanswered and the client staring at a dead pipe.
-        # Report it as a tool error instead so the session survives.
-        try:
-            scores = score_nodes(G, query)
-            # Read per call, like the LLM config: export SLURP_TOKEN_FACTOR in the
-            # server's environment (.mcp.json "env") to budget in Claude tokens.
-            text, subG, stats = build_context(G, scores, budget=budget, min_score=_MIN_SCORE,
-                                              query=query, token_factor=resolve_token_factor(),
-                                              include_tests=include_tests,
-                                              include_imports=include_imports)
-        except BudgetTooSmallError as exc:
-            # The caller's budget argument cannot work: an invalid parameter.
-            _write(_err(msg_id, -32602, str(exc)), out)
-            return
-        except Exception as exc:
-            _write(_tool_err(msg_id, f"slurp_query failed: {type(exc).__name__}: {exc}"), out)
-            return
-
-        if session_log:
-            log_session(query, budget, stats)
-
-        # DECISION: the flag is present only when a reload actually happened, so
-        # it reads as an event rather than a status field on every response.
-        result: dict = {"content": [{"type": "text", "text": text}]}
-        if graph_reloaded:
-            result["graph_reloaded"] = True
-        # Only present when federating, so single-graph responses are unchanged.
-        if state is not None and state.graphs_count > 1:
-            result["graphs_count"] = state.graphs_count
-
-        _write(_ok(msg_id, result), out)
+        _call_tool(msg_id, params, G, out, session_log, state)
 
     else:
         _write(_err(msg_id, -32601, f"Method not found: {method!r}"), out)
@@ -882,6 +797,8 @@ def serve(
     out: TextIO | None = None,
     session_log: bool = True,
     labels: list[str] | None = None,
+    refresh: bool | None = None,
+    refresh_timeout: float | None = None,
 ) -> None:
     """Run the MCP stdio server.
 
@@ -896,6 +813,10 @@ def serve(
         out:        Writable file-like object (defaults to sys.stdout).
         session_log: Whether to append served queries to .slurp/session.log.
         labels:     Project labels for a federated graph, one per path.
+        refresh:    Keep slurp's own graph current before each call (default:
+            SLURP_REFRESH, else on).
+        refresh_timeout: Seconds a call waits for a refresh (default:
+            SLURP_REFRESH_TIMEOUT, else 2).
     """
     if inp is None:
         inp = sys.stdin
@@ -905,16 +826,27 @@ def serve(
     paths = [graph_path] if isinstance(graph_path, Path) else list(graph_path)
 
     try:
+        enabled, seconds = resolve_refresh(refresh is False, refresh_timeout)
+    except ValueError as exc:
+        print(f"slurp: {exc}", file=sys.stderr)
+        sys.exit(1)
+    try:
         if len(paths) == 1:
-            state: GraphState = GraphState(paths[0], load_graph(paths[0]))
+            state: GraphState = GraphState(paths[0], refresh=enabled, timeout=seconds)
         else:
-            state = FederatedGraphState(paths, labels)
+            state = FederatedGraphState(paths, labels, refresh=enabled, timeout=seconds)
     except SlurpLoadError as exc:
         print(f"slurp: error loading graph: {exc}", file=sys.stderr)
         sys.exit(1)
     except ValueError as exc:
         print(f"slurp: error federating graphs: {exc}", file=sys.stderr)
         sys.exit(1)
+    for tracker in state.trackers:
+        if tracker.note:
+            print(f"slurp: {tracker.path} is served read-only: {tracker.note}",
+                  file=sys.stderr)
+    # The startup check runs in the background: `initialize` never waits on it.
+    state.start()
 
     for raw_line in inp:
         line = raw_line.strip()

@@ -3265,7 +3265,7 @@ class TestCrossFileCallResolution:
             if e["relation"] == "calls" and e["target"] == "budget.build_context"
         }
         assert "cli._run_query" in callers  # the body of `slurp QUERY` since v1.3
-        assert "mcp._handle" in callers
+        assert "mcp._tool_query" in callers  # the slurp_query handler since v1.3
 
 
 class TestGlobalSymbolIndex:

@@ -2061,7 +2061,7 @@ class TestSessionCommand:
     def test_serve_passes_log_flag_through(self, sample_graph_json, monkeypatch):
         captured: dict = {}
 
-        def fake_serve(graph_path, session_log=True, labels=None):
+        def fake_serve(graph_path, session_log=True, labels=None, **_refresh):
             captured["session_log"] = session_log
 
         import slurp.mcp as _mcp
@@ -2072,7 +2072,7 @@ class TestSessionCommand:
     def test_serve_log_flag_on_by_default(self, sample_graph_json, monkeypatch):
         captured: dict = {}
 
-        def fake_serve(graph_path, session_log=True, labels=None):
+        def fake_serve(graph_path, session_log=True, labels=None, **_refresh):
             captured["session_log"] = session_log
 
         import slurp.mcp as _mcp

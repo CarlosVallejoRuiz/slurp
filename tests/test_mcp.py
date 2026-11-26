@@ -12,6 +12,7 @@ import pytest
 
 from slurp import __version__
 from slurp.loader import load_graph
+from slurp.refresh import META_KEY
 from slurp.mcp import (
     SESSION_LOG_FILE,
     GraphState,
@@ -693,9 +694,11 @@ class TestGraphState:
         self._write_graph(path, "alpha", "AlphaNode")
         return path
 
-    def test_records_mtime_at_construction(self, graph_file):
+    def test_records_the_file_identity_at_construction(self, graph_file):
+        # v1.3: (mtime_ns, inode, size) rather than a float st_mtime.
+        from slurp.graphfile import graph_identity
         state = GraphState(graph_file, load_graph(graph_file))
-        assert state.mtime == graph_file.stat().st_mtime
+        assert state.identity == graph_identity(graph_file)
 
     def test_no_reload_when_unchanged(self, graph_file):
         state = GraphState(graph_file, load_graph(graph_file))
@@ -720,13 +723,21 @@ class TestGraphState:
         assert "beta" in state.graph
         assert "alpha" not in state.graph
 
-    def test_reload_updates_mtime(self, graph_file):
+    def test_reload_updates_the_identity(self, graph_file):
         state = GraphState(graph_file, load_graph(graph_file))
-        before = state.mtime
+        before = state.identity
         self._write_graph(graph_file, "beta", "BetaNode")
         os.utime(graph_file, (time.time() + 10, time.time() + 10))
         state.check_reload()
-        assert state.mtime != before
+        assert state.identity != before
+
+    def test_a_same_second_rewrite_is_seen(self, graph_file):
+        # A float mtime compared in one-second steps could miss this; the
+        # identity carries the inode a replace brings.
+        from slurp.graphfile import write_graph
+        state = GraphState(graph_file, load_graph(graph_file))
+        write_graph(graph_file, {"nodes": [{"id": "beta", "label": "BetaNode"}], "links": []})
+        assert state.check_reload() is True
 
     def test_second_check_after_reload_is_false(self, graph_file):
         state = GraphState(graph_file, load_graph(graph_file))
@@ -798,12 +809,17 @@ class TestHandlerGraphReload:
         return GraphState(path, load_graph(path))
 
     def test_no_reload_flag_when_unchanged(self, state):
-        assert "graph_reloaded" not in self._call(state)["result"]
+        # v1.3: graph_reloaded is no longer a top-level field; the state is in _meta.
+        result = self._call(state)["result"]
+        assert "graph_reloaded" not in result
+        assert result["_meta"][META_KEY]["status"] == "readonly"
 
     def test_reload_flag_when_file_changed(self, state):
         TestGraphState._write_graph(state.graph_path, "beta", "BetaNode")
         os.utime(state.graph_path, (time.time() + 10, time.time() + 10))
-        assert self._call(state, "beta")["result"]["graph_reloaded"] is True
+        result = self._call(state, "beta")["result"]
+        assert result["_meta"][META_KEY]["status"] == "refreshed"
+        assert "graph_reloaded" not in result
 
     def test_next_query_uses_the_new_graph(self, state):
         assert "AlphaNode" in self._call(state)["result"]["content"][0]["text"]
@@ -817,13 +833,18 @@ class TestHandlerGraphReload:
         TestGraphState._write_graph(state.graph_path, "beta", "BetaNode")
         os.utime(state.graph_path, (time.time() + 10, time.time() + 10))
         self._call(state, "beta")
-        assert "graph_reloaded" not in self._call(state, "beta")["result"]
+        assert self._call(state, "beta")["result"]["_meta"][META_KEY]["status"] == "readonly"
 
-    def test_corrupt_reload_returns_tool_error(self, state):
+    def test_corrupt_reload_answers_from_the_old_graph_with_a_warning(self, state):
+        # v1.3: as for a failed refresh, the previous graph answers and the
+        # first line says why (it was an isError result until v1.2.1).
         state.graph_path.write_text("{not valid json", encoding="utf-8")
         os.utime(state.graph_path, (time.time() + 10, time.time() + 10))
         result = self._call(state)["result"]
-        assert result["isError"] is True
+        assert "isError" not in result
+        assert result["_meta"][META_KEY]["status"] == "failed"
+        assert result["content"][0]["text"].startswith("⚠ ")
+        assert "AlphaNode" in result["content"][0]["text"]
 
     def test_corrupt_reload_message_is_actionable(self, state):
         state.graph_path.write_text("{not valid json", encoding="utf-8")

@@ -975,7 +975,9 @@ def benchmark_cmd(
               help="Name for each --graph, in the same order.")
 @click.option("--log/--no-log", "log", default=True, show_default=True,
               help="Append served queries to .slurp/session.log (only if .slurp/ exists).")
-def serve(graph: tuple[str, ...], graph_labels: tuple[str, ...], log: bool) -> None:
+@_refresh_options
+def serve(graph: tuple[str, ...], graph_labels: tuple[str, ...], log: bool,
+          no_refresh: bool, refresh_timeout: float | None) -> None:
     """Start an MCP stdio server exposing the five slurp tools (query, explain, diff, suggest, impact)."""
     graph_paths = [Path(g) for g in graph]
     if not graph_paths:
@@ -993,11 +995,20 @@ def serve(graph: tuple[str, ...], graph_labels: tuple[str, ...], log: bool) -> N
             f"{len(graph_paths)} --graph paths — pass one label per graph."
         )
 
+    from slurp.refresh import resolve_refresh
+
+    try:
+        enabled, seconds = resolve_refresh(no_refresh, refresh_timeout)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from None
+
     import slurp.mcp as _mcp
     _mcp.serve(
         graph_paths[0] if len(graph_paths) == 1 else graph_paths,
         session_log=log,
         labels=list(graph_labels) or None,
+        refresh=enabled,
+        refresh_timeout=seconds,
     )
 
 
