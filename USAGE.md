@@ -1,7 +1,7 @@
 # Usage guide — slurp
 
 > Two ways to use slurp: fully automatically in the background (recommended), or directly from the terminal for exploration and analysis.
-> Primary flow: install → `slurp index .` → configure MCP → use Claude Code normally.
+> Primary flow: install → `slurp init` → restart Claude Code → use it normally. The graph keeps up with your edits by itself.
 
 ---
 
@@ -13,7 +13,7 @@
 slurp index .                              # index current directory → graphify-out/graph.json
 slurp index /path/to/project              # specific path
 slurp index . --output out/graph.json     # custom output path
-slurp index . --watch                     # re-index on every file save
+slurp index . --watch                     # keep graph.json current until Ctrl+C
 ```
 
 **Supported languages:** Python (stdlib `ast`) · TypeScript/JS (tree-sitter if installed, regex otherwise) · Go (regex)
@@ -33,9 +33,24 @@ The generated `graph.json` is fully compatible with graphify's format — you ca
 
 ## Automatic Mode (recommended)
 
-Once configured, **slurp requires no manual intervention**. It runs in the background as an MCP server. Every time Claude Code needs codebase context, it calls slurp automatically, receives the optimal subgraph, and uses it as context. The user works with Claude Code exactly as they always have.
+Once configured, **slurp requires no manual intervention**. It runs in the background as an MCP server. Every time Claude Code needs codebase context, it calls slurp automatically, receives the optimal subgraph, and uses it as context — from a graph refreshed before each answer if your files changed, without asking you to approve anything. The user works with Claude Code exactly as they always have.
 
-### Setup — 4 steps, one time only
+### Setup — one command
+
+```bash
+cd /path/to/your-project
+slurp init
+```
+
+`slurp init` builds slurp's graph of the project, writes `.mcp.json`, approves the server
+and its tools for Claude Code in `.claude/settings.local.json`, and adds a short paragraph
+to `CLAUDE.local.md` telling the agent when to use slurp. It shows the plan and asks
+before writing anything; see [`slurp init`](README.md#slurp-init) for every option. Then
+restart Claude Code.
+
+The four steps below are what `init` does, for doing it by hand.
+
+### Setup by hand — 4 steps, one time only
 
 **1. Install slurp-graph**
 
@@ -71,9 +86,10 @@ slurp index .
 ```
 
 Supports Python, TypeScript/JS, and Go out of the box — no LLM, no API key, no external tools.
-Re-run whenever the codebase changes significantly (or use `slurp index . --watch` for live updates).
+No need to re-run it: the server and the query commands refresh slurp's graph before
+answering whenever files changed.
 
-> **Already using graphify?** Slurp works with your existing `graph.json` out of the box — skip this step and point `.mcp.json` at your graphify output directly.
+> **Already using graphify?** Slurp serves your existing `graph.json` as it is — but it cannot refresh a graph graphify built. For a graph that follows your edits, index into `graphify-out/slurp-graph.json` (`slurp index . -o graphify-out/slurp-graph.json`, which is what `slurp init` does) and point `.mcp.json` there; slurp finds that file before graphify's.
 
 **3. Configure `.mcp.json` at the project root**
 
@@ -107,7 +123,10 @@ If you installed with `uv add` inside a Python project, use `uv run` instead so 
 
 **4. Restart Claude Code**
 
-Save `.mcp.json` at your project root and restart Claude Code. Done.
+Save `.mcp.json` at your project root and restart Claude Code. Claude Code asks once to use
+the project's server and before each tool call; answer "don't ask again", or add
+`"enabledMcpjsonServers": ["slurp"]` and `"mcp__slurp__*"` in `permissions.allow` to
+`.claude/settings.local.json` — what `slurp init` writes.
 
 ---
 
@@ -430,8 +449,11 @@ slurp index . --output graph.json
 # Specific project root
 slurp index /path/to/project
 
-# Live re-indexing on file changes
+# Keep graph.json current until Ctrl+C (checks every second)
 slurp index . --watch
+
+# Re-parse only what changed since the graph was built
+slurp index . --smart
 
 # graphify-out/graph.json already holds graphify's graph? Keep both...
 slurp index . -o graphify-out/slurp-graph.json
@@ -454,7 +476,8 @@ Next: slurp "your query" --graph /path/to/prismastats/graphify-out/graph.json
 | Flag | Default | Description |
 |---|---|---|
 | `--output`, `-o` | `<path>/graphify-out/graph.json` | Output path for graph.json. |
-| `--watch` | off | Re-index on file changes (watchdog included). |
+| `--watch` | off | Keep the graph current until Ctrl+C: polls every second, refreshes after a quiet second. Only needed for tools that read `graph.json` outside slurp. |
+| `--smart` | off | Re-parse only the files whose content changed (from the graph's manifest; git for graphs from slurp ≤ 1.2). |
 | `--ignore-file` | `.slurpignore` | Exclusion rules (same file used for queries). |
 
 `.slurpignore` is applied during indexing, so excluded nodes never enter the graph:
@@ -475,7 +498,7 @@ Start the MCP server manually (normally not needed — Claude Code launches it a
 slurp serve --graph graphify-out/graph.json
 ```
 
-Useful for debugging the MCP integration or connecting other tools that support the JSON-RPC 2.0 protocol.
+Useful for debugging the MCP integration or connecting other tools that support the JSON-RPC 2.0 protocol. Before each call it refreshes slurp's own graph if files changed (waiting at most 2 s; `--refresh-timeout`, `--no-refresh`, or `SLURP_REFRESH_TIMEOUT` / `SLURP_REFRESH=0`), and leaves graphify's graph as it is.
 
 ---
 
@@ -490,7 +513,7 @@ Useful for debugging the MCP integration or connecting other tools that support 
 | Generating context for ChatGPT or Gemini | **Manual** → `slurp export --format chatgpt` |
 | Reviewing the impact of a large refactor | **Manual** → `slurp diff before.json after.json --viz` |
 | Understanding which code the agent visits most | **Manual** → `slurp audit --top-nodes 20` |
-| Codebase changes very frequently | **Automatic** + `slurp index . --watch` or regenerate in CI |
+| Codebase changes very frequently | **Automatic** — the graph is refreshed before each answer; `slurp index . --watch` only for tools that read `graph.json` directly |
 | Want real embeddings instead of TF-IDF | **Manual** → `slurp "query" --backend openai`, then set `--backend` in `.mcp.json` |
 
 ---
@@ -517,7 +540,13 @@ Every query is recorded in `.slurp/audit.jsonl`. Run `slurp audit` to see the fu
 
 **Does slurp modify the codebase or `graph.json`?**
 
-No. Slurp is read-only with respect to the graph. The only file it writes is `.slurp/audit.jsonl` (append-only, disable with `--no-audit`). The `graph.json` is never modified.
+It never modifies your code. It does rewrite **its own** graph: before answering, the MCP server and the query commands refresh slurp's `graph.json` when files changed (turn it off with `--no-refresh` or `SLURP_REFRESH=0`). A graph slurp did not build — graphify's — is never written, only read. Besides that, slurp writes `.slurp/audit.jsonl` (append-only, disable with `--no-audit`) and, if `.slurp/` exists, the MCP session log.
+
+---
+
+**How do I know the graph is up to date?**
+
+slurp checks before every answer — a few stat calls, under a millisecond — and refreshes its graph within 2 seconds when a file changed. If the refresh takes longer, the answer says so in its first line and the next one gets the new graph. In the terminal the warning goes to stderr. `slurp benchmark` and `slurp eval` never refresh: they warn when the graph is out of date.
 
 ---
 

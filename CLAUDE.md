@@ -32,7 +32,7 @@ Slurp es una herramienta CLI open source de **token-budget-aware graph navigatio
 - **rich** para CLI output con tablas, paneles y colores
 - **click** para CLI interface
 - **pathspec** para ignore patterns en `.slurpignore`
-- **watchdog** para `--watch` mode en `slurp index`
+- **watchdog** ya no: desde v1.3 `--watch` sondea el manifiesto (sin dependencia)
 - **anthropic** SDK (opcional en v1, para embeddings en v4)
 - **tree-sitter** + gramáticas por lenguaje — **extras opcionales**, nunca requeridos
 - Tests con **pytest**, linting con **ruff**, formatting con **black**
@@ -398,7 +398,7 @@ uv sync --extra rust            # solo una
     inválidos (también `BudgetTooSmallError` y los booleanos mal tipados) → JSON-RPC
     `-32602`; fallo de ejecución → `isError: true` con texto legible. Un fallo interno
     nunca mata el proceso.
-    **Cambia en la v1.3 (decisión del autor, confirmada):** con la versión de protocolo
+    **Desde la v1.3 (implementado; decisión del autor, confirmada):** con la versión de protocolo
     negociada ≥ 2025-11-25 (y la moderna, 2026-07-28), los argumentos inválidos y
     `BudgetTooSmallError` se devuelven como error de la herramienta (`isError: true`, mismo
     mensaje), como pide la especificación 2025-11-25, para que el modelo pueda corregirse.
@@ -479,8 +479,65 @@ uv sync --extra rust            # solo una
     dedup por id contra otro anterior (`util.ts` y `util.js` con los mismos símbolos) sigue
     contando como añadido. Lo cierra el manifiesto de la v1.3, que registra los ficheros
     descubiertos (`docs/design/mcp-autonomo.md` §2.1). `TestFilesWithoutNodes` lo fija.
-  - Limitación: si cambia `.slurpignore` entre dos ejecuciones, `--smart` no lo
-    detecta; hay que reindexar completo.
+  - **v1.3: `--smart` usa el manifiesto** y detecta los cambios de `.slurpignore`; el caso
+    `util.ts`/`util.js` también queda cerrado (ver la entrada de v1.3 más abajo). Lo de
+    arriba sigue valiendo para grafos sin manifiesto.
+
+- **v1.3 (en desarrollo, `main`, sin bump): slurp por MCP sin intervención** (#76, #77,
+  diseño `docs/design/mcp-autonomo.md`, verificación `docs/design/mcp-autonomo/verificacion.md`).
+  - **Manifiesto** (`slurp/manifest.py`, clave `"slurp"` de `graph.json`): los ficheros que
+    el índice **recorrió** (no los `source_file`) con `[mtime_ns, size, ino, blake2b-128]`,
+    la mtime de cada directorio recorrido (tomada *antes* de listarlo), el fichero de reglas
+    y su hash, el parser por extensión, la raíz relativa al directorio del grafo, la versión
+    y `started_ns`. Orden: stat → hash → parseo (`file_entry`), así un cambio durante el
+    índice aparece en la siguiente comprobación y nunca se pierde. `indexer.walk_source_tree`
+    hace un solo recorrido para índice y manifiesto; `iter_source_files` se apoya en él.
+  - **`ManifestChecker.check()`** solo hace stat; hashea un fichero si su stat se movió o si
+    está en la ventana de 2 s ("racily clean"); lista de nuevo solo los directorios cuya
+    mtime cambió; el listado manda (renombrados de mayúsculas); recorrido completo cada
+    30 s (o en la primera comprobación de un manifiesto de más de 30 s). **La ventana cuenta
+    desde la última verificación de cada entrada**, no desde el índice: anclada al índice,
+    `graphify-out/` y la raíz se listaban en cada llamada (2,7 ms en PrismaStats); ahora
+    0,4 ms. Rutas como cadenas, no `Path` (eran 3× el coste de los stat). Toques y
+    reescrituras idénticas no son cambios; el estado en memoria se actualiza sin reescribir
+    el grafo.
+  - **`--smart` usa el manifiesto** (sin git): solo modificados → vía rápida
+    (`smart.rebuild_modified`, compartida con el camino git); altas, bajas, `.slurpignore`,
+    otro `--ignore-file`, otra versión u otros parsers → índice completo con el motivo. Git y
+    `built_at_commit` quedan para grafos sin manifiesto (≤ 1.2), cuya reescritura ya lo
+    lleva. Cierra el caso `util.ts`/`util.js` de la v1.2.1 y la limitación de
+    `.slurpignore`. `TestSmartEquivalence` corre cada escenario por los dos caminos (104).
+  - **Propiedad** (`graphfile.graph_kind`): con manifiesto → propio; claves exactas de ≤ 1.2
+    → se adopta si el 90 % de sus `source_file` existe bajo el padre de `graphify-out/` (o el
+    directorio del grafo, ampliación del diseño), con un índice completo que escribe el
+    manifiesto; cualquier otro (graphify, genérico, GraphML…) → **solo lectura: nunca se
+    reindexa, escribe ni bloquea**, con un aviso barato si cambiaron ficheros que cubre.
+    `tests/fixtures/graphify_project` es un grafo real de graphify 0.8.33 que los tests
+    comprueban byte a byte.
+  - **`write_graph(path, data, expected)`**: compare-and-swap con la identidad
+    `(mtime_ns, ino, size)` justo antes del `os.replace` (`GraphChangedError` → el llamante
+    recarga); `GraphLock` (`.graph.json.lock`, flock/msvcrt, nunca se borra, se sigue sin él
+    si no se puede crear). El lock solo evita trabajo duplicado.
+  - **Motor** (`slurp/refresh.py`): `GraphTracker` (un fichero: dict + grafo + checker +
+    propiedad; `rebuild()` corre fuera del hilo principal, toma el lock, vía rápida o índice
+    completo, escribe con CAS; un directorio sin permiso → refresco en memoria) y
+    `Refresher` (comprobación por llamada, **un solo hilo de refresco**, espera hasta
+    `inicio + límite`, una llamada posterior no espera otra vez, fallo no reintentado hasta
+    que el disco se mueva, recarga si otro proceso escribió, el cambio de grafo siempre en el
+    hilo del llamante). `Freshness` lleva `status` (fresh/refreshed/stale/failed/readonly),
+    `refresh_ms`, `changed_files` y los avisos. Límite 2 s (`--refresh-timeout`,
+    `SLURP_REFRESH_TIMEOUT`; 0 no espera); `--no-refresh`/`SLURP_REFRESH=0` **comprueba y
+    avisa** pero no refresca (interpretación: ninguna respuesta vieja sin aviso).
+  - **CLI**: `QUERY`, `export`, `explain`, `impact`, `stats` y `advisor` refrescan
+    (`cli._Graphs`); `benchmark` y `eval` solo avisan; `diff` nada. Todo lo del refresco a
+    stderr; un refresco pendiente se termina antes de salir (`finishing graph refresh…`).
+    `audit.jsonl` lleva `"graph"`. Autodescubrimiento: `graph.json`,
+    `graphify-out/slurp-graph.json`, `graphify-out/graph.json`, `.graphify/graph.json`.
+  - **`--watch`**: sondeo del manifiesto cada 1 s, refresco tras un sondeo sin cambios, el
+    mismo `rebuild()`; **`watchdog` fuera de las dependencias**.
+  - Medido (verificación, copias desechables): comprobación 0,4 ms PrismaStats / 0,2 ms
+    slurp; vía rápida 30 / 84 ms; índice completo 0,29 / 0,59 s; peor llamada con refresco
+    completo 0,34 / 0,70 s; 0 lecturas a medias en 4.155 con `slurp index` concurrente.
 
 - **`impact.py` — el radio *antes* de editar.** `slurp diff` responde a
   posteriori comparando dos snapshots; `impact` responde antes, con el grafo
@@ -674,6 +731,10 @@ en un grafo de 3.421 — y otros de versiones antiguas sin decirlo.
   salidas nuevas listas para pegar. No forma parte de la suite: necesita PrismaStats, los
   tags, un virtualenv sin gramáticas (el ejemplo del fallback) y ~20 s.
 - Un ejemplo nuevo = una entrada en `EXAMPLES` del script + el marcador en el doc.
+- **El aviso de solo lectura** ("N files this graph covers changed after it was built…",
+  v1.3) se quita al normalizar (`READONLY_HINT`): depende de las mtimes del checkout de
+  PrismaStats, no de slurp. Una salida de la v1.3 sin publicar lleva en el marcador
+  `slurp v1.3 (unreleased)`; se cambia por la versión al publicar.
 - **El script no fija `PYTHONHASHSEED`** (desde v1.2.1). Hasta v1.2.0 lo fijaba a 0 porque la
   sugerencia de riesgo de `--suggest` desempataba por orden de set (#78). Si un ejemplo
   cambia entre dos ejecuciones del script, es un orden de set colándose en una salida: se
@@ -688,7 +749,7 @@ por debajo de la carpeta que abre el editor (`~/Desktop/Slurp/`). Todos los coma
 de este documento (`uv run pytest`, `ruff check`, `uv build`, `git`) se ejecutan
 desde `~/Desktop/Slurp/slurp/`, que es donde vive este CLAUDE.md.
 
-**Estado actual:** v1.2.1 · 2738 tests · `ruff check .` limpio. #21 (docstrings como
+**Estado actual:** v1.2.1 publicada; v1.3 en desarrollo en `main` (sin bump ni tag) · 3054 tests · `ruff check .` limpio. #21 (docstrings como
 descripción) vive en la rama `v1.2-21-docstrings` (2722 tests), sin fusionar: se retoma con
 BM25 en la v1.3 (ver "Resultados de v1.2").
 
@@ -779,6 +840,8 @@ No va en el paquete; `tests/test_latency_script.py` lo mantiene ejecutable.
 ├── scripts/latency.py         ← reproduce las cifras de README › Performance (no va en el paquete)
 ├── scripts/retrieval.py       ← recall/MRR por grupo (ajuste/validación), formato y presupuesto
 ├── scripts/readme_examples.py ← reejecuta las salidas de ejemplo de README y USAGE (no va en el paquete)
+├── docs/design/mcp-autonomo.md ← diseño aprobado de la v1.3 (#76, #77)
+├── docs/design/mcp-autonomo/  ← verificación, medición con agentes (preparada) y sus scripts
 ├── README.md
 ├── USAGE.md
 ├── pyproject.toml
@@ -800,7 +863,11 @@ No va en el paquete; `tests/test_latency_script.py` lo mantiene ejecutable.
 │   ├── injector.py        ← extrae código fuente real para --inject-code (v0.5.0)
 │   ├── indexer.py         ← indexador estático autónomo (v0.6.0)
 │   ├── smart.py           ← re-indexado incremental (--smart), equivalente a un índice completo
-│   ├── graphfile.py       ← write_graph: única escritura de graph.json, atómica (v1.2.1)
+│   ├── graphfile.py       ← write_graph (atómica, CAS), GraphLock, propiedad del grafo
+│   ├── manifest.py        ← manifiesto en graph.json y comprobación barata (v1.3)
+│   ├── refresh.py         ← GraphTracker + Refresher: frescura bajo demanda (v1.3)
+│   ├── clients.py         ← settings.local.json, párrafo del agente, fragmentos (init, v1.3)
+│   ├── session.py         ← log de sesión v2 y resúmenes por sesión (v1.3)
 │   ├── advisor.py         ← recomienda budget óptimo desde el historial de queries
 │   ├── federation.py      ← mergea varios grafos en uno (--graph repetido)
 │   ├── explainer.py       ← explica un nodo en lenguaje natural (LLM + fallback estructural)
@@ -826,6 +893,17 @@ No va en el paquete; `tests/test_latency_script.py` lo mantiene ejecutable.
     ├── test_indexer.py
     ├── test_smart.py
     ├── test_graphfile.py
+    ├── test_manifest.py
+    ├── test_refresh.py
+    ├── test_cli_refresh.py
+    ├── test_mcp_refresh.py
+    ├── test_mcp_protocol.py
+    ├── test_watch.py
+    ├── test_init.py
+    ├── test_clients.py
+    ├── test_session.py
+    ├── test_measurement_scripts.py
+    ├── fixtures/graphify_project/  ← grafo real de graphify 0.8.33, solo lectura
     ├── test_advisor.py
     ├── test_federation.py
     ├── test_explainer.py
@@ -1092,15 +1170,44 @@ def build_html(
 
 ### `slurp/mcp.py`
 
-Servidor MCP stdio, protocolo JSON-RPC 2.0, stdlib pura.
+Servidor MCP stdio, protocolo JSON-RPC 2.0, stdlib pura. Cinco herramientas: `slurp_query`,
+`slurp_explain`, `slurp_diff`, `slurp_suggest`, `slurp_impact`.
 
-**Herramienta expuesta:** `slurp_query(query: str, budget: int = 4000) -> str`
-
-**Métodos soportados:** `initialize`, `ping`, `tools/list`, `tools/call`
+- **Estado del grafo** (v1.3): `GraphState`/`FederatedGraphState` sobre `GraphTracker` +
+  `Refresher`; `prepare()` antes de cada herramienta que lee el grafo (no `slurp_diff`). El
+  aviso va **al principio del texto** (el modelo solo lee `content`) y el estado en
+  `_meta["dev.imjuank.slurp/graph"]`; `graph_reloaded` de primer nivel desapareció. El
+  refresco de arranque va en segundo plano y no retrasa `initialize`. Una recarga que falla
+  responde con el grafo anterior y aviso (antes `isError`). `check_reload()` se conserva
+  (recarga sin reindexar). La identidad `(mtime_ns, ino, size)` sustituye al `st_mtime` en
+  float.
+- **Manejadores** `_tool_*` devuelven `(texto, info)` o lanzan `_Invalid` / `_Failed`;
+  `_call_tool` arma el sobre en un solo sitio (`_Outcome`).
+- **Textos** (§5.3): instrucciones y descripciones aprobadas, comparadas en
+  `tests/test_mcp_protocol.py` con los bloques del documento de diseño. Última frase según
+  `_variant(state)`: own / graphify / readonly (la tercera no está en el diseño). Solo
+  `slurp_query` lleva `_meta: {"anthropic/alwaysLoad": true}`.
+- **Versiones** (§6): `LEGACY_VERSIONS` en `initialize` (eco o `2025-11-25`, fijo por proceso,
+  en `Session`); una petición con `_meta["io.modelcontextprotocol/protocolVersion"]` =
+  `2026-07-28` se sirve sin estado (`resultType: "complete"` y `serverInfo` en `_meta`;
+  `ttlMs`/`cacheScope: "private"` en `tools/list`; `ping` → `-32601`); versión desconocida →
+  `-32022` con `supported`/`requested`. `server/discover` responde. `title` de primer nivel
+  desde 2025-06-18. Lotes JSON-RPC solo en 2025-03-26 (`_serve_lines`).
+- **Errores**: argumentos inválidos y `BudgetTooSmallError` → `isError` desde 2025-11-25 y en
+  la moderna, `-32602` antes (y sin `initialize`); herramienta desconocida → `-32602`
+  siempre.
+- **Log de sesión v2** (`slurp/session.py`, opt-in si existe `.slurp/`): `start` (grafo,
+  propietario, versión), una línea `call` por llamada a cualquiera de las cinco (sesión
+  pid+hora, cliente, protocolo, herramienta, args resumidos —`file` resuelto en explain—,
+  ms, estado del grafo, `refresh_ms`, `changed` (número + primeros 20), nodes/tokens,
+  `error`; también las fallidas) y `end` al llegar EOF con los ficheros cambiados desde una
+  instantánea tomada antes del primer mensaje (~50 ms en PrismaStats). `slurp session`
+  muestra Tool/Asked/Graph; `--sessions` resume por sesión. Las líneas v1 se siguen leyendo;
+  `slurp.mcp.log_session` y `read_session_log` se conservan.
 
 **Uso:**
 ```bash
-slurp serve --graph graph.json
+slurp serve --graph graph.json [--no-refresh] [--refresh-timeout 2]
 ```
 
 **Configuración `.mcp.json`:**
@@ -1144,9 +1251,9 @@ fichero vivo: el servidor MCP podía cargar un grafo a medias.
 - **Windows**: `os.replace` da `PermissionError` si otro proceso tiene el fichero abierto; se
   reintenta con esperas crecientes (`_REPLACE_RETRY_DELAYS_S`, ~1,9 s en total). En POSIX un
   `PermissionError` es un problema real y sale al momento.
-- Sin compare-and-swap ni lock: van en la v1.3 (`docs/design/mcp-autonomo.md` §2.3), que
-  amplía esta misma función. `TestEveryWriterIsAtomic` comprueba que cada escritor pasa
-  por `os.replace`.
+- **v1.3**: `expected=` hace compare-and-swap (`GraphChangedError`), devuelve la identidad
+  escrita; `GraphLock`; `graph_kind`/`is_foreign_graph` viven aquí (el CLI los reexporta).
+  `TestEveryWriterIsAtomic` comprueba que cada escritor pasa por `os.replace`.
 
 ---
 
@@ -1229,39 +1336,57 @@ graphify también lo escribe.** `_SLURP_GRAPH_KEYS` acepta además `slurp` (v1.2
 manifiesto que escribirá la v1.3 (`docs/design/mcp-autonomo.md` §2.1); la v1.2.1 no lo
 escribe, pero reindexa ese grafo como propio en vez de preguntar. Un fichero que no parsea cuenta como ajeno. Sin
 `--force` se pregunta con default *no* (sin TTY lee EOF y aborta); `--smart` sobre un
-grafo ajeno hace un índice completo en vez de fusionar; `slurp init` pregunta lo mismo
-si el usuario rechaza reutilizarlo. Un grafo genérico `{nodes, links}` no se distingue
-del de slurp y se trata como propio.
+grafo ajeno hace un índice completo en vez de fusionar; `slurp init` construye el suyo en
+`graphify-out/slurp-graph.json` y no toca el ajeno. Un grafo genérico `{nodes, links}` no se
+distingue del de slurp y `slurp index` lo trata como propio — pero el **refresco** usa
+`graph_kind` (detección positiva): sin manifiesto ni claves exactas de ≤ 1.2, solo lectura.
 
-**Auto-discovery de graph.json** (sin --graph):
+**Auto-discovery de graph.json** (sin --graph; v1.3 añade `slurp-graph.json`, una
+preferencia: solo existe si el usuario o `init` lo eligieron):
 1. `./graph.json`
-2. `./graphify-out/graph.json`
-3. `./.graphify/graph.json`
+2. `./graphify-out/slurp-graph.json`
+3. `./graphify-out/graph.json`
+4. `./.graphify/graph.json`
 
 ### `slurp init` — setup guiado
 
-Punto de entrada para un proyecto nuevo. No requiere flags. Secuencia:
+Punto de entrada para un proyecto nuevo. No requiere flags. Todo se decide en el plan
+antes de escribir nada (v1.3, diseño §5.2 y §5.4):
 
-1. **Detecta el lenguaje dominante** contando ficheros indexables por extensión.
-   Reutiliza `iter_source_files()` del indexer, así que `node_modules/`, `.venv/`
-   y demás directorios vendorizados no falsean el conteo. Empates por orden
-   alfabético para que la salida sea determinista.
-2. **Muestra un panel con el plan y pide confirmación.** Nada se escribe antes.
-3. **Indexa** a `graphify-out/graph.json` con progress bar real, alimentado por
-   el callback `on_file` de `index_project()`. Si ya existe un grafo
-   (auto-discovery), ofrece reutilizarlo en lugar de re-indexar.
-4. **Escribe `.mcp.json`** con la ruta absoluta del binario, detectada vía
-   `shutil.which("slurp")` y clasificada como `uv tool install` o `pip install`.
-5. **Resumen final** con nodos, edges, ruta del grafo, el JSON generado y la
-   instrucción de reiniciar el asistente.
+1. **Grafo**: el propio de slurp por defecto. Sin grafo → `graphify-out/graph.json`; con uno
+   que slurp no construyó (graphify) → `graphify-out/slurp-graph.json` y el otro intacto
+   (`--keep-graphify` sirve ese, de solo lectura); con uno propio (o de ≤ 1.2 adoptable) →
+   se reutiliza. Un grafo de ≤ 1.2 no adoptable en la ruta destino se reconstruye (el plan lo
+   dice); uno ajeno en `slurp-graph.json` se pregunta y `--yes` se niega. Indexa con
+   `index_with_manifest` bajo el lock, con progress bar real en TTY.
+2. **`.mcp.json`** con la ruta absoluta del binario (`shutil.which("slurp")`).
+3. **`.claude/settings.local.json`** en la raíz git (o el directorio actual):
+   `enabledMcpjsonServers: ["slurp"]` + `mcp__slurp__*` en `permissions.allow`
+   (`clients.merge_claude_settings`): sin duplicar, JSON inválido intacto con el fragmento
+   impreso, `disabledMcpjsonServers` respetado, reglas deny/ask conservadas y avisadas.
+4. **Párrafo para el agente** (`clients.plan_instructions` / `write_instructions`):
+   `--instructions local` (por defecto, `CLAUDE.local.md`; empieza con `@AGENTS.md` si solo
+   hay `AGENTS.md` y ningún `CLAUDE.md` en el directorio o por encima —sin contar `~`—;
+   aviso si hay `AGENTS.md` anidados), `versioned` (tabla CLAUDE.md/AGENTS.md del diseño) o
+   `none`. Nunca dos veces: marcadores reemplazados donde estén; un fichero que ya menciona
+   `slurp_query`/`mcp__slurp` no se toca.
+5. **`.gitignore`**: `.slurp/` (como siempre) y, si git no los ignora ya
+   (`git check-ignore`), `.claude/settings.local.json` (en el `.gitignore` de la raíz git) y
+   `CLAUDE.local.md`. Sin `.gitignore` → aviso; un `settings.local.json` versionado → aviso
+   con `git rm --cached` (PrismaStats lo versiona).
+6. **Resumen** con los fragmentos de Codex, Gemini CLI y Cursor, impresos, no escritos.
 
 | Flag | Default | Descripción |
 |---|---|---|
-| `--yes`, `-y` | off | Acepta todos los prompts. Para CI y scripting. |
+| `--yes`, `-y` | off | Acepta el plan y todos los prompts. Para CI y scripting. |
+| `--keep-graphify` | off | Sirve el grafo que slurp no construyó en vez de construir el suyo al lado. |
+| `--instructions` | `local` | `local` / `versioned` / `none`. |
 
 **Invariantes que no se deben romper:**
 - `.mcp.json` existente **nunca se machaca a ciegas**: se pregunta primero y los
   demás MCP servers del fichero se preservan. Solo se reemplaza la entrada `slurp`.
+- Un fichero de settings **nunca se sobrescribe**: se fusiona o se deja como está.
+- El grafo de graphify **nunca se escribe**.
 - El progress bar se desactiva fuera de TTY para no meter ANSI en pipes ni en
   las capturas de CliRunner.
 - La ruta del binario en `.mcp.json` es absoluta: los clientes MCP lanzan el
@@ -1271,6 +1396,8 @@ Punto de entrada para un proyecto nuevo. No requiere flags. Secuencia:
   aplica las mismas reglas** (v1.1.1, #45) tras cada escritura de `config.json`, con
   cualquier clave, y solo si el directorio de config se llama `.slurp` y está bajo el
   directorio actual (`_gitignore_config_dir`): si no, la línea no lo cubriría.
+- Los tests de init aíslan git de la configuración global (`GIT_CONFIG_GLOBAL`,
+  `XDG_CONFIG_HOME`): Claude Code añade `**/.claude/settings.local.json` al excludes global.
 
 ---
 
@@ -1362,7 +1489,8 @@ Punto de entrada para un proyecto nuevo. No requiere flags. Secuencia:
 ## Lo que NO hacer
 
 - ❌ No crear formato de grafo propio rompiendo compatibilidad con graphify — graphify es ahora opcional, pero el formato `{nodes, links}` debe seguir siendo el mismo
-- ❌ No usar async — el CLI es síncrono
+- ❌ No usar async — el CLI es síncrono. Desde v1.3 hay **un** hilo, el de refresco: nunca
+  escribe en stdout, nunca lee stdin, nunca llama al CLI ni toca las cachés globales.
 - ❌ No añadir UI web propia — slurp es capa de query, no visualizador standalone
 - ❌ No over-engineer el scorer
 

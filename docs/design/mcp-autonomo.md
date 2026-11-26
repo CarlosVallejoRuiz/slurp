@@ -1,6 +1,9 @@
 # Diseño: slurp por MCP sin intervención del usuario (#76, #77)
 
-**Estado:** diseño aprobado por el autor, sin implementar. Fecha: 2026-11-25.
+**Estado:** diseño aprobado por el autor (2026-11-25), **implementado en `main`** (v1.3 en
+desarrollo, 2026-11-26). Verificación, desviaciones y hallazgos:
+`docs/design/mcp-autonomo/verificacion.md`. La medición con agentes (§7) está preparada en
+`docs/design/mcp-autonomo/medicion-agentes.md` y sin lanzar.
 **Punto de partida de la implementación:** v1.2.1, que sale antes en otra sesión con tres
 arreglos y un cambio de compatibilidad que este diseño da por hechos (ver §0).
 **Objetivo:** usar slurp por MCP no requiere ninguna intervención del usuario. El grafo está

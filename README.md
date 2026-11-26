@@ -340,24 +340,30 @@ Pipe the output directly into your LLM prompt, save it to a file, or use `slurp 
 
 ### `slurp init`
 
-Guided one-command setup. **New to slurp?** Run `slurp init` in your project root — it detects your language, indexes your codebase, and configures the MCP server in one step.
+Guided one-command setup. **New to slurp?** Run `slurp init` in your project root — it builds a graph that keeps itself current, registers the MCP server, approves it for Claude Code and tells your agent when to use it.
 
 ```bash
-slurp init          # from your project root — no flags needed
-slurp init --yes    # accept every prompt (CI / scripting)
+slurp init                          # from your project root — no flags needed
+slurp init --yes                    # accept the plan as shown (CI / scripting)
+slurp init --keep-graphify          # serve graphify's graph instead of building slurp's
+slurp init --instructions versioned # paragraph in CLAUDE.md / AGENTS.md instead of CLAUDE.local.md
 ```
 
-It shows you a plan and asks for confirmation before touching anything:
+It shows the whole plan and asks before writing anything:
 
-1. **Detects the dominant language** by counting `.py`, `.ts`, `.tsx`, `.js`, `.jsx` and `.go` files, ignoring vendored trees like `node_modules/` and `.venv/` inside the project (folders above the project root never count, so a project under `~/code/build/` indexes normally).
-2. **Indexes the project** into `graphify-out/graph.json` with a live progress bar. If a graph already exists, it offers to reuse it instead of re-indexing.
-3. **Writes `.mcp.json`** pointing at the slurp binary it detected — works with both `uv tool install` and `pip install` layouts. An existing `.mcp.json` is never clobbered: slurp asks first, and other MCP servers in the file are preserved.
+1. **Builds slurp's own graph**, refreshed before every answer (see [Keeping the graph current](#keeping-the-graph-current)). With no graph yet it goes to `graphify-out/graph.json`; next to a graph slurp did not build — graphify's — it goes to `graphify-out/slurp-graph.json` and graphify's file is never touched (`--keep-graphify` serves graphify's instead, read-only); a graph slurp built is reused. The language is detected by counting indexable files, ignoring vendored trees like `node_modules/` and `.venv/` (folders above the project root never count).
+2. **Writes `.mcp.json`** pointing at the slurp binary it detected — works with both `uv tool install` and `pip install` layouts. An existing `.mcp.json` is never clobbered: slurp asks first, and other MCP servers in the file are preserved.
+3. **Approves slurp for Claude Code** in `.claude/settings.local.json` at the git root: `"enabledMcpjsonServers": ["slurp"]` (the project server) and `"mcp__slurp__*"` in `permissions.allow` (its tools) — the two approvals `.mcp.json` alone does not give. It merges without duplicating, never touches a file that is not valid JSON (it prints the fragment instead), keeps a server listed in `disabledMcpjsonServers` disabled and leaves deny/ask rules about slurp in place, and says so.
+4. **Tells the agent when to use slurp**: a short paragraph, by default in `CLAUDE.local.md` (local, not versioned). When the project has only an `AGENTS.md`, the new file starts with `@AGENTS.md` so Claude Code keeps reading it. `--instructions versioned` writes to `CLAUDE.md` and/or `AGENTS.md` instead, `none` writes nothing. Running `init` again replaces the block between its markers; a file that already mentions `slurp_query` is left alone.
+5. **Keeps local files out of git**: `.slurp/`, `.claude/settings.local.json` and `CLAUDE.local.md` go to an existing `.gitignore` unless git already ignores them. With no `.gitignore` nothing is created and the summary says so; a settings file git already tracks is reported, with the `git rm --cached` that stops it.
 
-Finish by restarting your AI coding assistant to activate slurp.
+The summary also prints the configuration for **Codex, Gemini CLI and Cursor**, to copy by hand — slurp does not write them. Finish by restarting your AI coding assistant. The workspace-trust dialog Claude Code shows the first time you open a folder is still Claude Code's.
 
 | Flag | Default | Description |
 |---|---|---|
-| `--yes`, `-y` | off | Accept every confirmation prompt. Useful for CI and scripting. |
+| `--yes`, `-y` | off | Accept the plan as shown and every confirmation prompt. Useful for CI and scripting. |
+| `--keep-graphify` | off | Next to a graph slurp did not build, serve that one (slurp won't refresh it) instead of building slurp's beside it. |
+| `--instructions` | `local` | Where the agent's paragraph goes: `local` (`CLAUDE.local.md`), `versioned` (`CLAUDE.md` / `AGENTS.md`), or `none`. |
 
 ### `slurp QUERY`
 
@@ -391,6 +397,8 @@ slurp "prisma models" --backend openai
 | `--project-root` | graph dir | Root directory for resolving `source_file` paths. |
 | `--include-tests` | off | Let test code compete for a place in the subgraph. |
 | `--include-imports` | off | Let import nodes compete for a place in the subgraph. |
+| `--no-refresh` | off | Do not refresh slurp's own graph first; only warn if it is out of date. Also `SLURP_REFRESH=0`. See [Keeping the graph current](#keeping-the-graph-current). |
+| `--refresh-timeout S` | `2` | Seconds to wait for a refresh before answering from the previous graph; `0` never waits. Also `SLURP_REFRESH_TIMEOUT`. |
 
 **Tests and imports are left out by default.** Test code (anything under a `tests/`,
 `test/`, `__tests__/` or `spec/` directory, or in a file a test runner collects — see
@@ -406,8 +414,13 @@ tools `slurp_query` and `slurp_suggest`.
 **Auto-discovery** (when `--graph` is omitted):
 
 1. `./graph.json`
-2. `./graphify-out/graph.json`
-3. `./.graphify/graph.json`
+2. `./graphify-out/slurp-graph.json` — slurp's own graph next to graphify's; it exists
+   only if you or `slurp init` chose it, so it comes first
+3. `./graphify-out/graph.json`
+4. `./.graphify/graph.json`
+
+`export`, `explain`, `impact`, `stats` and `advisor` take the same `--no-refresh` and
+`--refresh-timeout`.
 
 ---
 
@@ -1018,9 +1031,13 @@ slurp serve --graph graph.json --no-log
 |---|---|---|
 | `--graph`, `-g` | auto-discover | Path to `graph.json`. Repeatable — see [federation](#multi-graph-federation). |
 | `--graph-label` | derived from path | Project name for each `--graph`, in the same order. |
-| `--log` / `--no-log` | `--log` | Append served queries to `.slurp/session.log` (only if `.slurp/` exists). |
+| `--log` / `--no-log` | `--log` | Append every tool call to `.slurp/session.log` (only if `.slurp/` exists). See [`slurp session`](#slurp-session). |
+| `--no-refresh` | off | Serve the graph as it is; answers still warn when it is out of date. Also `SLURP_REFRESH=0`. |
+| `--refresh-timeout S` | `2` | Seconds a call waits for a refresh. Also `SLURP_REFRESH_TIMEOUT`. |
 
-See [MCP Integration](#mcp-integration) for configuration.
+Before each call the server refreshes slurp's own graph if the working tree changed — see
+[Keeping the graph current](#keeping-the-graph-current). See
+[MCP Integration](#mcp-integration) for configuration.
 
 ---
 
@@ -1161,33 +1178,42 @@ from one process to the next.
 
 ### `slurp session`
 
-Shows queries processed by the MCP server in real time.
+Shows what your AI assistant asked the MCP server — every call to any of the five tools.
 
 ```bash
 slurp session --last 10
 slurp session --tail
+slurp session --sessions     # one row per server session
 ```
 
 | Flag | Default | Description |
 |---|---|---|
-| `--last N` | `20` | Number of most recent entries to show. |
+| `--last N` | `20` | Number of most recent entries (or sessions) to show. |
 | `--tail` | off | Follow the log in real time (Ctrl+C to stop). |
+| `--sessions` | off | Summarise each server session: client, duration, calls per tool, when the first call came, files changed before it, edits that had a `slurp_impact` or `slurp_explain` on that file first, answers with a warning, p95 refresh time. |
 | `--log-dir PATH` | `.slurp` | Directory containing `session.log`. |
 
-Real output with v1.2.0, after an MCP client sent two `slurp_query` calls to
+Real output, after an MCP client sent two `slurp_query` calls to
 `slurp serve --graph graph.json` on slurp's own graph — `auth flow` at budget 4000 and
 `mcp server` at 2000:
 
-<!-- example: session · slurp v1.2.0 · slurp session --last 2, after two slurp_query calls over slurp serve -->
+<!-- example: session · slurp v1.3 (unreleased) · slurp session --last 2, after two slurp_query calls over slurp serve -->
 ```
-        MCP Session Log — last 2 (.slurp/session.log)
-┏━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━━┓
-┃ Time                ┃ Query      ┃ Budget ┃ Nodes ┃ Tokens ┃
-┡━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━━┩
-│ 2026-11-25T20:24:09 │ auth flow  │  4,000 │    83 │  3,925 │
-│ 2026-11-25T20:24:09 │ mcp server │  2,000 │    43 │  1,967 │
-└─────────────────────┴────────────┴────────┴───────┴────────┘
+                   MCP Session Log — last 2 (.slurp/session.log)                    
+┏━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━━┳━━━━━━━┓
+┃ Time                ┃ Tool        ┃ Asked      ┃ Budget ┃ Nodes ┃ Tokens ┃ Graph ┃
+┡━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━━╇━━━━━━━┩
+│ 2026-11-26T09:47:23 │ slurp_query │ auth flow  │  4,000 │    83 │  3,925 │ fresh │
+│ 2026-11-26T09:47:23 │ slurp_query │ mcp server │  2,000 │    43 │  1,967 │ fresh │
+└─────────────────────┴─────────────┴────────────┴────────┴───────┴────────┴───────┘
 ```
+
+Each line of `.slurp/session.log` (JSON) records the session (process and start time), the
+client and protocol revision, the tool and its arguments in short, how long the call took,
+the graph's state, the refresh time and the files that changed, nodes and tokens, and the
+error if it failed. A `start` event names the graph and its owner; an `end` event, when the
+client disconnects, lists every file that changed during the session — in a task an agent
+did, its edits. Lines written before v1.3 are still read.
 
 No savings column, and no `savings_pct` in the log since v1.1.0: measuring the whole
 graph the way [`slurp benchmark`](#slurp-benchmark) does costs 70–700 ms per call,
@@ -1202,7 +1228,8 @@ only when `.slurp/` already exists — running any query manually creates it, an
 
 ### `slurp benchmark`
 
-Measure real token savings across queries and budgets.
+Measure real token savings across queries and budgets. It measures the graph as it is: it never
+refreshes it, and warns on stderr when slurp's own graph is out of date.
 
 ```bash
 slurp benchmark \
@@ -1252,7 +1279,8 @@ recall and MRR against labelled nodes.
 
 ### `slurp eval`
 
-Measures response quality with and without slurp context, using an LLM judge.
+Measures response quality with and without slurp context, using an LLM judge. Like
+`slurp benchmark`, it never refreshes the graph it measures and warns when it is out of date.
 
 `slurp benchmark` measures how many tokens the selector saves. It says nothing about
 whether the answer is still correct. `slurp eval` closes that loop: each question is
@@ -1331,7 +1359,7 @@ Index the project's source code and generate `graph.json` without graphify or an
 slurp index .                              # index current directory
 slurp index /path/to/project              # specific path
 slurp index . --output custom/graph.json  # custom output path
-slurp index . --watch                     # re-index on file changes
+slurp index . --watch                     # keep the graph current until Ctrl+C
 slurp index . --smart                     # only re-index what changed
 slurp index . --force                     # replace a graph another tool wrote
 ```
@@ -1340,7 +1368,8 @@ slurp index . --force                     # replace a graph another tool wrote
 > graph. If that file exists and was not written by slurp, `slurp index` asks before
 > replacing it (the default answer is no, and a non-interactive run never overwrites).
 > Keep both with `-o graphify-out/slurp-graph.json`, or replace it with `--force`.
-> `slurp init` asks the same question if you decline to reuse graphify's graph.
+> `slurp init` builds slurp's graph in `graphify-out/slurp-graph.json` by default when
+> graphify's is there.
 
 Real output, v1.2.0 on PrismaStats (the graph the retrieval figures use; the paths are placeholders):
 
@@ -1462,18 +1491,18 @@ anything else, use [`.slurpignore`](#slurpignore).
 | Flag | Default | Description |
 |---|---|---|
 | `--output`, `-o` | `<path>/graphify-out/graph.json` | Output path for graph.json. |
-| `--watch` | off | Re-index on file changes (requires watchdog, installed by default). |
-| `--smart` | off | Incremental re-index — re-parses only the files changed since the graph was built; runs a full index when a file or symbol is added, removed or renamed. |
+| `--watch` | off | Keep the graph current until Ctrl+C: checks every second, refreshes after a quiet second. See [`--watch`](#keeping-the-graph-current-with---watch). |
+| `--smart` | off | Incremental re-index — re-parses only the files changed since the graph was built; runs a full index when a file or symbol is added, removed or renamed, or `.slurpignore` changes. |
 | `--dry-run` | off | Show what `--smart` would re-index without making changes. |
 | `--ignore-file` | `.slurpignore` | Path to .slurpignore rules. |
 | `--force` | off | Overwrite the output even if another tool (e.g. graphify) wrote it. With `--smart`, a foreign graph is replaced by a full index, never merged into. |
 
 #### Incremental re-indexing with `--smart`
 
-Re-parsing every file after a two-line edit is wasted work. `slurp index` records the
-commit each graph was built from (`built_at_commit`); `--smart` asks git what changed
-since that commit — committed, staged, unstaged and untracked — adds any file modified
-after the graph was written, and re-parses only those files.
+Re-parsing every file after a two-line edit is wasted work. Every graph `slurp index` writes
+carries a manifest — the files it indexed, with stat and content hash — and `--smart`
+compares it with the disk: no git needed. Only the files whose content changed are
+re-parsed.
 
 ```bash
 slurp index . --smart
@@ -1514,8 +1543,15 @@ Next: slurp "your query" --graph /path/to/slurp/graphify-out/graph.json
 ```
 
 Edits inside function bodies — the common case — stay incremental: in the first run
-above, re-parsing `budget.py` took 0.1s where a full index would take about 0.3s. A
-graph written before v1.0.7 has no recorded commit and is rebuilt once.
+above, re-parsing `budget.py` took 0.1s where a full index would take about 0.3s. A new,
+deleted or renamed file, a changed `.slurpignore`, another `--ignore-file`, another slurp
+version or a newly installed grammar run a full index, and say so.
+
+A graph written by slurp ≤ 1.2 has no manifest: for it `--smart` asks git what changed
+since the commit the graph was built from (`built_at_commit`) — committed, staged, unstaged
+and untracked — plus any file modified after the graph was written, and falls back to a
+full index without a repository or a recorded commit. The rewritten graph carries a
+manifest from then on.
 
 `--dry-run` lists the files it would touch and exits without writing:
 
@@ -1523,8 +1559,25 @@ graph written before v1.0.7 has no recorded commit and is rebuilt once.
 slurp index . --smart --dry-run
 ```
 
-It also falls back to a full index when there is no git repository or no existing
-graph to update.
+It also runs a full index when there is no existing graph to update.
+
+#### Keeping the graph current with `--watch`
+
+```bash
+slurp index . --watch
+```
+
+After indexing, `--watch` checks the manifest every second and refreshes once a whole second
+passes with nothing else changing — so a save that writes twice, or a `git checkout` of a
+hundred files, is one refresh. New, deleted and renamed files and `.slurpignore` changes are
+all seen; skipped directories (`node_modules/` and the rest) never wake it. It prints one
+line per refresh — `↻ 1 file changed (lib/util.py) — smart update in 0.1s` — and stops with
+Ctrl+C. It needs no file-system events and no extra package (`watchdog` is no longer a
+dependency).
+
+You only need it for tools that read `graph.json` outside slurp: the MCP server and the
+query commands keep the graph current on their own (see
+[Keeping the graph current](#keeping-the-graph-current)).
 
 #### Supported languages
 
@@ -1611,6 +1664,53 @@ slurp "auth flow" --graph graphify-out/graph.json --budget 4000
 
 ---
 
+## Keeping the graph current
+
+**slurp's own graph follows the working tree.** Before every answer — each MCP call, and
+`slurp QUERY`, `export`, `explain`, `impact`, `stats` and `advisor` in the terminal — slurp
+checks whether any file changed since the graph was built, and if one did it refreshes the
+graph before answering: edits, new, deleted and renamed files and `.slurpignore` changes
+included, uncommitted work too. The answer is the one a full index would give.
+
+- **The check costs a few stat calls.** Every graph slurp writes carries a manifest (a
+  top-level `"slurp"` key in `graph.json`): the files it indexed with their size, mtime and a
+  content hash, and the mtime of every directory it walked. A file is read only when its stat
+  moved; a touch or an identical rewrite changes nothing. Measured on throwaway copies:
+  0.4 ms per call on PrismaStats (185 files), 0.2 ms on slurp's own source.
+- **A refresh takes the fast path when it can.** An edit inside function bodies re-parses
+  only that file (30 ms on PrismaStats, 84 ms on slurp); anything else runs a full index
+  (0.29 s and 0.59 s). Without git: the manifest is enough.
+- **A call waits at most 2 seconds** for a refresh. Past that it is answered from the
+  previous graph, with a warning first in the answer (over MCP) or on stderr (in the
+  terminal), and the refresh goes on; the next call gets the new graph. In the terminal the
+  command finishes the refresh before it exits — `finishing graph refresh… (Ctrl+C to skip;
+  the graph stays as it was)`.
+- **`--refresh-timeout S`** (or `SLURP_REFRESH_TIMEOUT`) changes the limit; `0` never waits.
+  **`--no-refresh`** (or `SLURP_REFRESH=0`) turns refreshing off — slurp still checks, and
+  warns when the graph is out of date. For the MCP server, set them in the `env` block of
+  `.mcp.json` or in its `args`.
+- **`slurp benchmark` and `slurp eval` never refresh**: a measurement needs a fixed graph.
+  They warn on stderr when it is out of date. `slurp diff` reads the two files you give it.
+- **Graphs slurp did not build are read-only.** graphify's graph — or any graph without the
+  manifest — is served as it is, never rewritten and never locked. When files it covers
+  changed after it was built, answers say so: `2 files this graph covers changed after it
+  was built; slurp doesn't rebuild graphify graphs — rerun graphify.` A graph written by
+  slurp ≤ 1.2 is adopted (one full index writes its manifest) when nine in ten of its files
+  exist under the project; otherwise it is read-only too, and `slurp index` once fixes that.
+- **Writing is safe.** A new graph is written to a temporary file next to the old one and
+  moved into place, so a reader sees one graph or the other, never half of one; a writer
+  whose graph changed under it (graphify, another slurp) drops its result and reloads
+  instead of overwriting. An advisory lock (`.graph.json.lock` beside the graph, never
+  deleted) keeps two slurp processes from indexing the same project at once; `slurp index`
+  run by hand waits for it.
+
+The state of the graph behind each MCP answer is also in its `_meta`, under
+`dev.imjuank.slurp/graph`: `status` (`fresh`, `refreshed`, `stale`, `failed` or
+`readonly`), `refresh_ms` and `changed_files`. `.slurp/audit.jsonl` and the session log
+record the same status.
+
+---
+
 ## Works with graphify
 
 Slurp is the query layer for [`graphify`](https://github.com/CarlosVallejoRuiz/graphify). Run graphify on your codebase, point slurp at the output.
@@ -1633,6 +1733,8 @@ slurp "auth flow" --budget 4000                   # auto-discovers graphify-out/
   "source_location": "L42"
 }
 ```
+
+slurp never rebuilds or rewrites graphify's graph: it is served read-only, and answers say when files it covers changed after it was built. For a graph that keeps up with your edits, let `slurp init` build slurp's own beside it (`graphify-out/slurp-graph.json`) — see [Keeping the graph current](#keeping-the-graph-current).
 
 The `type`, `description`, `importance`, `source_file`, and `source_location` fields are optional but improve scoring and enable `--inject-code`. Any graph with `id` + `label` on nodes and `source`/`target` on edges will work.
 
@@ -1694,11 +1796,38 @@ another; see [Choosing a budget](#choosing-a-budget).
 | `slurp_impact(file_path, hops=2)` | *What breaks if I edit this file?* | it is about to edit a file and wants the blast radius first — no second snapshot required |
 
 All five are declared `readOnlyHint` and `idempotentHint`. Claude Code uses those hints to
-run the calls in parallel and to retry them after a reconnection, not to approve them: it
-asks before each call unless you answered "don't ask again" for that tool or allow
-`mcp__slurp__*` in your permission settings. Codex does count them: with `default_tools_approval_mode = "writes"`
-it does not ask about read-only tools. `slurp_explain` reads the same graph `slurp_query` serves, reload check included, so
-the two never answer from different snapshots in one session.
+run the calls in parallel and to retry them after a reconnection, not to approve them;
+Codex does count them: with `default_tools_approval_mode = "writes"` it does not ask about
+read-only tools. They stay read-only although a call may refresh `graph.json` — a cache
+derived from the code, never the code. `slurp_explain` reads the same graph `slurp_query`
+serves, so the two never answer from different snapshots in one session.
+
+**No approvals.** `slurp init` writes what Claude Code needs to call the tools without
+asking: the project server enabled (`enabledMcpjsonServers`) and `mcp__slurp__*` allowed,
+in `.claude/settings.local.json`. Without it Claude Code asks once for the server and before
+each call unless you answer "don't ask again".
+
+**When to call which tool.** The server's instructions — what Claude Code and Codex read
+before the first call — say when to reach for slurp before grep, and which tool fits which
+moment: `slurp_query` when starting a task, `slurp_impact` before editing a file,
+`slurp_explain` before changing a function. Each tool's description says the same from its
+side; `slurp_query` is marked `anthropic/alwaysLoad`, so with tool search on its
+description is there from the start. With graphify's graph the texts say slurp does not
+rebuild it.
+
+**Protocol versions.** The server answers `initialize` with the revision the client asks
+for when it speaks it — `2025-11-25`, `2025-06-18`, `2025-03-26` or `2024-11-05` — and with
+`2025-11-25` otherwise. A client of revision `2026-07-28` names it in each request and is
+served without a session (`server/discover` answers too). From `2025-11-25` on, invalid
+arguments — a negative budget, a missing query, a budget too small for one node — come back
+as a tool error (`isError: true`) the model can read and correct; earlier revisions get
+JSON-RPC `-32602`, as an unknown tool always does.
+
+**The graph is current.** Before each call the server checks the working tree and
+refreshes slurp's own graph if something changed (see
+[Keeping the graph current](#keeping-the-graph-current)); the check runs in the background
+at startup and never holds `initialize`. `slurp serve` takes `--no-refresh` and
+`--refresh-timeout`, or `SLURP_REFRESH` / `SLURP_REFRESH_TIMEOUT` in the `env` block.
 
 A failure inside a tool comes back as `isError: true` with a readable message; it never
 takes the server down, and the next call still works.
@@ -1780,6 +1909,54 @@ Pass a custom path with `--ignore-file path/to/.slurpignore`.
 - ✅ **v1.1.1** — Maintenance: `slurp index` skips the build output of web frameworks (`.next/`, `.nuxt/`, `.svelte-kit/`, `.turbo/`, `.vercel/`, `.output/`, and `out/` when it holds a Next.js static export) and prunes skipped directories instead of walking them (PrismaStats: 4.9 s → 0.5 s, 214 fewer nodes of compiled `.next/` code); `slurp diff` reads a deleted node's risk neighbourhood from the old graph, where it still exists; `slurp config set` adds `.slurp/` to `.gitignore` as `slurp init` does; `scripts/latency.py` reproduces the Performance figures; the sdist ships only the package, its docs and the MIT `LICENSE`, which the wheel now carries too
 - ✅ **v1.2.0** — Better selection, measured: test code and import nodes no longer take places in a subgraph (`--include-tests` / `--include-imports` let them back), and a node lends its neighbour boost to at most ten neighbours, so a hub's callers no longer fill the budget — recall at `--budget 4000` in markdown 0.867 → 0.967 on PrismaStats and 0.688 → 0.875 on slurp's own graph; risk bands in `slurp explain`, `slurp impact` and `slurp diff` count production callers only, with tests shown apart; `_is_test` follows each language's test-runner conventions; `scripts/retrieval.py` measures recall on a fixed tuning/held-out split of the questions
 - ✅ **v1.2.1** — Fixes: `slurp index --smart` no longer runs a full index on every run when `.slurpignore` excludes a whole file; every command that writes `graph.json` replaces it atomically, so the MCP server never loads half a graph; `slurp impact`'s AFFECTED FILES list counts the files its headline counts; `--suggest` gives the same suggestions in every run; `--inject-code` says when it cuts a block at 100 lines; `slurp index` treats graphs written by v1.3 as its own
+- 🔧 **v1.3 (in development)** — slurp over MCP with no intervention: the graph follows the working tree (a manifest in `graph.json`, checked before every answer in 0.4 ms, refreshed within 2 s, graphify's graphs left read-only); `slurp init` builds slurp's own graph, approves the server and its tools for Claude Code and tells the agent when to use them; `--watch` polls instead of depending on watchdog; the MCP server negotiates protocol revisions up to 2026-07-28; the session log records every call
+
+### Upgrading to v1.3 (in development, unreleased)
+
+v1.3 makes slurp usable over MCP with no intervention: the graph follows the working tree,
+and `slurp init` sets Claude Code up to call slurp without approvals. What changes if you
+already use slurp:
+
+- **`graph.json` carries a manifest** — a top-level `"slurp"` key with the files the index
+  read (stat and content hash), the directories it walked, the ignore file and the parsers.
+  PrismaStats's graph grows by 39 KB (0.77 → 0.81 MB). **slurp ≤ 1.2.0 sees these graphs as
+  written by another tool**: its `slurp index` asks before overwriting one (`--force`
+  skips the question). v1.2.1 already treats them as its own; it drops the manifest when it
+  rewrites one, and v1.3 rebuilds it with one full index.
+- **The MCP server and the query commands refresh slurp's own graph, and rewrite
+  `graph.json`.** See [Keeping the graph current](#keeping-the-graph-current). Turn it off
+  with `--no-refresh` or `SLURP_REFRESH=0`; change the 2 s limit with `--refresh-timeout` or
+  `SLURP_REFRESH_TIMEOUT`. graphify's graphs are never touched.
+- **Answers may start with a warning** — a refresh still running, a refresh that failed, or
+  files a read-only graph covers that changed since it was built. The graph's state is also
+  in each MCP answer's `_meta` (`dev.imjuank.slurp/graph`); the `graph_reloaded` field the
+  server added until v1.2.1 is gone.
+- **`slurp index --smart` needs no git** for graphs with a manifest, and detects
+  `.slurpignore` changes. Git and `built_at_commit` remain for graphs from slurp ≤ 1.2.
+- **`--watch` polls instead of listening for file-system events, and `watchdog` is no
+  longer a dependency.** It also sees new, deleted and renamed files and `.slurpignore`, and
+  refreshes once per burst of changes.
+- **`slurp init`** builds slurp's own graph by default — in `graphify-out/slurp-graph.json`
+  when graphify's graph is there (`--keep-graphify` keeps serving graphify's) — writes
+  `.claude/settings.local.json` and `CLAUDE.local.md`, and adds them and `.slurp/` to an
+  existing `.gitignore`.
+- **Auto-discovery looks for `graphify-out/slurp-graph.json` before
+  `graphify-out/graph.json`.** A project with both now uses slurp's.
+- **The MCP server negotiates the protocol revision** (2024-11-05 to 2026-07-28) and answers
+  `server/discover`. From revision 2025-11-25 on, invalid arguments and a budget too small
+  come back as `isError: true` instead of JSON-RPC `-32602`; an unknown tool is still
+  `-32602`. A graph that changed on disk and cannot be reloaded is answered from the
+  previous graph with a warning, no longer as an error.
+- **The server's instructions and tool descriptions are new**, written for the model; only
+  `slurp_query` is marked `anthropic/alwaysLoad`.
+- **`readOnlyHint` does not approve anything in Claude Code** — it parallelises and retries
+  read-only calls; approvals come from `.claude/settings.local.json`, which `slurp init`
+  writes. The tools stay marked read-only although a call may refresh `graph.json`: that
+  file is a cache derived from the code.
+- **The session log changes format**: one line per call to any of the five tools (failed
+  calls included), `start` and `end` events, and `slurp session --sessions`. Older lines
+  are still read; `slurp session` shows a Tool column.
+- `.slurp/audit.jsonl` records the graph's state (`"graph"`) with each query.
 
 ### Upgrading to v1.2.1
 

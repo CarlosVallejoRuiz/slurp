@@ -65,6 +65,10 @@ MARKER = re.compile(r"^<!-- example: ([a-z0-9-]+)(?: · (.*?))? -->$")
 FENCE = re.compile(r"^(`{3,})(.*)$")
 ELISION = re.compile(r"^(…|- …|\.\.\.|… .* …|\.\.\. .* \.\.\.)$")
 TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
+# The hint a read-only graph prints when files it covers changed after it was
+# built (v1.3): it depends on the mtimes of the PrismaStats checkout, not on slurp.
+READONLY_HINT = re.compile(r"^\d+ files? this graph covers changed after it was built;.*\n?",
+                           re.M)
 # What an output block looks like, to catch one that carries no marker.
 OUTPUT_HINTS = ("╭", "┏", "┌", "✓ ", "💡", "→ File:", "Provider:", "Nodes:",
                 "Federated:", "SUGGESTED QUERIES", "RISK", "EXPLANATION",
@@ -441,6 +445,7 @@ def _looks_like_output(lang: str, body: list[str]) -> bool:
 
 
 def normalise(text: str) -> str:
+    text = READONLY_HINT.sub("", text)
     text = TIMESTAMP.sub("<time>", text)
     text = re.sub(r"(?<=in )\d+(?:\.\d+)?s\b", "<t>s", text)
     text = re.sub(r"~\d+(?:\.\d+)?s\b", "~<t>s", text)
@@ -514,7 +519,7 @@ def main() -> int:
             example = EXAMPLES[example_id]
             mine = [b for b in blocks if b.example_id == example_id]
             try:
-                output = ctx.placeholder_paths(example.run(ctx))
+                output = READONLY_HINT.sub("", ctx.placeholder_paths(example.run(ctx)))
             except SkipExample as exc:
                 print(f"SKIPPED   {example_id}: {exc}")
                 failures += 1
