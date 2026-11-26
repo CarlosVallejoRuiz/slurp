@@ -229,3 +229,29 @@ def test_instructions_takes_three_values(tmp_path, monkeypatch, bad):
     root = _project(tmp_path / "p")
     res = _init(root, monkeypatch, "--yes", "--instructions", bad)
     assert res.exit_code != 0
+
+
+class TestNeverOverwritesAGraphOfAnotherTool:
+    def test_graphifys_graph_where_slurps_would_go_is_not_replaced(self, tmp_path, monkeypatch):
+        root = tmp_path / "g"
+        shutil.copytree(FIXTURE, root)
+        theirs = root / "graphify-out" / "graph.json"
+        target = root / "graphify-out" / "slurp-graph.json"
+        theirs.rename(target)                      # graphify's graph, under slurp's name
+        before = target.read_bytes()
+        res = _init(root, monkeypatch, "--yes")
+        assert res.exit_code != 0
+        assert target.read_bytes() == before
+        assert "--keep-graphify" in res.output
+
+    def test_an_old_slurp_graph_there_is_rebuilt(self, tmp_path, monkeypatch):
+        # slurp ≤ 1.2 wrote it; its files are gone, so it cannot be adopted.
+        root = tmp_path / "g"
+        shutil.copytree(FIXTURE, root)
+        old = root / "graphify-out" / "slurp-graph.json"
+        old.write_text(json.dumps({"nodes": [{"id": "x", "label": "x",
+                                              "source_file": "gone.py"}],
+                                   "links": [], "built_at_commit": None}), encoding="utf-8")
+        res = _init(root, monkeypatch, "--yes")
+        assert res.exit_code == 0, res.output
+        assert "slurp" in json.loads(old.read_text(encoding="utf-8"))

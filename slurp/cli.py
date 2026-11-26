@@ -2072,6 +2072,13 @@ def init(yes: bool, keep_graphify: bool, instructions: str) -> None:
         raise click.Abort()
 
     # --- Step 1: graph ------------------------------------------------------
+    if not reuse and _is_foreign_graph(graph_path):
+        # Another tool's graph where slurp's would go: never replaced unasked.
+        if yes:
+            raise click.ClickException(
+                f"{graph_path} holds a graph slurp did not write. Nothing was changed; "
+                "move it, or re-run with --keep-graphify to serve it as it is.")
+        _confirm_replacing_foreign_graph(graph_path, "re-run with --keep-graphify")
     if reuse:
         data = _json.loads(graph_path.read_text(encoding="utf-8"))
         n_nodes = len(data.get("nodes", []))
