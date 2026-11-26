@@ -284,3 +284,190 @@ class TestRebuild:
         start = time.monotonic()
         assert tracker.rebuild(changes).written
         assert time.monotonic() - start >= 0.25
+
+
+# ---------------------------------------------------------------------------
+# Refresher: freshness on demand, one refresh thread, a time limit
+# ---------------------------------------------------------------------------
+
+from slurp.refresh import META_KEY, Refresher, resolve_refresh  # noqa: E402
+
+
+def _slow(monkeypatch, seconds: float, calls: list | None = None):
+    """Make every rebuild take *seconds* longer."""
+    real = GraphTracker.rebuild
+
+    def slow(self, changes, should_stop=lambda: False):
+        if calls is not None:
+            calls.append(changes.files)
+        time.sleep(seconds)
+        return real(self, changes, should_stop)
+
+    monkeypatch.setattr(GraphTracker, "rebuild", slow)
+
+
+class TestRefresher:
+    def test_nothing_changed_is_fresh(self, own_graph):
+        fresh = Refresher([GraphTracker(own_graph)]).prepare()
+        assert fresh.status == "fresh" and not fresh.warnings
+        assert fresh.meta() == {META_KEY: {"status": "fresh"}}
+
+    def test_an_edit_is_served_refreshed_within_the_limit(self, own_graph):
+        tracker = GraphTracker(own_graph)
+        refresher = Refresher([tracker], timeout=10)
+        _put(own_graph.parent.parent, "lib/util.py",
+             "def helper():\n    return 1\n\n\ndef brand_new():\n    return 2\n")
+        fresh = refresher.prepare()
+        assert fresh.status == "refreshed" and not fresh.warnings
+        assert fresh.changed_files == ["lib/util.py"]
+        assert fresh.refresh_ms is not None and fresh.refresh_ms > 0
+        assert "lib.util.brand_new" in tracker.graph
+        assert refresher.prepare().status == "fresh"
+
+    def test_past_the_limit_the_old_graph_is_served_with_a_warning(self, own_graph, monkeypatch):
+        _slow(monkeypatch, 1.0)
+        tracker = GraphTracker(own_graph)
+        refresher = Refresher([tracker], timeout=0.1)
+        _put(own_graph.parent.parent, "lib/util.py",
+             "def helper():\n    return 1\n\n\ndef late():\n    return 2\n")
+        fresh = refresher.prepare()
+        assert fresh.status == "stale"
+        assert fresh.warnings == [
+            "⚠ Graph refresh still running — 1 file changed since this graph was built "
+            "(lib/util.py). This answer may miss them; call again in a few seconds."]
+        assert "lib.util.late" not in tracker.graph
+        refresher.finish()
+        assert refresher.prepare().status == "refreshed"
+        assert "lib.util.late" in tracker.graph
+
+    def test_a_later_call_does_not_wait_again(self, own_graph, monkeypatch):
+        _slow(monkeypatch, 1.5)
+        refresher = Refresher([GraphTracker(own_graph)], timeout=0.2)
+        _put(own_graph.parent.parent, "lib/util.py", "def helper():\n    return 5\n")
+        refresher.prepare()
+        start = time.monotonic()
+        fresh = refresher.prepare()
+        assert time.monotonic() - start < 0.15
+        assert fresh.status == "stale"
+        assert fresh.warnings[0].startswith("⚠ Graph refresh in progress (started 0s ago) — ")
+        refresher.finish()
+
+    def test_never_more_than_one_refresh_at_a_time(self, own_graph, monkeypatch):
+        calls: list = []
+        _slow(monkeypatch, 0.6, calls)
+        refresher = Refresher([GraphTracker(own_graph)], timeout=0.05)
+        root = own_graph.parent.parent
+        _put(root, "lib/util.py", "def helper():\n    return 6\n")
+        refresher.prepare()
+        _put(root, "app.py", "from lib.util import helper\n\n\ndef main():\n    return 7\n")
+        refresher.prepare()
+        refresher.prepare()
+        assert len(calls) == 1
+        refresher.finish()
+
+    def test_a_failed_refresh_is_reported_and_not_retried_in_a_loop(self, own_graph, monkeypatch):
+        calls: list = []
+
+        def boom(self, changes, should_stop=lambda: False):
+            calls.append(1)
+            raise ValueError("boom")
+
+        monkeypatch.setattr(GraphTracker, "rebuild", boom)
+        refresher = Refresher([GraphTracker(own_graph)], timeout=5)
+        root = own_graph.parent.parent
+        _put(root, "lib/util.py", "def helper():\n    return 8\n")
+        first = refresher.prepare()
+        assert first.status == "failed"
+        assert first.warnings == ["⚠ Graph refresh failed: ValueError: boom"]
+        second = refresher.prepare()
+        assert second.status == "failed" and len(calls) == 1
+        time.sleep(0.01)
+        _put(root, "lib/util.py", "def helper():\n    return 9\n")   # the disk moved again
+        refresher.prepare()
+        assert len(calls) == 2
+
+    def test_disabled_checks_and_warns_but_never_writes(self, own_graph):
+        before = own_graph.read_bytes()
+        refresher = Refresher([GraphTracker(own_graph)], enabled=False,
+                              disabled_reason="auto-refresh is off")
+        _put(own_graph.parent.parent, "lib/util.py", "def helper():\n    return 10\n")
+        fresh = refresher.prepare()
+        assert fresh.status == "stale"
+        assert fresh.warnings == ["⚠ 1 file changed since this graph was built (lib/util.py) — "
+                                  "not refreshed: auto-refresh is off."]
+        assert own_graph.read_bytes() == before
+
+    def test_a_zero_limit_never_waits(self, own_graph, monkeypatch):
+        _slow(monkeypatch, 0.3)
+        refresher = Refresher([GraphTracker(own_graph)], timeout=0)
+        _put(own_graph.parent.parent, "lib/util.py", "def helper():\n    return 11\n")
+        start = time.monotonic()
+        assert refresher.prepare().status == "stale"
+        assert time.monotonic() - start < 0.2
+        refresher.finish()
+
+    def test_the_startup_refresh_runs_in_the_background(self, own_graph, monkeypatch):
+        _slow(monkeypatch, 0.4)
+        _put(own_graph.parent.parent, "lib/util.py", "def helper():\n    return 12\n")
+        refresher = Refresher([GraphTracker(own_graph)], timeout=5)
+        start = time.monotonic()
+        refresher.start()
+        assert time.monotonic() - start < 0.1      # initialize is not held up
+        assert refresher.prepare().status == "refreshed"
+
+    def test_another_process_writing_the_graph_is_a_reload(self, own_graph, tmp_path):
+        tracker = GraphTracker(own_graph)
+        refresher = Refresher([tracker])
+        root = own_graph.parent.parent
+        _put(root, "lib/more.py", "def more():\n    return 1\n")
+        write_graph(own_graph, index_with_manifest(root, own_graph, root / ".slurpignore"))
+        fresh = refresher.prepare()
+        assert fresh.status == "refreshed" and "lib.more.more" in tracker.graph
+
+    def test_a_graphify_graph_is_readonly_and_untouched(self, graphify_copy):
+        root = graphify_copy.parent.parent
+        _age(root)
+        before = graphify_copy.read_bytes()
+        refresher = Refresher([GraphTracker(graphify_copy)], timeout=5)
+        assert refresher.prepare().status == "readonly"
+        for i in range(3):
+            _put(root, "lib/util.py", f"def helper():\n    return {i}\n")
+            _put(root, f"lib/new{i}.py", "def n():\n    pass\n")
+            fresh = refresher.prepare()
+            assert fresh.status == "readonly"
+            assert fresh.warnings[0].endswith("rerun graphify.")
+        refresher.finish()
+        assert graphify_copy.read_bytes() == before
+        assert sorted(p.name for p in graphify_copy.parent.iterdir()) == ["graph.json"]
+
+    def test_federation_refreshes_only_its_own_members(self, own_graph, graphify_copy):
+        before = graphify_copy.read_bytes()
+        own, theirs = GraphTracker(own_graph), GraphTracker(graphify_copy)
+        swaps: list[int] = []
+        refresher = Refresher([own, theirs], timeout=10, on_swap=lambda: swaps.append(1))
+        _put(own_graph.parent.parent, "lib/util.py", "def helper():\n    return 13\n")
+        fresh = refresher.prepare()
+        assert fresh.status == "refreshed" and swaps == [1]
+        assert graphify_copy.read_bytes() == before
+
+
+class TestResolveRefresh:
+    def test_defaults(self, monkeypatch):
+        monkeypatch.delenv("SLURP_REFRESH", raising=False)
+        monkeypatch.delenv("SLURP_REFRESH_TIMEOUT", raising=False)
+        assert resolve_refresh() == (True, 2.0)
+
+    def test_environment(self, monkeypatch):
+        monkeypatch.setenv("SLURP_REFRESH", "0")
+        monkeypatch.setenv("SLURP_REFRESH_TIMEOUT", "0.5")
+        assert resolve_refresh() == (False, 0.5)
+
+    def test_flags_win(self, monkeypatch):
+        monkeypatch.setenv("SLURP_REFRESH_TIMEOUT", "0.5")
+        assert resolve_refresh(no_refresh=True, timeout=3) == (False, 3.0)
+
+    @pytest.mark.parametrize("bad", ["-1", "soon", "nan"])
+    def test_a_bad_timeout_is_refused(self, monkeypatch, bad):
+        monkeypatch.setenv("SLURP_REFRESH_TIMEOUT", bad)
+        with pytest.raises(ValueError, match="SLURP_REFRESH_TIMEOUT"):
+            resolve_refresh()

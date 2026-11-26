@@ -3264,7 +3264,7 @@ class TestCrossFileCallResolution:
             e["source"] for e in graph["links"]
             if e["relation"] == "calls" and e["target"] == "budget.build_context"
         }
-        assert "cli.run" in callers
+        assert "cli._run_query" in callers  # the body of `slurp QUERY` since v1.3
         assert "mcp._handle" in callers
 
 

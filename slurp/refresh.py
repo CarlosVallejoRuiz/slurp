@@ -9,9 +9,12 @@ and the change detection, slurp.graphfile the write, the lock and ownership.
 from __future__ import annotations
 
 import os
+import sys
+import threading
 import time
+import traceback
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import networkx as nx
@@ -122,8 +125,10 @@ class GraphTracker:
         self.adoptable = False
         #: Why a graph that looks like slurp's is served read-only.
         self.note = ""
-        #: Signature of the changes whose refresh last failed (not retried).
+        #: Signature of the changes whose refresh last failed (not retried),
+        #: and what it failed with.
         self.failed_signature: tuple | None = None
+        self.failed_message = ""
         self._covered: list[Path] = []
         self._built_ns = 0
         self.load()
@@ -316,3 +321,296 @@ class GraphTracker:
         self.root, self.ignore_path = rebuilt.manifest.root, rebuilt.manifest.ignore_path
         self.checker = ManifestChecker(rebuilt.manifest)
         self.failed_signature = None
+
+
+# ---------------------------------------------------------------------------
+# Freshness on demand: one refresh thread at most, a time limit per call
+# ---------------------------------------------------------------------------
+
+#: _meta key of the graph's state in every MCP answer (reverse-DNS, as the
+#: MCP specification asks of custom keys).
+META_KEY = "dev.imjuank.slurp/graph"
+
+DEFAULT_TIMEOUT_S = 2.0
+_OFF_VALUES = frozenset({"0", "false", "no", "off"})
+
+# A federation reports its worst member.
+_SEVERITY = {"fresh": 0, "readonly": 1, "refreshed": 2, "stale": 3, "failed": 4}
+
+_RELOAD_FAILED = (
+    "⚠ {path} changed on disk but could not be reloaded: {exc}. Still serving the "
+    "previously loaded graph — fix the file and try again."
+)
+
+
+def resolve_refresh(no_refresh: bool = False, timeout: float | None = None) -> tuple[bool, float]:
+    """(enabled, seconds to wait) from the flags, else SLURP_REFRESH / SLURP_REFRESH_TIMEOUT.
+
+    Raises:
+        ValueError: A timeout that is negative or not a number.
+    """
+    enabled = not no_refresh and os.environ.get("SLURP_REFRESH", "1").strip().lower() \
+        not in _OFF_VALUES
+    if timeout is None:
+        raw = os.environ.get("SLURP_REFRESH_TIMEOUT", "").strip()
+        source = "SLURP_REFRESH_TIMEOUT"
+        try:
+            timeout = float(raw) if raw else DEFAULT_TIMEOUT_S
+        except ValueError:
+            raise ValueError(f"{source}={raw!r} is not a number of seconds") from None
+    else:
+        source = "--refresh-timeout"
+    if not timeout >= 0 or timeout == float("inf"):
+        raise ValueError(f"{source} must be a number of seconds ≥ 0, got {timeout!r}")
+    return enabled, float(timeout)
+
+
+@dataclass
+class Freshness:
+    """The state of the graph an answer is served from."""
+
+    status: str = "fresh"
+    refresh_ms: float | None = None
+    changed_files: list[str] = field(default_factory=list)
+    #: Lines to put first in an MCP answer (the model reads only content),
+    #: or on stderr in the CLI.
+    warnings: list[str] = field(default_factory=list)
+
+    def worsen(self, status: str) -> None:
+        if _SEVERITY[status] > _SEVERITY[self.status]:
+            self.status = status
+
+    def warn(self, line: str) -> None:
+        if line not in self.warnings:
+            self.warnings.append(line)
+
+    def add_files(self, files: list[str]) -> None:
+        self.changed_files.extend(f for f in files if f not in self.changed_files)
+
+    def meta(self) -> dict:
+        """The _meta entry: {META_KEY: {status, refresh_ms, changed_files}}."""
+        info: dict = {"status": self.status}
+        if self.refresh_ms is not None:
+            info["refresh_ms"] = round(self.refresh_ms, 1)
+        if self.changed_files:
+            info["changed_files"] = self.changed_files[:20]
+        return {META_KEY: info}
+
+
+class Refresher:
+    """Keeps a set of graphs current on demand for one process (server or command).
+
+    DECISION (docs/design/mcp-autonomo.md §2.3–2.4): a call checks the
+    manifests (stat only) and, when something changed, starts the one refresh
+    thread and waits for it until *timeout* after it started; past that it is
+    answered from the previous graph, with a warning, and the refresh goes on
+    — a thread cannot be cancelled safely and its work is wanted. A call that
+    finds a refresh already running waits for that one instead of starting
+    another. The swap to the new graph always happens here, on the caller's
+    thread, so no answer sees a half-updated state and the thread never
+    touches the caches.
+    """
+
+    def __init__(
+        self,
+        trackers: list[GraphTracker],
+        timeout: float = DEFAULT_TIMEOUT_S,
+        enabled: bool = True,
+        disabled_reason: str = "auto-refresh is off (--no-refresh or SLURP_REFRESH=0)",
+        on_swap: Callable[[], None] | None = None,
+    ) -> None:
+        self.trackers = list(trackers)
+        self.timeout = timeout
+        self.enabled = enabled
+        self.disabled_reason = disabled_reason
+        self.on_swap = on_swap
+        self._thread: threading.Thread | None = None
+        self._started = 0.0
+        self._work: list[tuple[GraphTracker, Changes | None]] = []
+        self._found: dict[int, Changes] = {}
+        self._results: list[tuple[GraphTracker, Changes, Rebuilt | None, str]] | None = None
+        self._cancel = threading.Event()
+        self._warned_memory: set[int] = set()
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    # --- the thread ------------------------------------------------------
+
+    def start(self) -> None:
+        """Check and refresh in the background, without waiting (server startup)."""
+        if self.enabled and self._thread is None:
+            work = [(t, None) for t in self.trackers if t.refreshable]
+            if work:
+                self._launch(work)
+
+    def _launch(self, work: list[tuple[GraphTracker, Changes | None]]) -> None:
+        self._work, self._found, self._results = work, {}, None
+        self._cancel.clear()
+        self._started = time.monotonic()
+        self._thread = threading.Thread(target=self._job, args=(work,), name="slurp-refresh",
+                                        daemon=True)
+        self._thread.start()
+
+    def _job(self, work: list[tuple[GraphTracker, Changes | None]]) -> None:
+        results: list[tuple[GraphTracker, Changes, Rebuilt | None, str]] = []
+        for tracker, changes in work:
+            try:
+                if changes is None:
+                    changes = tracker.check()
+                    self._found[id(tracker)] = changes
+                    if not changes.any or tracker.failed_signature == changes.signature():
+                        results.append((tracker, changes, None, ""))
+                        continue
+                results.append((tracker, changes, tracker.rebuild(changes, self._cancel.is_set),
+                                ""))
+            except Exception as exc:
+                # The detail goes to stderr — never stdout, the MCP transport.
+                traceback.print_exc(file=sys.stderr)
+                results.append((tracker, changes or Changes(), None,
+                                f"{type(exc).__name__}: {exc}"))
+        self._results = results
+
+    # --- per call --------------------------------------------------------
+
+    def prepare(self) -> Freshness:
+        """Make the graphs as current as the time limit allows, and say how current."""
+        fresh = Freshness()
+        if self._thread is None:
+            self._reload_rewritten(fresh)
+        deadline: float | None = None
+        for _round in range(3):
+            if self._thread is not None:
+                if deadline is None:
+                    deadline = self._started + self.timeout
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    self._thread.join(remaining)
+                if self._thread.is_alive():
+                    fresh.worsen("stale")
+                    for changes in self._pending_changes():
+                        fresh.add_files(changes.files)
+                    fresh.warn(self._stale_warning(waited=remaining > 0))
+                    break
+                self._collect(fresh)
+                continue
+            work = self._check(fresh)
+            if not work:
+                break
+            self._launch(work)
+        for tracker in self.trackers:
+            if tracker.readonly:
+                fresh.worsen("readonly")
+                if hint := tracker.readonly_warning():
+                    fresh.warn(hint)
+        return fresh
+
+    def finish(self, on_wait: Callable[[], None] | None = None) -> None:
+        """Let a running refresh complete before the process exits (the CLI's way).
+
+        Ctrl+C while waiting cancels it before it writes; the graph stays as it was.
+        """
+        if not self.running:
+            return
+        if on_wait is not None:
+            on_wait()
+        try:
+            assert self._thread is not None
+            self._thread.join()
+        except KeyboardInterrupt:
+            self._cancel.set()
+
+    # --- pieces ----------------------------------------------------------
+
+    def _reload_rewritten(self, fresh: Freshness) -> None:
+        swapped = False
+        for tracker in self.trackers:
+            if not tracker.disk_changed():
+                continue
+            try:
+                tracker.load()
+            except Exception as exc:  # the old graph keeps being served
+                fresh.worsen("failed")
+                fresh.warn(_RELOAD_FAILED.format(
+                    path=tracker.path, exc=f"{type(exc).__name__}: {exc}"))
+                continue
+            fresh.worsen("refreshed")
+            swapped = True
+        if swapped and self.on_swap is not None:
+            self.on_swap()
+
+    def _check(self, fresh: Freshness) -> list[tuple[GraphTracker, Changes | None]]:
+        work: list[tuple[GraphTracker, Changes | None]] = []
+        for tracker in self.trackers:
+            if not tracker.refreshable:
+                continue
+            changes = tracker.check()
+            if not changes.any:
+                continue
+            fresh.add_files(changes.files)
+            if not self.enabled:
+                fresh.worsen("stale")
+                fresh.warn(f"⚠ {changes.describe()} — not refreshed: "
+                                      f"{self.disabled_reason}.")
+            elif tracker.failed_signature == changes.signature():
+                fresh.worsen("failed")
+                fresh.warn(f"⚠ Graph refresh failed: {tracker.failed_message}")
+            else:
+                work.append((tracker, changes))
+        return work
+
+    def _collect(self, fresh: Freshness) -> None:
+        results = self._results or []
+        self._thread, self._results, self._work = None, None, []
+        swapped = False
+        for tracker, changes, rebuilt, error in results:
+            if error:
+                tracker.failed_signature = changes.signature()
+                tracker.failed_message = error
+                fresh.worsen("failed")
+                fresh.add_files(changes.files)
+                fresh.warn(f"⚠ Graph refresh failed: {error}")
+            elif rebuilt is None or rebuilt.cancelled:
+                if changes.any and tracker.failed_signature == changes.signature():
+                    fresh.worsen("failed")
+                    fresh.warn(f"⚠ Graph refresh failed: {tracker.failed_message}")
+            elif rebuilt.reloaded:
+                try:
+                    tracker.load()
+                except Exception as exc:
+                    fresh.worsen("failed")
+                    fresh.warn(_RELOAD_FAILED.format(
+                        path=tracker.path, exc=f"{type(exc).__name__}: {exc}"))
+                    continue
+                fresh.worsen("refreshed")
+                swapped = True
+            else:
+                tracker.apply(rebuilt)
+                swapped = True
+                fresh.worsen("refreshed")
+                fresh.add_files(changes.files)
+                fresh.refresh_ms = (fresh.refresh_ms or 0.0) + rebuilt.ms
+                if not rebuilt.written and id(tracker) not in self._warned_memory:
+                    self._warned_memory.add(id(tracker))
+                    fresh.warn(f"⚠ Graph refreshed in memory only: {tracker.path} "
+                                          f"cannot be written ({rebuilt.write_error}).")
+        if swapped and self.on_swap is not None:
+            self.on_swap()
+
+    def _pending_changes(self) -> list[Changes]:
+        found = []
+        for tracker, changes in self._work:
+            changes = changes if changes is not None else self._found.get(id(tracker))
+            if changes is not None and changes.any:
+                found.append(changes)
+        return found
+
+    def _stale_warning(self, waited: bool) -> str:
+        what = "; ".join(c.describe() for c in self._pending_changes()) \
+            or "files changed since this graph was built"
+        tail = "This answer may miss them; call again in a few seconds."
+        if waited:
+            return f"⚠ Graph refresh still running — {what}. {tail}"
+        ago = int(time.monotonic() - self._started)
+        return f"⚠ Graph refresh in progress (started {ago}s ago) — {what}. {tail}"

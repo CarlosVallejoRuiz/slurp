@@ -34,8 +34,12 @@ from slurp.ignore import apply_ignore, load_ignore
 from slurp.loader import SlurpLoadError, build_graph, load_graph
 from slurp.scorer import score_nodes, score_nodes_detailed
 
+# DECISION (v1.3): graphify-out/slurp-graph.json comes before graphify-out/graph.json.
+# That file only exists when the user (or `slurp init`) chose to build slurp's own,
+# always-fresh graph beside graphify's, so finding it expresses a preference.
 _GRAPH_SEARCH_PATHS = [
     Path("graph.json"),
+    Path("graphify-out/slurp-graph.json"),
     Path("graphify-out/graph.json"),
     Path(".graphify/graph.json"),
 ]
@@ -71,6 +75,82 @@ def _find_graph() -> Path | None:
         if candidate.exists():
             return candidate
     return None
+
+
+_NO_GRAPH = "No graph.json found. Pass --graph or run from a directory with graph.json."
+
+_FINISHING = "finishing graph refresh… (Ctrl+C to skip; the graph stays as it was)"
+
+
+def _refresh_options(fn):
+    """--no-refresh and --refresh-timeout, on every command that answers from a graph."""
+    fn = click.option(
+        "--refresh-timeout", "refresh_timeout", type=float, default=None,
+        help="Seconds to wait for a refresh of slurp's own graph before answering from "
+             "the previous one (default: $SLURP_REFRESH_TIMEOUT, else 2; 0 never waits).")(fn)
+    return click.option(
+        "--no-refresh", "no_refresh", is_flag=True, default=False,
+        help="Do not refresh slurp's own graph first; only warn if it is out of date "
+             "(also SLURP_REFRESH=0).")(fn)
+
+
+class _Graphs:
+    """The graphs a command answers from, made current first (design §3).
+
+    DECISION: everything about the refresh goes to stderr — stdout carries the
+    answer, which may be piped, JSON, or `export --output`. A refresh that
+    outlives the time limit is finished before the process exits, with a
+    message: killing it would throw the work away and the next command would
+    start over. Ctrl+C is safe thanks to the atomic write.
+    """
+
+    def __init__(self, paths: list[Path], *, no_refresh: bool = False,
+                 timeout: float | None = None, measuring: bool = False) -> None:
+        from slurp.refresh import GraphTracker, Refresher, resolve_refresh
+
+        try:
+            enabled, seconds = resolve_refresh(no_refresh, timeout)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from None
+        reason = None
+        if measuring:
+            enabled, reason = False, "benchmark and eval measure the graph as it is"
+        try:
+            self.trackers = [GraphTracker(p) for p in paths]
+        except SlurpLoadError as exc:
+            raise click.ClickException(str(exc)) from None
+        kwargs = {"disabled_reason": reason} if reason else {}
+        self.refresher = Refresher(self.trackers, seconds, enabled, **kwargs)
+        self.freshness = self.refresher.prepare()
+        for line in self.freshness.warnings:
+            click.echo(line, err=True)
+
+    @property
+    def graph(self):
+        return self.trackers[0].graph
+
+    def dicts(self) -> list[dict]:
+        """Each graph as its parsed dict, for a federation (JSON graphs only)."""
+        out = []
+        for tracker in self.trackers:
+            if tracker.data is None:
+                raise click.ClickException(
+                    f"{tracker.path}: a federation reads graph.json files only")
+            out.append(tracker.data)
+        return out
+
+    def __enter__(self) -> "_Graphs":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.refresher.finish(on_wait=lambda: click.echo(_FINISHING, err=True))
+
+
+def _graph_path(graph: str | None) -> Path:
+    path = Path(graph) if graph else _find_graph()
+    if path is None:
+        raise click.ClickException(_NO_GRAPH)
+    return path
 
 
 # Ownership lives in slurp.graphfile since v1.3: the refresh of the server and
@@ -397,6 +477,7 @@ def cli(ctx: click.Context) -> None:
                    "Default: $SLURP_TOKEN_FACTOR, else 1.0.")
 @_INCLUDE_TESTS
 @_INCLUDE_IMPORTS
+@_refresh_options
 def run(
     query: str,
     graph: tuple[str, ...],
@@ -419,6 +500,8 @@ def run(
     token_factor: float | None,
     include_tests: bool,
     include_imports: bool,
+    no_refresh: bool,
+    refresh_timeout: float | None,
 ) -> None:
     """Run a query against the graph."""
     factor = _token_factor(token_factor)
@@ -441,24 +524,30 @@ def run(
     # The audit log records a single graph path; for a federation, the first one
     # identifies the query well enough to keep the log's shape unchanged.
     graph_path = graph_paths[0]
-    fed_stats = None
+    with _Graphs(graph_paths, no_refresh=no_refresh, timeout=refresh_timeout) as graphs:
+        _run_query(graphs, graph_path, graph_paths, graph_labels, query, budget, fmt, model,
+                   explain, no_audit, suggest, suggest_n, neighbor_decay, min_score, viz,
+                   viz_output, ignore_file, backend, inject_code_flag, project_root, factor,
+                   include_tests, include_imports)
 
+
+def _run_query(graphs: "_Graphs", graph_path: Path, graph_paths: list[Path],
+               graph_labels: tuple[str, ...], query: str, budget: int, fmt: str, model: str,
+               explain: bool, no_audit: bool, suggest: bool, suggest_n: int,
+               neighbor_decay: float, min_score: float, viz: bool, viz_output: str | None,
+               ignore_file: str, backend: str, inject_code_flag: bool,
+               project_root: str | None, factor: float, include_tests: bool,
+               include_imports: bool) -> None:
+    """The body of `slurp QUERY`, once its graphs are current."""
+    fed_stats = None
     try:
         if len(graph_paths) == 1:
-            G = load_graph(graph_path)
+            G = graphs.graph
         else:
-            from slurp.federation import (
-                derive_labels,
-                load_graphs,
-                merge_graphs_with_stats,
-            )
+            from slurp.federation import derive_labels, merge_graphs_with_stats
             labels = list(graph_labels) or derive_labels(graph_paths)
-            merged, fed_stats = merge_graphs_with_stats(
-                load_graphs(graph_paths), labels
-            )
+            merged, fed_stats = merge_graphs_with_stats(graphs.dicts(), labels)
             G = build_graph(merged)
-    except SlurpLoadError as exc:
-        raise click.ClickException(str(exc)) from exc
     except ValueError as exc:
         raise click.ClickException(str(exc)) from None
 
@@ -532,6 +621,7 @@ def run(
             graph_path=graph_path,
             stats=stats,
             top_nodes=top,
+            graph_state=graphs.freshness.status,
         )
 
     if explain:
@@ -599,22 +689,15 @@ def _build_explain_table(
 @cli.command()
 @click.option("--graph", "-g", type=click.Path(), default=None,
               help="Path to graph.json (auto-discovered if omitted).")
-def stats(graph: str | None) -> None:
+@_refresh_options
+def stats(graph: str | None, no_refresh: bool, refresh_timeout: float | None) -> None:
     """Show statistics for a graph file."""
-    graph_path = Path(graph) if graph else _find_graph()
-    if graph_path is None:
-        raise click.ClickException(
-            "No graph.json found. Pass --graph or run from a directory with graph.json."
-        )
-
-    try:
-        G = load_graph(graph_path)
-    except SlurpLoadError as exc:
-        raise click.ClickException(str(exc)) from exc
-
-    click.echo(f"Graph: {graph_path}")
-    click.echo(f"Nodes: {G.number_of_nodes()}")
-    click.echo(f"Edges: {G.number_of_edges()}")
+    graph_path = _graph_path(graph)
+    with _Graphs([graph_path], no_refresh=no_refresh, timeout=refresh_timeout) as graphs:
+        G = graphs.graph
+        click.echo(f"Graph: {graph_path}")
+        click.echo(f"Nodes: {G.number_of_nodes()}")
+        click.echo(f"Edges: {G.number_of_edges()}")
 
 
 @cli.command("diff")
@@ -764,6 +847,7 @@ def _build_diff_panel(
                    "Default: $SLURP_TOKEN_FACTOR, else 1.0.")
 @_INCLUDE_TESTS
 @_INCLUDE_IMPORTS
+@_refresh_options
 def export_cmd(
     query: str,
     graph: str | None,
@@ -778,21 +862,21 @@ def export_cmd(
     token_factor: float | None,
     include_tests: bool,
     include_imports: bool,
+    no_refresh: bool,
+    refresh_timeout: float | None,
 ) -> None:
     """Export a context block ready to paste into a Claude/ChatGPT/CLAUDE.md system prompt."""
     factor = _token_factor(token_factor)
+    graph_path = _graph_path(graph)
+    with _Graphs([graph_path], no_refresh=no_refresh, timeout=refresh_timeout) as graphs:
+        _export(graphs.graph, query, budget, fmt, output, model, min_score, neighbor_decay,
+                ignore_file, backend, factor, include_tests, include_imports)
+
+
+def _export(G, query: str, budget: int, fmt: str, output: str | None, model: str,
+            min_score: float, neighbor_decay: float, ignore_file: str, backend: str,
+            factor: float, include_tests: bool, include_imports: bool) -> None:
     from slurp.exporter import export_context
-
-    graph_path = Path(graph) if graph else _find_graph()
-    if graph_path is None:
-        raise click.ClickException(
-            "No graph.json found. Pass --graph or run from a directory with graph.json."
-        )
-
-    try:
-        G = load_graph(graph_path)
-    except SlurpLoadError as exc:
-        raise click.ClickException(str(exc)) from exc
 
     G = apply_ignore(G, load_ignore(Path(ignore_file)))
     scores = score_nodes(G, query, backend=backend)
@@ -857,16 +941,9 @@ def benchmark_cmd(
     factor = _token_factor(token_factor)
     from slurp.benchmark import format_benchmark, run_benchmark
 
-    graph_path = Path(graph) if graph else _find_graph()
-    if graph_path is None:
-        raise click.ClickException(
-            "No graph.json found. Pass --graph or run from a directory with graph.json."
-        )
-
-    try:
-        G = load_graph(graph_path)
-    except SlurpLoadError as exc:
-        raise click.ClickException(str(exc)) from exc
+    # DECISION: a measurement runs on a fixed snapshot; refreshing would move
+    # the floor under it. An out-of-date graph is only reported, on stderr.
+    G = _Graphs([_graph_path(graph)], measuring=True).graph
 
     result = run_benchmark(
         G,
@@ -1000,15 +1077,8 @@ def eval_cmd(
         click.echo(f"\n{len(questions)} questions · no LLM calls made (--dry-run).")
         return
 
-    graph_path = Path(graph) if graph else _find_graph()
-    if graph_path is None:
-        raise click.ClickException(
-            "No graph.json found. Pass --graph or run from a directory with graph.json."
-        )
-    try:
-        G = load_graph(graph_path)
-    except SlurpLoadError as exc:
-        raise click.ClickException(str(exc)) from exc
+    graph_path = _graph_path(graph)
+    G = _Graphs([graph_path], measuring=True).graph   # a snapshot: see benchmark
 
     if retrieval:
         # DECISION: no provider is resolved at all — the metric must run
@@ -1162,6 +1232,7 @@ def _build_eval_panel(suite) -> Panel:
               help="Neighbourhood radius used to build the explanation context.")
 @click.option("--config-dir", "config_dir", default=".slurp", show_default=True,
               help="Directory holding config.json.")
+@_refresh_options
 def explain_cmd(
     query: str,
     graph: str | None,
@@ -1171,8 +1242,17 @@ def explain_cmd(
     no_llm: bool,
     hops: int,
     config_dir: str,
+    no_refresh: bool,
+    refresh_timeout: float | None,
 ) -> None:
     """Explain what a node does, who depends on it, and what breaks if it changes."""
+    graph_path = _graph_path(graph)
+    with _Graphs([graph_path], no_refresh=no_refresh, timeout=refresh_timeout) as graphs:
+        _explain(graphs.graph, query, provider, model, endpoint, no_llm, hops, config_dir)
+
+
+def _explain(G, query: str, provider: str | None, model: str | None, endpoint: str | None,
+             no_llm: bool, hops: int, config_dir: str) -> None:
     from slurp.explainer import (
         LLMConfig,
         SlurpExplainError,
@@ -1181,17 +1261,6 @@ def explain_cmd(
         format_explanation,
         resolve_config,
     )
-
-    graph_path = Path(graph) if graph else _find_graph()
-    if graph_path is None:
-        raise click.ClickException(
-            "No graph.json found. Pass --graph or run from a directory with graph.json."
-        )
-
-    try:
-        G = load_graph(graph_path)
-    except SlurpLoadError as exc:
-        raise click.ClickException(str(exc)) from exc
 
     scores = score_nodes(G, query)
 
@@ -1302,6 +1371,7 @@ def config_show(config_dir: str) -> None:
               help="Open an interactive view of the affected nodes.")
 @click.option("--viz-output", "viz_output", type=click.Path(), default=None,
               help="Write the visualisation to a file instead of opening it.")
+@_refresh_options
 def impact_cmd(
     file_path: str,
     graph: str | None,
@@ -1309,8 +1379,19 @@ def impact_cmd(
     output_fmt: str,
     viz: bool,
     viz_output: str | None,
+    no_refresh: bool,
+    refresh_timeout: float | None,
 ) -> None:
     """Show what could break if you edit FILE_PATH, before you edit it."""
+    if hops < 1:
+        raise click.ClickException("--hops must be at least 1")
+    graph_path = _graph_path(graph)
+    with _Graphs([graph_path], no_refresh=no_refresh, timeout=refresh_timeout) as graphs:
+        _impact(graphs.graph, file_path, hops, output_fmt, viz, viz_output)
+
+
+def _impact(G, file_path: str, hops: int, output_fmt: str, viz: bool,
+            viz_output: str | None) -> None:
     import json as _json
 
     from slurp.impact import (
@@ -1319,19 +1400,6 @@ def impact_cmd(
         format_impact,
         impact_to_dict,
     )
-
-    if hops < 1:
-        raise click.ClickException("--hops must be at least 1")
-
-    graph_path = Path(graph) if graph else _find_graph()
-    if graph_path is None:
-        raise click.ClickException(
-            "No graph.json found. Pass --graph or run from a directory with graph.json."
-        )
-    try:
-        G = load_graph(graph_path)
-    except SlurpLoadError as exc:
-        raise click.ClickException(str(exc)) from None
 
     result = analyze_impact(G, file_path, hops=hops)
 
@@ -1376,12 +1444,15 @@ def impact_cmd(
               help="Pricing model for the cost estimate (same models as benchmark).")
 @click.option("--min-similar", "min_similar", default=3, show_default=True,
               help="Similar queries needed before a recommendation is confident.")
+@_refresh_options
 def advisor_cmd(
     query: str,
     graph: str | None,
     audit_dir: str,
     price_model: str,
     min_similar: int,
+    no_refresh: bool,
+    refresh_timeout: float | None,
 ) -> None:
     """Recommend a token budget for QUERY from your past query history."""
     from slurp.advisor import format_advice, recommend_budget
@@ -1397,6 +1468,10 @@ def advisor_cmd(
         raise click.ClickException(str(exc)) from None
 
     graph_path = Path(graph) if graph else _find_graph()
+    # The advice comes from the audit log; the graph it names is kept current
+    # like every graph a command names (design §3), for the query it suggests.
+    refreshing = (_Graphs([graph_path], no_refresh=no_refresh, timeout=refresh_timeout)
+                  if graph_path is not None and graph_path.exists() else None)
 
     if advice.similar:
         headline = (
@@ -1412,6 +1487,8 @@ def advisor_cmd(
                      border_style=border))
     click.echo()
     click.echo(format_advice(advice, graph_path))
+    if refreshing is not None:
+        refreshing.__exit__(None, None, None)
 
 
 @cli.command("session")

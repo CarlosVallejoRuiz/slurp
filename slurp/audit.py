@@ -15,6 +15,7 @@ def log_query(
     stats: dict,
     top_nodes: list[str],
     audit_dir: Path = Path(".slurp"),
+    graph_state: str | None = None,
 ) -> None:
     """Appends a query record to audit.jsonl.
 
@@ -26,6 +27,8 @@ def log_query(
         stats: Stats dict returned by budget.select_subgraph.
         top_nodes: List of selected node IDs (ordered by score).
         audit_dir: Directory where audit.jsonl lives (default: .slurp/).
+        graph_state: How current the graph was (fresh, refreshed, stale, failed,
+            readonly — see slurp.refresh.Freshness), recorded as "graph".
     """
     audit_dir.mkdir(parents=True, exist_ok=True)
 
@@ -39,6 +42,8 @@ def log_query(
         "graph_path": str(graph_path),
         "top_nodes": list(top_nodes),
     }
+    if graph_state is not None:
+        entry["graph"] = graph_state
 
     with (audit_dir / _AUDIT_FILE).open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(entry) + "\n")
