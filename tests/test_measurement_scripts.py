@@ -115,3 +115,66 @@ class TestTasks:
             prompt = task["prompt"].lower()
             assert "slurp" not in prompt and "mcp" not in prompt and "grafo" not in prompt, \
                 task["id"]
+
+
+def _contain():
+    return runpy.run_path(str(DESIGN / "contain_settings.py"))
+
+
+class TestContainSettings:
+    """The measurement clones' permissions never point at the real checkout."""
+
+    def _clone(self, tmp_path: Path, real: Path) -> Path:
+        clone = tmp_path / "work" / "ps-1" / "repo"
+        (clone / ".claude").mkdir(parents=True)
+        (clone / ".claude" / "settings.local.json").write_text(json.dumps({
+            "permissions": {
+                "allow": [f"Bash(npx --prefix {real} tsc --noEmit)",
+                          f"Bash(node -e \"require('{real}/node_modules/x')\")",
+                          "Bash(npm run:*)"],
+                "additionalDirectories": [f"{real}/docs", f"{real}/supabase/migrations"],
+            },
+            "enabledMcpjsonServers": ["slurp"],
+        }), encoding="utf-8")
+        (clone / ".claude" / "settings.json").write_text(json.dumps({
+            "permissions": {"additionalDirectories": [
+                "c:\\Users\\Jairo Vallejo Ruiz\\Desktop\\PrismaStats\\app\\api\\cron"]}}),
+            encoding="utf-8")
+        return clone
+
+    def test_prismastats_paths_are_pointed_into_the_clone(self, tmp_path):
+        real = tmp_path / "Desktop" / "prismastats"
+        real.mkdir(parents=True)
+        clone = self._clone(tmp_path, real)
+        mod = _contain()
+        assert mod["offenders"](clone)                     # before: the real checkout
+        assert sorted(mod["rewrite"](clone, real)) == [".claude/settings.json",
+                                                       ".claude/settings.local.json"]
+        assert mod["offenders"](clone) == []
+        local = json.loads((clone / ".claude" / "settings.local.json").read_text())
+        inside = str(clone.resolve())
+        assert local["permissions"]["additionalDirectories"] == [
+            f"{inside}/docs", f"{inside}/supabase/migrations"]
+        shared = json.loads((clone / ".claude" / "settings.json").read_text())
+        assert shared["permissions"]["additionalDirectories"] == [f"{inside}/app/api/cron"]
+
+    def test_a_rule_reaching_outside_is_named(self, tmp_path):
+        clone = tmp_path / "repo"
+        (clone / ".claude").mkdir(parents=True)
+        (clone / ".claude" / "settings.local.json").write_text(json.dumps({
+            "permissions": {"allow": ["Read(//Users/someone/secrets/**)", "Bash(ls:*)"]}}),
+            encoding="utf-8")
+        mod = _contain()
+        [line] = mod["offenders"](clone)
+        assert "permissions.allow.0" in line and "//Users/someone/secrets/" in line
+        assert mod["main"](["check", str(clone)]) == 1
+
+    def test_paths_inside_the_clone_and_other_keys_pass(self, tmp_path):
+        clone = tmp_path / "repo"
+        (clone / ".claude").mkdir(parents=True)
+        inside = str(clone.resolve())
+        (clone / ".claude" / "settings.local.json").write_text(json.dumps({
+            "permissions": {"allow": [f"Read(/{inside}/**)", "mcp__slurp__*"],
+                            "additionalDirectories": [f"{inside}/docs"]},
+            "env": {"HOME_COPY": "/Users/someone"}}), encoding="utf-8")
+        assert _contain()["main"](["check", str(clone)]) == 0

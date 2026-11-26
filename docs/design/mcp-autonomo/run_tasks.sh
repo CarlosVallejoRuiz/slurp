@@ -29,6 +29,10 @@ CLAUDE_BIN="${CLAUDE_BIN:-$(command -v claude || ls -d "$HOME"/.vscode/extension
 # denial is reported apart.
 ALLOWED="Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(ls:*),Bash(cat:*),Bash(grep:*),Bash(find:*),Bash(uv run pytest:*),Bash(uv run ruff:*),Bash(npx tsc:*),Bash(npm test:*)"
 TIMEOUT_S="${TIMEOUT_S:-1800}"
+# PREPARE_ONLY=1: build and initialise the clones, run the checks, stop before claude
+# (the clone for the author's interactive check of the approvals).
+PREPARE_ONLY="${PREPARE_ONLY:-0}"
+CONTAIN="python3 $REPO/docs/design/mcp-autonomo/contain_settings.py"
 
 WORK="${1:?WORK_DIR}"; shift
 case "$(cd "$(dirname "$WORK")" 2>/dev/null && pwd)/" in
@@ -60,8 +64,34 @@ for id in "${ids[@]}"; do
   git -C "$dir/repo" remote remove origin
   (
     cd "$dir/repo"
+    # Agreed with the author after the aborted first run: Claude Code ignores a
+    # .claude/settings.local.json git tracks (PrismaStats versions it), so do what
+    # `slurp init` advises before it runs; and point every path of the real
+    # checkout in the project's settings into the clone. Both are committed in the
+    # clone, so they stay out of the agent's diff.
+    real="$PRISMASTATS"; [ "$project" = slurp ] && real="$REPO"
+    if git ls-files --error-unmatch .claude/settings.local.json > /dev/null 2>&1; then
+      git rm -q --cached .claude/settings.local.json
+    fi
+    $CONTAIN rewrite "$dir/repo" "$real" > "$dir/contain.txt"
+    # Only the shared file: re-adding the whole .claude/ would track settings.local.json again.
+    git add .claude/settings.json 2>/dev/null || true
+    git -c user.name=measurement -c user.email=measurement@localhost commit -q \
+      -m "measurement: settings.local.json out of git, settings paths inside the clone" \
+      > /dev/null 2>&1 || true
     PATH="$SLURP_BIN:$PATH" slurp init --yes > "$dir/init.txt" 2>&1
     mkdir -p .slurp
+    # Before every session: no permission rule or additional directory may point
+    # outside the clone. A failure stops the run.
+    if ! $CONTAIN check "$dir/repo" 2>> "$dir/contain.txt"; then
+      echo "[$id] a permission points outside the clone — see $dir/contain.txt" >&2
+      exit 3
+    fi
+    echo "settings: nothing points outside the clone" >> "$dir/contain.txt"
+    if [ "$PREPARE_ONLY" = 1 ]; then
+      echo "[$id] prepared: $dir/repo"
+      exit 0
+    fi
     # Is the project server approved before the session starts? (no model call)
     "$CLAUDE_BIN" mcp get slurp > "$dir/mcp-get.txt" 2>&1 || true
     echo "[$id] claude -p …  $(date '+%H:%M:%S')"

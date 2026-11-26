@@ -17,6 +17,17 @@ Resultados en `resultados/`.
 - "Terminó la tarea": resultado `success` de `claude`, diff no vacío, checks del proyecto
   (pytest y ruff en slurp, `tsc --noEmit` en PrismaStats) y lectura del diff.
 
+**Enmienda tras la primera ejecución, abortada en ps-1 (2026-11-26, decisión del autor):**
+Claude Code ignora un `.claude/settings.local.json` que git sigue, y PrismaStats lo versiona:
+la aprobación de `slurp init` no se aplicaba y el `slurp_query` con que el agente empezó ps-1
+fue denegado. En cada clon, antes de `slurp init`, se hace lo que `init` aconseja
+(`git rm --cached .claude/settings.local.json`) y `contain_settings.py rewrite` apunta dentro
+del clon toda ruta del checkout real en los settings del proyecto (PrismaStats lista
+`additionalDirectories` de `~/Desktop/prismastats`); los dos cambios se confirman en el clon.
+Antes de cada sesión, `contain_settings.py check` exige que ninguna regla de permiso ni
+directorio adicional del proyecto apunte fuera del clon. La medición se relanzó desde cero;
+ps-1 abortada no cuenta. Los settings de usuario (`~/.claude/settings.json`) no se tocan.
+
 Ficheros de esta carpeta:
 
 - `tareas.json` — las diez tareas. Las cinco de slurp salen del roadmap (filas 24, 26, 28, 31
