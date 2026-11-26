@@ -1,7 +1,21 @@
 # Medición con agentes (§7 del diseño) — protocolo preparado, sin lanzar
 
 **Estado:** preparado el 2026-11-26 sobre la v1.3 en desarrollo (`main`, versión 1.2.1 sin
-bump). **No se ha ejecutado.** Se lanza junto con el autor tras revisar la fase.
+bump). Tareas confirmadas por el autor el 2026-11-26 (las cinco de PrismaStats le valen).
+Resultados en `resultados/`.
+
+**Decisiones del autor antes de lanzar (2026-11-26):**
+
+- `claude -p` con `--permission-mode acceptEdits` y una lista fija de comandos permitidos
+  (`git status/diff/log`, `ls`, `cat`, `grep`, `find`, `uv run pytest`, `uv run ruff`,
+  `npx tsc`, `npm test`), **sin ninguna regla para slurp**: su aprobación tiene que venir del
+  `.claude/settings.local.json` que escribe `slurp init`.
+- **"0 aprobaciones" del criterio = 0 denegaciones de herramientas `mcp__slurp__*`** en
+  `permission_denials`. Las demás denegaciones se dan aparte, fuera del criterio.
+- La skill de graphify del entorno del autor se queda como está; se registra en cada sesión si
+  el agente usó graphify (la skill o el comando).
+- "Terminó la tarea": resultado `success` de `claude`, diff no vacío, checks del proyecto
+  (pytest y ruff en slurp, `tsc --noEmit` en PrismaStats) y lectura del diff.
 
 Ficheros de esta carpeta:
 
@@ -26,18 +40,19 @@ no llega al criterio, para separar el efecto de las instrucciones del de la fric
    `.mcp.json` ni el de cada herramienta. En `claude -p` ese diálogo no aparece, así que la
    ejecución automática no lo puede medir. El diálogo de confianza del workspace sí puede
    aparecer la primera vez: es de Claude Code, no de slurp.
-3. **Lanzar:** `docs/design/mcp-autonomo/run_tasks.sh ~/slurp-medicion/AAAA-MM-DD`. Por
-   cada tarea:
-   - un clon nuevo del proyecto (PrismaStats con su `node_modules` enlazado; slurp con
-     `uv sync`);
+3. **Lanzar:** `docs/design/mcp-autonomo/run_tasks.sh /tmp/slurp-medicion/AAAA-MM-DD`
+   (fuera de los repos reales; el script se niega si no). Por cada tarea:
+   - un clon nuevo del proyecto, sin remoto (PrismaStats con una copia copy-on-write de su
+     `node_modules`; slurp con `uv sync`);
    - `slurp init --yes` con el slurp de este checkout (escribe `.mcp.json`,
      `.claude/settings.local.json`, `CLAUDE.local.md` y el grafo propio);
    - `.slurp/` creado antes de empezar, para que se escriba el log de sesión;
-   - **una sesión nueva** de `claude -p "<prompt>" --output-format json`, con los mismos
-     `CLAUDE_FLAGS` en las diez.
-   - Queda en `<resultados>/<id>/`: `claude.json`, `session.log`, `init.txt`, `diff.txt`.
-4. **Analizar:** `uv run python docs/design/mcp-autonomo/analyze_sessions.py <resultados>`.
-   También `slurp session --sessions --log-dir <resultados>/<id>` para ver una sesión.
+   - **una sesión nueva** de `claude -p "<prompt>" --output-format stream-json --verbose`,
+     con los mismos permisos en las diez (arriba);
+   - queda en el directorio de trabajo `<id>/`: `stream.jsonl`, `claude.json`, `session.log`,
+     `mcp-get.txt`, el diff y los checks; en `resultados/<id>/` del repo solo `sessions.txt`
+     (`slurp session --sessions`) y `resultado.json`.
+4. **Analizar:** `uv run python docs/design/mcp-autonomo/analyze_sessions.py <trabajo>`.
 
 ## Criterio (fijado antes de medir, §7)
 
@@ -45,7 +60,7 @@ no llega al criterio, para separar el efecto de las instrucciones del de la fric
   esa primera llamada llega antes de cualquier edición (la respuesta de la primera llamada no
   vio ningún fichero cambiado).
 - **Requisitos:**
-  - 0 aprobaciones pedidas (`permission_denials` vacío en `claude.json`);
+  - 0 aprobaciones pedidas: 0 denegaciones de `mcp__slurp__*` en `permission_denials`;
   - ninguna respuesta servida con grafo viejo sin aviso (una llamada con `graph` `stale` o
     `failed` siempre lleva `warned`);
   - como mucho un 5 % de respuestas con aviso;

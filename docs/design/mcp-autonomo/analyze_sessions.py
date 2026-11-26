@@ -5,14 +5,17 @@ Usage, after running the ten tasks with run_tasks.sh:
     uv run python docs/design/mcp-autonomo/analyze_sessions.py RESULTS_DIR
 
 RESULTS_DIR holds one directory per task (named by its id in tareas.json), each
-with the `session.log` copied from the task's `.slurp/` and `claude.json`, the
-output of `claude -p ... --output-format json`.
+with the `session.log` copied from the task's `.slurp/`, `claude.json` (the final
+result event of `claude -p`), `stream.jsonl` (every event, with the agent's tool
+calls) and `changed-files.txt` (the files the agent changed, from git).
 
 It prints one row per task and checks the criterion fixed before measuring:
 
 - at least 8 of 10 sessions call slurp on their own, and in at least 7 of 10
   the first call comes before any edit;
-- requirements: 0 approvals asked (permission_denials empty), no answer from a
+- requirements: 0 approvals asked — agreed before launching: 0 denials of
+  mcp__slurp__* tools in permission_denials; other denials (a shell command off
+  the fixed list) are reported apart, outside the criterion — no answer from a
   stale graph without a warning, at most 5 % of answers with a warning, p95 of
   the refresh time <= 2 s;
 - informative, no threshold: share of edited files that had a slurp_impact or
@@ -27,8 +30,11 @@ from __future__ import annotations
 import json
 import math
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from slurp.indexer import _INDEXED_EXTENSIONS
 
 CALL_MIN, BEFORE_EDIT_MIN = 8, 7
 WARNED_MAX_SHARE = 0.05
@@ -40,7 +46,10 @@ class TaskResult:
     task: str
     calls: list[dict] = field(default_factory=list)
     edited: list[str] = field(default_factory=list)
-    denials: int = 0
+    denials: int = 0            # of mcp__slurp__* tools: the criterion's approvals
+    other_denials: int = 0      # anything else, reported apart
+    agent_tools: Counter = field(default_factory=Counter)
+    graphify: list[str] = field(default_factory=list)
     missing: str = ""
 
     @property
@@ -112,16 +121,51 @@ def load_task(directory: Path) -> TaskResult:
             entries.append(entry)
     # One task, one session; if the server restarted, all its sessions count.
     result.calls = [e for e in entries if e.get("event") == "call"]
-    for end in (e for e in entries if e.get("event") == "end"):
+    ends = [e for e in entries if e.get("event") == "end"]
+    for end in ends:
         result.edited.extend(f for f in (end.get("changed") or {}).get("files") or []
                              if f not in result.edited)
+    if not ends and (directory / "changed-files.txt").is_file():
+        # The client killed the server before it read EOF: the diff stands in,
+        # limited to what the end event would list (indexable files).
+        for line in (directory / "changed-files.txt").read_text(encoding="utf-8").splitlines():
+            if Path(line).suffix.lower() in _INDEXED_EXTENSIONS and line not in result.edited:
+                result.edited.append(line)
     try:
         output = json.loads(claude.read_text(encoding="utf-8"))
     except ValueError:
         result.missing = "claude.json (not JSON)"
         return result
-    result.denials = len(output.get("permission_denials") or [])
+    for denial in output.get("permission_denials") or []:
+        name = denial.get("tool_name", "") if isinstance(denial, dict) else str(denial)
+        if name.startswith("mcp__slurp__"):
+            result.denials += 1
+        else:
+            result.other_denials += 1
+    _read_stream(directory / "stream.jsonl", result)
     return result
+
+
+def _read_stream(path: Path, result: TaskResult) -> None:
+    """The agent's tool calls, and any use of graphify (its skill or its CLI)."""
+    if not path.is_file():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict) or event.get("type") != "assistant":
+            continue
+        for block in (event.get("message") or {}).get("content") or []:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            name, tool_input = str(block.get("name")), block.get("input") or {}
+            result.agent_tools[name] += 1
+            if name == "Skill" and "graphify" in str(tool_input.get("skill", "")).lower():
+                result.graphify.append(f"Skill {tool_input.get('skill')}")
+            elif name == "Bash" and "graphify" in str(tool_input.get("command", "")):
+                result.graphify.append(f"Bash: {str(tool_input.get('command'))[:60]}")
 
 
 def p95(values: list[float]) -> float | None:
@@ -133,8 +177,8 @@ def p95(values: list[float]) -> float | None:
 
 def analyse(results: list[TaskResult]) -> tuple[bool, list[str]]:
     """(criterion met, report lines)."""
-    lines = [f"{'task':<6} {'calls':>5} {'1st<edit':>8} {'denials':>7} {'warned':>6} "
-             f"{'stale!':>6} {'edited':>6} {'after i/e':>9}  tools"]
+    lines = [f"{'task':<6} {'calls':>5} {'1st<edit':>8} {'denied':>6} {'other':>5} "
+             f"{'warned':>6} {'stale!':>6} {'edited':>6} {'after i/e':>9} {'graphify':>8}  tools"]
     for r in results:
         if r.missing:
             lines.append(f"{r.task:<6} missing {r.missing}")
@@ -144,8 +188,9 @@ def analyse(results: list[TaskResult]) -> tuple[bool, list[str]]:
             name = str(c.get("tool", "?")).removeprefix("slurp_")
             tools[name] = tools.get(name, 0) + 1
         lines.append(f"{r.task:<6} {len(r.calls):>5} {('yes' if r.first_call_before_edit else 'no'):>8} "
-                     f"{r.denials:>7} {r.warned:>6} {r.stale_without_warning:>6} "
-                     f"{len(r.edited):>6} {r.edited_after_impact_or_explain:>9}  "
+                     f"{r.denials:>6} {r.other_denials:>5} {r.warned:>6} "
+                     f"{r.stale_without_warning:>6} {len(r.edited):>6} "
+                     f"{r.edited_after_impact_or_explain:>9} {('yes' if r.graphify else 'no'):>8}  "
                      + " · ".join(f"{k} {v}" for k, v in sorted(tools.items())))
     done = [r for r in results if not r.missing]
     calls = [c for r in done for c in r.calls]
@@ -162,7 +207,7 @@ def analyse(results: list[TaskResult]) -> tuple[bool, list[str]]:
          spontaneous >= CALL_MIN),
         (f"first call before any edit in {before_edit}/{len(done)} (need {BEFORE_EDIT_MIN})",
          before_edit >= BEFORE_EDIT_MIN),
-        (f"approvals asked: {denials} (need 0)", denials == 0),
+        (f"slurp tools denied: {denials} (need 0)", denials == 0),
         (f"answers from a stale graph without a warning: {stale} (need 0)", stale == 0),
         (f"answers with a warning: {warned_share:.1%} (need <= {WARNED_MAX_SHARE:.0%})",
          warned_share <= WARNED_MAX_SHARE),
@@ -175,6 +220,10 @@ def analyse(results: list[TaskResult]) -> tuple[bool, list[str]]:
         lines.append(f"{'PASS' if ok else 'FAIL'}  {text}")
     lines.append(f"info  edited files with a slurp_impact/slurp_explain first: {after}/{edited}"
                  + (f" ({after / edited:.0%})" if edited else ""))
+    lines.append(f"info  other denials, not in the criterion: "
+                 f"{sum(r.other_denials for r in done)}")
+    lines.append(f"info  graphify used in {sum(bool(r.graphify) for r in done)}/{len(done)} "
+                 "sessions")
     met = len(done) == len(results) and all(ok for _, ok in checks)
     return met, lines
 

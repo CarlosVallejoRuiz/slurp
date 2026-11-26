@@ -22,16 +22,19 @@ PRISMASTATS="${SLURP_PRISMASTATS:-$HOME/Desktop/prismastats}"
 TASKS="$REPO/docs/design/mcp-autonomo/tareas.json"
 OUT="$REPO/docs/design/mcp-autonomo/resultados"
 CLAUDE_BIN="${CLAUDE_BIN:-$(command -v claude || ls -d "$HOME"/.vscode/extensions/anthropic.claude-code-*/resources/native-binary/claude 2>/dev/null | tail -1)}"
-# Fixed for all ten tasks; must not allow mcp__slurp tools (their approval is the
-# point: it comes from the .claude/settings.local.json `slurp init` writes).
-CLAUDE_FLAGS="${CLAUDE_FLAGS:-}"
+# Fixed for all ten tasks, agreed before launching (option a): edits accepted and
+# a fixed list of shell commands; no rule for slurp — its approval is the point,
+# and must come from the .claude/settings.local.json `slurp init` writes. The
+# criterion's "0 approvals" counts denials of mcp__slurp__* tools only; any other
+# denial is reported apart.
+ALLOWED="Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(ls:*),Bash(cat:*),Bash(grep:*),Bash(find:*),Bash(uv run pytest:*),Bash(uv run ruff:*),Bash(npx tsc:*),Bash(npm test:*)"
 TIMEOUT_S="${TIMEOUT_S:-1800}"
 
 WORK="${1:?WORK_DIR}"; shift
 case "$(cd "$(dirname "$WORK")" 2>/dev/null && pwd)/" in
   "$REPO"/*|"$PRISMASTATS"/*) echo "WORK_DIR must be outside the real repositories" >&2; exit 2 ;;
 esac
-case "$CLAUDE_FLAGS" in *mcp__slurp*) echo "CLAUDE_FLAGS must not allow slurp's tools" >&2; exit 2 ;; esac
+case "$ALLOWED" in *mcp__slurp*) echo "the fixed list must not allow slurp's tools" >&2; exit 2 ;; esac
 [ -x "$CLAUDE_BIN" ] || { echo "claude not found (set CLAUDE_BIN)" >&2; exit 2; }
 mkdir -p "$WORK" "$OUT"
 ids=("$@")
@@ -59,18 +62,35 @@ for id in "${ids[@]}"; do
     cd "$dir/repo"
     PATH="$SLURP_BIN:$PATH" slurp init --yes > "$dir/init.txt" 2>&1
     mkdir -p .slurp
-    echo "[$id] claude -p …"
+    # Is the project server approved before the session starts? (no model call)
+    "$CLAUDE_BIN" mcp get slurp > "$dir/mcp-get.txt" 2>&1 || true
+    echo "[$id] claude -p …  $(date '+%H:%M:%S')"
     start=$(date +%s)
-    # shellcheck disable=SC2086
-    PATH="$SLURP_BIN:$PATH" timeout "$TIMEOUT_S" "$CLAUDE_BIN" -p "$prompt" --output-format json \
-      $CLAUDE_FLAGS > "$dir/claude.json" 2> "$dir/claude.stderr" || true
+    PATH="$SLURP_BIN:$PATH" timeout "$TIMEOUT_S" "$CLAUDE_BIN" -p "$prompt" \
+      --output-format stream-json --verbose --permission-mode acceptEdits \
+      --allowedTools "$ALLOWED" < /dev/null > "$dir/stream.jsonl" 2> "$dir/claude.stderr" || true
     echo $(( $(date +%s) - start )) > "$dir/seconds.txt"
+    # The final result event (subtype, turns, cost, permission_denials) as claude.json.
+    python3 -c "
+import json, sys
+last = {}
+for line in open(sys.argv[1], encoding='utf-8', errors='replace'):
+    try:
+        event = json.loads(line)
+    except ValueError:
+        continue
+    if isinstance(event, dict) and event.get('type') == 'result':
+        last = event
+json.dump(last, open(sys.argv[2], 'w'), indent=2)
+" "$dir/stream.jsonl" "$dir/claude.json"
     cp .slurp/session.log "$dir/session.log" 2>/dev/null || : > "$dir/session.log"
     git add -A >/dev/null 2>&1 || true
     git diff --cached --stat -- . ':!.slurp' ':!graphify-out' ':!.mcp.json' ':!CLAUDE.local.md' \
       ':!.gitignore' ':!.claude' > "$dir/diff-stat.txt" || true
     git diff --cached -- . ':!.slurp' ':!graphify-out' ':!.mcp.json' ':!CLAUDE.local.md' \
       ':!.gitignore' ':!.claude' > "$dir/diff.patch" || true
+    git diff --cached --name-only -- . ':!.slurp' ':!graphify-out' ':!.mcp.json' \
+      ':!CLAUDE.local.md' ':!.gitignore' ':!.claude' > "$dir/changed-files.txt" || true
     case "$project" in
       slurp)
         (uv run pytest -q -p no:cacheprovider > "$dir/check-tests.txt" 2>&1; echo $? > "$dir/check-tests.rc") || true
@@ -81,9 +101,27 @@ for id in "${ids[@]}"; do
     mkdir -p "$OUT/$id"
     PATH="$SLURP_BIN:$PATH" slurp session --sessions --log-dir "$dir/repo/.slurp" > "$OUT/$id/sessions.txt" 2>&1 || true
     python3 - "$dir" "$OUT/$id/resultado.json" "$id" "$project" <<'PY'
-import json, sys
+import collections, json, sys
 from pathlib import Path
 d, out, task, project = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3], sys.argv[4]
+init, tools, graphify = {}, collections.Counter(), []
+for line in (d / "stream.jsonl").read_text(encoding="utf-8", errors="replace").splitlines() \
+        if (d / "stream.jsonl").exists() else []:
+    try:
+        event = json.loads(line)
+    except ValueError:
+        continue
+    if event.get("type") == "system" and event.get("subtype") == "init":
+        init = event
+    for block in (event.get("message") or {}).get("content") or [] \
+            if event.get("type") == "assistant" else []:
+        if isinstance(block, dict) and block.get("type") == "tool_use":
+            name, args = block.get("name"), block.get("input") or {}
+            tools[name] += 1
+            if name == "Skill" and "graphify" in str(args.get("skill", "")).lower():
+                graphify.append(f"Skill {args.get('skill')}")
+            elif name == "Bash" and "graphify" in str(args.get("command", "")):
+                graphify.append(f"Bash: {str(args.get('command'))[:60]}")
 def read(name, default=""):
     p = d / name
     return p.read_text(encoding="utf-8", errors="replace").strip() if p.exists() else default
@@ -91,12 +129,20 @@ try:
     claude = json.loads(read("claude.json", "{}") or "{}")
 except ValueError:
     claude = {}
-denials = claude.get("permission_denials") or []
+denials = [x.get("tool_name") if isinstance(x, dict) else x
+           for x in claude.get("permission_denials") or []]
+servers = {s.get("name"): s.get("status") for s in init.get("mcp_servers") or []}
 result = {
     "task": task, "project": project,
+    "model": init.get("model"),
+    "slurp_server": servers.get("slurp"),
     "claude": {k: claude.get(k) for k in ("subtype", "is_error", "num_turns", "duration_ms",
                                           "total_cost_usd")},
-    "permission_denials": [x.get("tool_name") if isinstance(x, dict) else x for x in denials],
+    "slurp_denials": [x for x in denials if str(x).startswith("mcp__slurp__")],
+    "other_denials": [x for x in denials if not str(x).startswith("mcp__slurp__")],
+    "agent_slurp_calls": {k: v for k, v in tools.items() if str(k).startswith("mcp__slurp__")},
+    "agent_tools": dict(tools.most_common()),
+    "graphify": graphify,
     "seconds": int(read("seconds.txt", "0") or 0),
     "diff_stat": read("diff-stat.txt").splitlines()[-1:] or [""],
     "checks": {name: read(f"check-{name}.rc") for name in ("tests", "lint")
