@@ -338,3 +338,133 @@ class TestStudyRun:
                            "prometheus"]}
         assert sorted(R["ORDER"]) == sorted(R["GROUPS"]["derivation"] + R["GROUPS"]["validation"])
         assert R["WORKERS"] == 4 and R["N_QUESTIONS"] == 120
+
+
+# --- analyze.py: the criterion ---------------------------------------------------
+
+@pytest.fixture(scope="module")
+def A():
+    return runpy.run_path(str(DESIGN / "analyze.py"))
+
+
+GRID = [1000, 1500, 2000, 3000, 4000, 6000, 8000, 12000, 16000, 24000, 32000]
+
+
+def _rec(recalls: dict, tokens=None, cut=None, **extra):
+    """A question record with markdown recall per budget (JSON the same)."""
+    row = {str(b): [recalls.get(b, recalls[max(k for k in recalls if k <= b)]),
+                    (tokens or {}).get(b, int(b * 0.98)), 10] for b in GRID + [64000]}
+    rec = {"present": 1, "graph_nodes": 1000, "candidates": 400, "test_nodes": 300,
+           "names_symbol": False, "base": {"markdown": row, "json": dict(row)}, "cut": cut or {}}
+    rec.update(extra)
+    return rec
+
+
+class TestOptimalBudget:
+    def test_smallest_budget_reaching_95_percent_of_the_maximum(self, A):
+        recs = [_rec({1000: 0.0, 4000: 1.0})] * 19 + [_rec({1000: 0.0, 16000: 1.0})]
+        # Mean recall: 0 below 4000, 0.95 from 4000, 1.0 from 16000.
+        star = A["optimal"](A["curve"](recs, "markdown"))
+        assert star["b_star"] == 4000 and star["r_max"] == 1.0 and not star["censored"]
+
+    def test_censored_when_recall_still_grows_past_32000(self, A):
+        recs = [_rec({1000: 0.5, 64000: 1.0})] * 10
+        assert A["optimal"](A["curve"](recs, "markdown"))["censored"]
+
+    def test_unscorable_questions_are_left_out(self, A):
+        recs = [_rec({1000: 1.0}), {**_rec({1000: 0.0}), "present": 0}]
+        assert A["curve"](recs, "markdown")[1000]["recall"] == 1.0
+
+    def test_bootstrap_is_seeded(self, A):
+        recs = [_rec({1000: 0.0, 2000: 1.0})] * 5 + [_rec({1000: 0.0, 8000: 1.0})] * 5
+        a = A["bootstrap"](recs, "markdown", n=200)
+        assert a == A["bootstrap"](recs, "markdown", n=200)
+        assert a["p10"] <= a["median"] <= a["p90"]
+
+    def test_round_up_to_the_grid(self, A):
+        assert A["round_up"](3100) == 4000 and A["round_up"](4000) == 4000
+        assert A["round_up"](10) == 1000 and A["round_up"](10 ** 6) == 32000
+
+    def test_grid_steps(self, A):
+        assert A["steps"](4000, 16000) == 4 and A["steps"](3000, 3000) == 0
+
+
+class TestRule:
+    def _cells(self, A, exponent=0.5):
+        # B* = 40 * N^0.5, N from 400 to 90000: the power law the fit must find.
+        out = {}
+        for i, n in enumerate([400, 1600, 3600, 6400, 10000, 22500, 40000, 90000]):
+            out[f"p{i}"] = {"features": {"N": n, "C": n / 2, "T": n * 60, "tau": 0.4,
+                                         "lang": ["Python", "Go"][i % 2]},
+                            "b_star": {"markdown": A["round_up"](40 * n ** exponent),
+                                       "json": A["round_up"](80 * n ** exponent)},
+                            "censored": {"markdown": False, "json": False}}
+        return out
+
+    def test_a_power_law_in_nodes_is_found(self, A):
+        fit = A["fit_rule"](self._cells(A))
+        assert fit["family"] in ("R1:N", "R1:C", "R1:T")
+        rule = fit["rule"]
+        assert rule({"N": 10000, "C": 5000, "T": 600000, "tau": 0.4, "lang": "Go"},
+                    "markdown") in (4000, 6000)
+
+    def test_a_flat_optimum_gives_a_constant(self, A):
+        cells = self._cells(A)
+        for c in cells.values():
+            c["b_star"] = {"markdown": 4000, "json": 6000}
+        fit = A["fit_rule"](cells)
+        assert fit["family"] == "R0"
+        assert fit["rule"]({"N": 1, "C": 1, "T": 1, "tau": 0, "lang": "Go"}, "markdown") == 4000
+
+    def test_acceptance(self, A):
+        # One validation cell: B* = 4000 with R = 0.95; the rule gives 3000 with R = 0.93.
+        cell = {"curve": {3000: {"recall": 0.93}, 4000: {"recall": 0.95},
+                          6000: {"recall": 0.96}}, "b_star": 4000}
+        ok = A["accept"]([{**cell, "b_rule": 3000}])
+        assert ok["passed"] is False            # mean loss 0.02 > 0.01
+        ok = A["accept"]([{**cell, "b_rule": 4000}, {**cell, "b_rule": 6000}])
+        assert ok["passed"] and ok["max_loss"] == 0 and ok["geo_cost"] == pytest.approx(
+            (1.0 * 1.5) ** 0.5)
+
+    def test_the_cost_limits(self, A):
+        cell = {"curve": {4000: {"recall": 0.9}, 32000: {"recall": 0.9}}, "b_star": 4000}
+        assert not A["accept"]([{**cell, "b_rule": 32000}])["passed"]     # 8x > 4x
+
+
+class TestMethodGate:
+    def test_stops_only_if_all_four_cells_are_more_than_two_steps_apart(self, A):
+        far = {"prismastats": {"markdown": (3000, 16000), "json": (6000, 32000)},
+               "slurp": {"markdown": (2000, 12000), "json": (3000, 16000)}}
+        assert A["method_gate"](far)["stop"]
+        near = {**far, "slurp": {"markdown": (8000, 12000), "json": (3000, 16000)}}
+        assert not A["method_gate"](near)["stop"]
+
+
+class TestCut:
+    def test_the_eligible_cut_saving_the_most_is_chosen(self, A):
+        # Two cells; ceiling 8000 gives 1000 tokens. "a" loses nothing and saves 50%,
+        # "b" saves 80% but loses 0.05 in one cell.
+        def cell(r_a, t_a, r_b, t_b):
+            return {"b_star_recall": 0.9, "ceiling": 8000, "ref_tokens": 1000,
+                    "cut": {"a": {"recall": r_a, "tokens": t_a},
+                            "b": {"recall": r_b, "tokens": t_b}}}
+        cells = [cell(0.9, 500, 0.85, 200), cell(0.9, 500, 0.9, 200)]
+        pick = A["choose_cut"](cells)
+        assert pick["key"] == "a" and pick["savings"] == pytest.approx(0.5)
+        res = A["accept_cut"](cells, "a")
+        assert res["passed"] and res["mean_savings"] == pytest.approx(0.5)
+        assert not A["accept_cut"](cells, "b")["passed"]
+
+
+class TestLlmCheck:
+    @pytest.fixture(scope="class")
+    def L(self):
+        return runpy.run_path(str(DESIGN / "llm_check.py"))
+
+    def test_never_calls_claude_without_launch(self, L):
+        with pytest.raises(SystemExit, match="--launch"):
+            L["run"](False)
+
+    def test_budget_multiples(self, L):
+        assert [L["_round_up"](4000 * m) for m in (0.5, 1, 2, 4)] == [2000, 4000, 8000, 16000]
+        assert L["_round_up"](16000 * 4) == 64000 and L["_round_up"](300) == 1000
