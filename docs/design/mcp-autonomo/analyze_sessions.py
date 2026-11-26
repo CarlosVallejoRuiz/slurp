@@ -106,6 +106,39 @@ def _about(call: dict, path: str) -> bool:
     return False
 
 
+def permission_denials(directory: Path) -> list[dict]:
+    """Every denial of the session, from all its result events.
+
+    An agent that leaves a background task running gets one result event per
+    resumption, each with only its own denials; claude.json keeps the last.
+    Deduplicated by tool_use_id, in order of appearance.
+    """
+    events: list[dict] = []
+    stream = directory / "stream.jsonl"
+    if stream.is_file():
+        for line in stream.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(event, dict) and event.get("type") == "result":
+                events.append(event)
+    try:
+        final = json.loads((directory / "claude.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        final = {}
+    if isinstance(final, dict):
+        events.append(final)
+    seen: dict[str, dict] = {}
+    for event in events:
+        for denial in event.get("permission_denials") or []:
+            if not isinstance(denial, dict):
+                denial = {"tool_name": str(denial)}
+            key = str(denial.get("tool_use_id") or f"#{len(seen)}")
+            seen.setdefault(key, denial)
+    return list(seen.values())
+
+
 def load_task(directory: Path) -> TaskResult:
     result = TaskResult(task=directory.name)
     log, claude = directory / "session.log", directory / "claude.json"
@@ -133,12 +166,12 @@ def load_task(directory: Path) -> TaskResult:
             if Path(line).suffix.lower() in _INDEXED_EXTENSIONS and line not in result.edited:
                 result.edited.append(line)
     try:
-        output = json.loads(claude.read_text(encoding="utf-8"))
+        json.loads(claude.read_text(encoding="utf-8"))
     except ValueError:
         result.missing = "claude.json (not JSON)"
         return result
-    for denial in output.get("permission_denials") or []:
-        name = denial.get("tool_name", "") if isinstance(denial, dict) else str(denial)
+    for denial in permission_denials(directory):
+        name = str(denial.get("tool_name", ""))
         if name.startswith("mcp__slurp__"):
             result.denials += 1
         else:

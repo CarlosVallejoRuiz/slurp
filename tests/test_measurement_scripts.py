@@ -99,6 +99,23 @@ class TestAnalyzeSessions:
         found = _analyzer()["load_task"](tmp_path / "t0").graphify
         assert found == [f"Bash: {c}" for c in runs]
 
+    def test_denials_count_from_every_result_event_not_only_the_last(self, tmp_path):
+        # Found in the measurement (sl-2): an agent that leaves a background task
+        # running gets two result events; claude.json keeps the last, which listed
+        # none of the session's nine denials.
+        def denial(tool, use_id):
+            return {"tool_name": tool, "tool_use_id": use_id, "tool_input": {}}
+        first = {"type": "result", "permission_denials": [
+            denial("mcp__slurp__slurp_query", "u1"), denial("Bash", "u2")]}
+        last = {"type": "result", "permission_denials": [denial("Bash", "u2")]}
+        _task(tmp_path, "t0", [], [], stream=[first, last])
+        (tmp_path / "t0" / "claude.json").write_text(json.dumps(last), encoding="utf-8")
+        mod = _analyzer()
+        result = mod["load_task"](tmp_path / "t0")
+        assert (result.denials, result.other_denials) == (1, 1)
+        names = [d["tool_name"] for d in mod["permission_denials"](tmp_path / "t0")]
+        assert names == ["mcp__slurp__slurp_query", "Bash"]
+
     def test_without_an_end_event_the_diff_says_what_was_edited(self, tmp_path):
         # If the client kills the server instead of closing its stdin, the end
         # event never comes; the clone's diff stands in.

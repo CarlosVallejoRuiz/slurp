@@ -135,7 +135,8 @@ json.dump(last, open(sys.argv[2], 'w'), indent=2)
 import collections, json, runpy, sys
 from pathlib import Path
 d, out, task, project = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3], sys.argv[4]
-runs_graphify = runpy.run_path(sys.argv[5])["_RUNS_GRAPHIFY"]  # the analyzer's own rule
+analyzer = runpy.run_path(sys.argv[5])        # the analyzer's own rules
+runs_graphify = analyzer["_RUNS_GRAPHIFY"]
 init, tools, graphify = {}, collections.Counter(), []
 for line in (d / "stream.jsonl").read_text(encoding="utf-8", errors="replace").splitlines() \
         if (d / "stream.jsonl").exists() else []:
@@ -161,8 +162,8 @@ try:
     claude = json.loads(read("claude.json", "{}") or "{}")
 except ValueError:
     claude = {}
-denials = [x.get("tool_name") if isinstance(x, dict) else x
-           for x in claude.get("permission_denials") or []]
+# From every result event, not only the last one claude.json keeps.
+denials = [x.get("tool_name") for x in analyzer["permission_denials"](d)]
 servers = {s.get("name"): s.get("status") for s in init.get("mcp_servers") or []}
 result = {
     "task": task, "project": project,
