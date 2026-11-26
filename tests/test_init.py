@@ -255,3 +255,5 @@ class TestNeverOverwritesAGraphOfAnotherTool:
         res = _init(root, monkeypatch, "--yes")
         assert res.exit_code == 0, res.output
         assert "slurp" in json.loads(old.read_text(encoding="utf-8"))
+        assert "Rebuild slurp's graph" in res.output and "slurp ≤ 1.2" in res.output
+        assert "stays as it is" not in res.output

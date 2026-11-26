@@ -1996,9 +1996,12 @@ def init(yes: bool, keep_graphify: bool, instructions: str) -> None:
     # reused; one it did not build (graphify's) is left as it is and slurp's
     # goes beside it, unless --keep-graphify serves that one, read-only.
     existing_kind = ""
+    existing_owner = ""
     if existing_graph is not None:
         try:
-            existing_kind = "own" if GraphTracker(existing_graph).refreshable else "foreign"
+            tracker = GraphTracker(existing_graph)
+            existing_kind = "own" if tracker.refreshable else "foreign"
+            existing_owner = tracker.kind
         except SlurpLoadError:
             existing_kind = "foreign"
     reuse = existing_kind == "own" or (existing_kind == "foreign" and keep_graphify)
@@ -2032,11 +2035,20 @@ def init(yes: bool, keep_graphify: bool, instructions: str) -> None:
     elif existing_kind == "foreign" and keep_graphify:
         plan.append(f"  1. Serve the existing graph at [cyan]{existing_graph}[/] — slurp "
                     "won't refresh it")
+    elif existing_kind == "foreign" and existing_graph is not None \
+            and existing_graph.resolve() == graph_path.resolve():
+        # A slurp ≤ 1.2 graph whose root did not validate (another tool's graph
+        # here stops init before anything is written, below).
+        plan.append(f"  1. Rebuild slurp's graph at [cyan]{_rel_display(graph_path, root)}[/] "
+                    "(refreshed before every answer)")
+        plan.append("     The one there was written by slurp ≤ 1.2 and fewer than nine in ten "
+                    "of its files exist here.")
     elif existing_kind == "foreign":
         plan.append(f"  1. Build slurp's own graph at [cyan]{_rel_display(graph_path, root)}[/] "
                     "(refreshed before every answer)")
-        plan.append(f"     {existing_graph} was not built by slurp and stays as it is.")
-        plan.append("     [dim]Keep that graph instead (slurp won't refresh it): "
+        who = "graphify" if existing_owner == "graphify" else "another tool"
+        plan.append(f"     {existing_graph} ({who}'s) stays as it is.")
+        plan.append("     [dim]Serve that graph instead (slurp won't refresh it): "
                     "--keep-graphify[/]")
     else:
         plan.append("  1. Index this project into [cyan]graphify-out/graph.json[/] "
@@ -2051,10 +2063,9 @@ def init(yes: bool, keep_graphify: bool, instructions: str) -> None:
         where = ", ".join(_rel_display(p, root) for p in instruction_plan.targets) or "—"
         kind = "local, not versioned" if instructions == "local" else "versioned"
         plan.append(f"  4. Tell the agent when to use slurp in [cyan]{where}[/] ({kind})")
-    plan.append("     [dim]Elsewhere: --instructions local (CLAUDE.local.md) | versioned "
-                "(CLAUDE.md / AGENTS.md) | none[/]")
-    plan.append("  5. .gitignore: .slurp/, .claude/settings.local.json, CLAUDE.local.md "
-                "[dim](only if .gitignore exists)[/]")
+    plan.append("     [dim]Or: --instructions versioned (CLAUDE.md/AGENTS.md) | none[/]")
+    plan.append("  5. Keep .slurp/, settings.local.json, CLAUDE.local.md out of git "
+                "[dim](.gitignore)[/]")
     plan.append("")
     plan.append(f"[dim]slurp binary: {command}  ({install_kind})[/]")
 
