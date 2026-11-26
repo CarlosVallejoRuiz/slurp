@@ -67,8 +67,10 @@ abajo. graphify se usó en 0/10 sesiones.
   ediciones concurrentes está en `../verificacion.md`, no aquí.
 - **"0 denegaciones" está medido en `claude -p`.** Antes de cada sesión, `claude mcp get slurp`
   decía "⏸ Pending approval" en los diez clones. Aun así, dentro de la sesión el servidor
-  conectó y sus herramientas se usaron sin ninguna denegación. Falta comprobar en una sesión
-  interactiva que no sale ningún diálogo (paso 2 del protocolo); de eso se encarga el autor.
+  conectó y sus herramientas se usaron sin ninguna denegación. El paso 2 del protocolo lo
+  confirma: el autor abrió un clon de PrismaStats con `slurp init` en una sesión
+  interactiva, y Claude Code no pidió ninguna aprobación de slurp; el servidor aparecía
+  conectado.
 
 ## La ejecución abortada
 
@@ -121,7 +123,9 @@ lado, y con tareas distintas, no se puede atribuir esa diferencia al párrafo.
      - nombrar el argumento en la descripción de las instrucciones del servidor;
      - dejarlo como está.
 
-   No se ha cambiado nada, porque es una decisión de diseño.
+   **Decisión del autor (#93):** sin más `alwaysLoad`. Las instrucciones del servidor nombran
+   ahora el argumento (`slurp_impact(file_path=...)`, `slurp_explain(node_name=...)`), y
+   `slurp_impact` acepta también `target` y `path`.
 2. **Uso de slurp:** los agentes lo usan para orientarse al empezar.
    - En las 9 sesiones que lo usaron, la primera llamada fue a `slurp_query`.
    - En 8 de ellas fue la primera acción de la sesión; en sl-2 llegó segunda, tras un comando
@@ -152,6 +156,7 @@ lado, y con tareas distintas, no se puede atribuir esa diferencia al párrafo.
    Ninguno de los dos cambia el criterio.
 6. **La premisa de ps-3 era en parte inexacta.** La tarea se diseñó así; el agente lo detectó
    y explicó qué había cambiado.
-7. **Un detalle de `init` sin corregir:** cuando no va a escribir el párrafo de instrucciones,
-   el plan lo anuncia igual, como "4. Tell the agent when to use slurp in — (local, not
-   versioned)".
+7. **Un detalle de `init`:** cuando no iba a escribir el párrafo de instrucciones, el plan lo
+   anunciaba igual, como "4. Tell the agent when to use slurp in — (local, not versioned)".
+   Corregido en #94: ahora dice que no escribe ningún párrafo y qué fichero ya menciona
+   slurp.

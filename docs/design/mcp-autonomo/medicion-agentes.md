@@ -3,8 +3,9 @@
 **Estado:** preparado el 2026-11-26 sobre la v1.3 en desarrollo (`main`, versión 1.2.1 sin
 bump). Tareas confirmadas por el autor el 2026-11-26 (las cinco de PrismaStats le valen).
 Resultados en `resultados/`; conclusiones en `resultados/conclusiones.md`. Medida el
-2026-11-26 (condición B, diez sesiones): **cumple el criterio**. Pendiente: el paso 2,
-la comprobación interactiva del diálogo de aprobación, que hace el autor.
+2026-11-26 (condición B, diez sesiones): **cumple el criterio**. Paso 2 hecho por el
+autor el mismo día, en un clon de PrismaStats con `slurp init`: no pidió ninguna
+aprobación de slurp y el servidor aparecía conectado.
 
 **Decisiones del autor antes de lanzar (2026-11-26):**
 
