@@ -1,0 +1,75 @@
+{
+  "note": "Diez tareas para la medición de docs/design/mcp-autonomo.md §7. Los prompts no mencionan slurp, el grafo ni MCP. Las de slurp salen del roadmap (Roadmap slurp.xlsx, filas 24, 26, 28, 31 y 33). Las de PrismaStats son PROPUESTAS sacadas de docs/roadmap.md y del código: el autor tiene que confirmarlas o sustituirlas antes de lanzar la medición.",
+  "tasks": [
+    {
+      "id": "ps-1",
+      "project": "prismastats",
+      "status": "propuesta",
+      "source": "lib/supabase/cantera-actions.ts (umbrales 0.7 y 30 escritos en el código)",
+      "prompt": "La detección de baja participación de la cantera usa dos umbrales escritos a mano: un 70 % de asistencia y 30 minutos por partido. Sácalos a constantes con nombre en un único sitio, úsalas donde se aplican y añade un test que fije el comportamiento en los dos bordes."
+    },
+    {
+      "id": "ps-2",
+      "project": "prismastats",
+      "status": "propuesta",
+      "source": "app/admin/page.tsx (club 'Inactivo' con un número de días fijo)",
+      "prompt": "En el panel de administración, un club pasa a 'Inactivo' según un número de días fijo en el código. Haz que ese número salga de la configuración global que ya gestiona el panel, con el valor actual por defecto."
+    },
+    {
+      "id": "ps-3",
+      "project": "prismastats",
+      "status": "propuesta",
+      "source": "roadmap: WhatsApp — resumen de partido (modo cantera)",
+      "prompt": "El resumen de partido que se comparte por WhatsApp desde el partido en vivo no dice en qué minuto se marcó cada gol. Añade el minuto a cada goleador, sin cambiar el resto del mensaje."
+    },
+    {
+      "id": "ps-4",
+      "project": "prismastats",
+      "status": "propuesta",
+      "source": "recalcularPlayerStats y los eventos de partido del panel de administración",
+      "prompt": "Cuando se borra un evento de partido desde el panel de administración, las estadísticas del jugador se recalculan. Comprueba que el recálculo es correcto también cuando el evento borrado era una tarjeta roja o un cambio, corrige lo que no lo sea y deja un test."
+    },
+    {
+      "id": "ps-5",
+      "project": "prismastats",
+      "status": "propuesta",
+      "source": "roadmap: Biblioteca de informes — historial con estado de lectura",
+      "prompt": "La biblioteca de informes marca un informe como leído al abrirlo, pero no hay forma de volver a marcarlo como no leído. Añade esa opción en la tarjeta del informe y la acción de servidor que necesite."
+    },
+    {
+      "id": "sl-1",
+      "project": "slurp",
+      "status": "backlog",
+      "source": "roadmap #28",
+      "prompt": "En el visualizador HTML queda código muerto (una variable JavaScript _anyDiff que nadie lee) y un comentario de _resolve_node_type que ya no describe lo que hace. Quita lo primero y corrige lo segundo, sin cambiar el HTML que se genera."
+    },
+    {
+      "id": "sl-2",
+      "project": "slurp",
+      "status": "backlog",
+      "source": "roadmap #31",
+      "prompt": "Hay código muerto en el explicador y en el indexador, un mapa de extensiones a lenguaje duplicado en dos módulos y textos de ayuda del CLI que ya no corresponden a lo que hacen las opciones. Límpialo sin cambiar el comportamiento: los tests y ruff tienen que seguir limpios."
+    },
+    {
+      "id": "sl-3",
+      "project": "slurp",
+      "status": "backlog",
+      "source": "roadmap #33",
+      "prompt": "Si escribes mal un subcomando del CLI (por ejemplo `stast` en vez de `stats`), el CLI lo ejecuta como una consulta en vez de avisar. Haz que una palabra suelta muy parecida a un subcomando existente dé un error que sugiera el subcomando, sin romper las consultas de una palabra legítimas. Con tests."
+    },
+    {
+      "id": "sl-4",
+      "project": "slurp",
+      "status": "backlog",
+      "source": "roadmap #26",
+      "prompt": "Cuando el visualizador recorta a 50 nodos lo que dibuja, pueden quedar nodos sin ninguna arista visible. Haz que el recorte no deje huérfanos y expón ese límite de nodos como opción del CLI. Con tests."
+    },
+    {
+      "id": "sl-5",
+      "project": "slurp",
+      "status": "backlog",
+      "source": "roadmap #24",
+      "prompt": "El eval con juez LLM presenta siempre las dos respuestas en el mismo orden, lo que lo expone al sesgo de posición del juez. Haz que cada pregunta se juzgue también con el orden intercambiado y que la puntuación combine los dos juicios. Con tests que no llamen a ningún LLM."
+    }
+  ]
+}
