@@ -2,8 +2,9 @@
 
 ## Estado
 
-- **Fecha y situación:** propuesta del 2026-11-26, **sin aprobar**.
-- **Alcance:** solo diseño. No se ha medido el recall de ningún proyecto open source.
+- **Fecha y situación:** propuesta del 2026-11-26, **aprobada por el autor ese mismo día** con
+  la variante del corte por relevancia (§4.5). Ver «Decisiones del autor» abajo.
+- **Alcance de la fase 1:** solo diseño. No se midió el recall de ningún proyecto open source.
 - **Lo único medido hasta ahora:**
   - tamaños con `slurp index`;
   - los filtros de commits;
@@ -14,6 +15,21 @@
   - los repos, en `~/slurp-bench/repos/`, fuera de este repo;
   - el prototipo del generador de preguntas, en `~/slurp-bench/tools/questions.py`;
   - las muestras, en `~/slurp-bench/questions/`.
+
+## Decisiones del autor (2026-11-26)
+
+- **Proyectos y grupos** (§1): aprobados.
+- **Criterio y márgenes** (§4): aprobados tal cual.
+- **Rejilla de presupuestos** (§3): aprobada, con 64000 solo como control.
+- **Comprobación con un LLM** (§5): sí, pero solo si se acepta una regla, con `claude -p` y la
+  suscripción del autor. Se prepara, pero no se lanza sin avisarle.
+- **Variante nueva: corte por relevancia** (§4.5). slurp deja de añadir nodos cuando la
+  relevancia de lo que queda cae por debajo de un umbral, con el presupuesto como techo.
+  - Se proponen tres formas de definir el umbral, cada una con su criterio fijado antes de medir.
+  - Debe perder como mucho lo mismo que la regla y ahorrar al menos un 25 % de tokens frente a
+    ella.
+  - Se ajusta solo en el grupo de derivación.
+- **Sin cambios en el código de slurp** hasta ver los resultados.
 
 ## La pregunta
 
@@ -427,12 +443,22 @@ doble.
 - **Del grafo de cada pregunta:** nodos, candidatos y proporción de tests.
 - **Por proyecto:** tokens del grafo completo en el HEAD y en el padre de tamaño mediano.
 
-**Mismo código que `slurp eval --retrieval`.** Se llama en proceso a `run_retrieval_eval`, la
-función de la orden, una vez por punto, sobre el grafo de cada pregunta.
+**Mismo código que `slurp eval --retrieval`.** `run_retrieval_eval`, la función de la orden,
+da exactamente los mismos resultados que la orden, pregunta a pregunta. Está comprobado con las
+referencias de PrismaStats en 2000 y 8000, markdown y JSON.
 
-- Comprobado: da exactamente los mismos resultados que la orden, pregunta a pregunta, con las
-  referencias de PrismaStats en 2000 y 8000, markdown y JSON.
-- Así se evita lanzar un proceso y cargar el grafo 24 veces por pregunta.
+Pero esa función vuelve a puntuar el grafo en cada llamada, y puntuar es casi todo el coste: en
+el grafo de sqlalchemy, 0,3–1,4 s por puntuar frente a 20–100 ms por cada `build_context`. Por
+eso el arnés hace lo mismo que `run_retrieval_eval`, pero puntúa una sola vez por pregunta:
+
+- `score_nodes` una vez;
+- luego `build_context` en cada punto, con los mismos argumentos;
+- el recall, el rango y los tokens se calculan igual que en la función.
+
+Antes de medir se comprueba que da resultados idénticos a `run_retrieval_eval` en preguntas de
+varios proyectos. Si no fuera así, se mide con la función, aunque tarde más.
+
+El estudio corre con **4 procesos**, un proyecto por proceso.
 
 **Dónde se guardan los datos.**
 
@@ -524,6 +550,77 @@ decir que el sustituto por commits mide otra cosa.
 Este estudio no toca slurp. Un modo de presupuesto automático, con el valor calculado a partir
 del grafo, sería otro diseño, y solo si la regla se acepta.
 
+### 4.5 Variante: corte por relevancia
+
+**El problema.** La salida llena siempre el ~98 % del presupuesto aunque ya no gane recall
+(§2.6). La variante consiste en que slurp deje de añadir nodos cuando la relevancia de lo que
+queda cae por debajo de un umbral, con el presupuesto como techo.
+
+**Cómo se emula, sin tocar slurp.** `build_context` solo toma como candidatos los nodos con
+score ≥ `min_score`. Así que el corte equivale a un **`min_score` calculado por consulta** a
+partir de sus propios scores: τ\_q. Se pasa `max(τ_q, 0,15)` como `min_score` y el presupuesto
+como techo.
+
+- Es exactamente lo que haría slurp con ese `min_score`, porque es su mismo código.
+- La cabecera cuenta los nodos que deja fuera, igual que hoy con `min_score`.
+- Un nodo por debajo de τ\_q no es candidato. Por tanto tampoco recibe el impulso de sus
+  vecinos: un relevante que solo entraba por ese impulso se pierde, y eso es parte de lo que se
+  mide.
+
+**De qué scores se parte.** Se usan los de los **candidatos** de la consulta (sin tests ni
+imports):
+
+- s\_max, el mejor score;
+- m, la mediana.
+
+En los grafos de `slurp index`, todo nodo de código lleva +0,3, así que m ≈ 0,30: es el
+**suelo**, el score de un nodo que no comparte ningún término con la consulta. En sqlalchemy
+s\_max ≈ 0,70, y el percentil 90 es 0,301.
+
+**Las tres formas del umbral**, cada una con su rejilla de parámetros, fijada ahora:
+
+| Forma | Umbral τ\_q | Rejilla |
+|---|---|---|
+| C1, relativo al mejor | α · s\_max | α ∈ {0,50, 0,55, 0,60, 0,65, 0,70, 0,75, 0,80} |
+| C2, sobre el suelo | m + β · (s\_max − m) | β ∈ {0,02, 0,05, 0,10, 0,20, 0,30, 0,40} |
+| C3, salto brusco | Ver abajo | γ ∈ {0,05, 0,10, 0,15, 0,20, 0,30} |
+
+**Cómo funciona C3.**
+
+- Se ordenan los scores de mayor a menor: s\_1 ≥ s\_2 ≥ …
+- Se busca el primer i ≥ 5 con s\_i − s\_{i+1} ≥ γ · (s\_max − m).
+- El umbral es τ = s\_i. Así siempre entran los 5 primeros, y los empates en s\_i también.
+- Si no hay salto, no se corta y el presupuesto decide.
+
+**Techo.** El techo es B\_ref, el presupuesto contra el que se compara:
+
+- el de la regla aceptada (§4.3), por proyecto y formato;
+- si no se acepta ninguna regla, el de la recomendación de §4.3: la mejor constante, o 4000.
+
+Además se informa, sin que decida nada, del corte con techo 32000, es decir, del corte solo.
+
+**Ajuste, solo en derivación.**
+
+- Para cada forma y valor de la rejilla (18 combinaciones), se mide en cada celda de derivación
+  el recall con corte, R\_corte, y los tokens reales con techo B\_ref.
+- Son elegibles las combinaciones que cumplen los márgenes de la regla en derivación.
+- Gana la elegible con **más ahorro medio de tokens frente a B\_ref**.
+- Solo esa combinación se abre en validación. Las otras se informan, pero no deciden.
+
+**Aceptación en validación.** Se abre una vez, con una sola combinación.
+
+- **Pierde como mucho lo mismo que la regla.** Interpretación: los mismos márgenes que la regla,
+  frente al óptimo de cada proyecto.
+  - max(0, R(B\*) − R\_corte) ≤ 0,03 en cada celda;
+  - ≤ 0,01 de media.
+- **Ahorra al menos un 25 % de tokens frente a la regla.**
+  - Ahorro de una celda = 1 − (tokens medios con corte) / (tokens medios con B\_ref).
+  - La media del ahorro en las celdas de validación tiene que ser ≥ 0,25.
+- **Se informa además,** fuera de la aceptación:
+  - el ahorro y la pérdida frente al 4000 actual;
+  - el corte con techo 32000;
+  - las otras dos formas.
+
 ---
 
 ## 5. Comprobación con un LLM (opcional)
@@ -531,8 +628,10 @@ del grafo, sería otro diseño, y solo si la regla se acepta.
 **Qué se comprobaría.** El recall es un sustituto. La pregunta es si, por encima de B*, la
 calidad de la respuesta de un modelo deja de mejorar.
 
-**Propuesta: sí, pero pequeña.** Se haría al final de la fase 2 y solo si se acepta una regla.
-No decide nada: confirma o pone en duda el sustituto.
+**Decisión del autor: sí, solo si se acepta una regla, con `claude -p` y su suscripción.** Se
+prepara al final de la fase 2 y no se lanza sin avisarle. No decide nada: confirma o pone en duda
+el sustituto. Además de la nota del juez, se informa de una medida sin LLM: la fracción de
+definiciones relevantes que la respuesta nombra.
 
 **Muestra.**
 
@@ -604,7 +703,11 @@ La máquina es un Apple M4 de 10 núcleos con 16 GB de memoria.
 | prometheus | 120 | 28,2 |
 | **Total** | **~1.530** | **~158 (2,6 h)** |
 
-**Con 4 procesos en paralelo:** unos 45 minutos. Por memoria no conviene pasar de 4: un grafo de
+**Con 4 procesos en paralelo:** unos 45 minutos. Con el arnés que puntúa una vez por pregunta
+(§3), la evaluación cuesta mucho menos que esta estimación. El tiempo que queda es sobre todo el
+de los índices. El corte por relevancia añade 18 combinaciones × 11 techos × 2 formatos llamadas
+a `build_context` por pregunta. Cuando el corte ya cabe entero en un techo, los techos mayores
+dan el mismo resultado y no se recalculan. Por memoria no conviene pasar de 4: un grafo de
 sqlalchemy ocupa varios cientos de MB en memoria.
 
 **Lo que no es cálculo:**
@@ -661,11 +764,7 @@ sqlalchemy ocupa varios cientos de MB en memoria.
 5. **Ajustar en derivación** y abrir la validación una vez (§4).
 6. **Informar.** Un commit con los resúmenes; ningún cambio en slurp.
 
-**Decisiones del autor que hacen falta antes de la fase 2:**
-
-- **Proyectos y grupos** (§1): ¿valen?
-- **Criterio** (§4): el 95 %, el margen de 3 puntos por celda (1 de media), el coste de 1,5× y
-  el 25 % de simplicidad. ¿Valen?
-- **Rejilla:** ¿vale, con 64000 solo como control?
-- **Comprobación con un LLM** (§5): ¿se hace? Si se hace, ¿con qué modelo y por qué vía (API o
-  `claude -p`)?
+Las decisiones están tomadas (ver «Decisiones del autor»). Al paso 5 se le añade el corte
+por relevancia (§4.5): se ajusta en derivación después de la regla, porque su techo depende de
+ella, y se abre en validación una vez. Si se acepta la regla, la comprobación con un LLM se
+prepara y se espera al autor.
