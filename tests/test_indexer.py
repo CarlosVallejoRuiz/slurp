@@ -5866,3 +5866,93 @@ class TestNoPrivateAttributesInOutput:
         assert res.exit_code == 0, res.output
         assert "Full index needed" not in res.output  # the fast path ran
         assert _private_keys(json.loads(out.read_text())) == set()
+
+
+# ---------------------------------------------------------------------------
+# The walk that the v1.3 manifest records: directories with their mtimes
+# ---------------------------------------------------------------------------
+
+class TestSourceTreeWalk:
+    def test_files_are_those_of_iter_source_files(self, tmp_path):
+        from slurp.indexer import walk_source_tree
+
+        _tricky_tree(tmp_path)
+        root = tmp_path / "proj"
+        _dirs, files = walk_source_tree(root)
+        assert files == list(iter_source_files(root))
+
+    def test_dirs_are_the_walked_ones_with_their_mtimes(self, tmp_path):
+        import os
+
+        from slurp.indexer import walk_source_tree
+
+        _tricky_tree(tmp_path)
+        root = tmp_path / "proj"
+        dirs, _files = walk_source_tree(root)
+        assert set(dirs) == {"", "src", "src/web", "apps", "apps/web", "out", "tools",
+                             "tools/out", ".hidden", "inner"} - {"out"}
+        for rel, mtime in dirs.items():
+            assert mtime == os.stat(root / rel).st_mtime_ns
+
+    def test_a_directory_is_stat_before_it_is_listed(self, tmp_path, monkeypatch):
+        # A file created between the listing and the stat would bump the mtime
+        # the manifest records and never be noticed as new.
+        import os
+
+        from slurp import indexer
+
+        _put(tmp_path, "a.py", "x = 1\n")
+        calls: list[str] = []
+        real_stat, real_scandir = os.stat, os.scandir
+        monkeypatch.setattr(indexer.os, "stat",
+                            lambda p, *a, **k: (calls.append(f"stat {p}"),
+                                                real_stat(p, *a, **k))[1])
+        monkeypatch.setattr(indexer.os, "scandir",
+                            lambda p=".": (calls.append(f"scandir {p}"), real_scandir(p))[1])
+        indexer.walk_source_tree(tmp_path)
+        assert calls[:2] == [f"stat {tmp_path}", f"scandir {tmp_path}"]
+
+    def test_listing_one_directory_matches_the_walk(self, tmp_path):
+        from slurp.indexer import list_source_dir, walk_source_tree
+
+        _tricky_tree(tmp_path)
+        root = tmp_path / "proj"
+        dirs, files = walk_source_tree(root)
+        for rel in dirs:
+            listed = list_source_dir(root, rel)
+            assert listed is not None
+            _mtime, subdirs, here = listed
+            expected_files = [p for p in files
+                              if p.parent == (root / rel if rel else root)]
+            assert here == expected_files
+            children = {d for d in dirs
+                        if d and (d.rsplit("/", 1)[0] if "/" in d else "") == rel}
+            assert {f"{rel}/{s}" if rel else s for s in subdirs} == children
+
+    def test_a_missing_directory_lists_as_none(self, tmp_path):
+        from slurp.indexer import list_source_dir
+
+        assert list_source_dir(tmp_path, "gone") is None
+
+    def test_index_project_can_take_the_files_to_index(self, tmp_path):
+        _put(tmp_path, "a.py", "def a():\n    return 1\n")
+        _put(tmp_path, "b.py", "def b():\n    return 2\n")
+        graph = index_project(tmp_path, files=[tmp_path / "a.py"])
+        assert {n["source_file"] for n in graph["nodes"]} == {"a.py"}
+
+
+class TestParserForExtension:
+    def test_python_is_ast_and_go_is_regex(self):
+        from slurp.indexer import parser_for_extension
+
+        assert parser_for_extension(".py") == "ast"
+        assert parser_for_extension(".go") == "regex"
+        assert parser_for_extension(".lua") == "regex"
+
+    def test_typescript_follows_the_grammar(self, monkeypatch):
+        from slurp import indexer
+
+        monkeypatch.setattr(indexer, "_TREE_SITTER_AVAILABLE", True)
+        assert indexer.parser_for_extension(".tsx") == "tree-sitter"
+        monkeypatch.setattr(indexer, "_TREE_SITTER_AVAILABLE", False)
+        assert indexer.parser_for_extension(".tsx") == "regex fallback"

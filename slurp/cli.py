@@ -14,6 +14,7 @@ from rich.table import Table
 from rich.text import Text
 
 from slurp import __version__
+from slurp import graphfile as _graphfile
 from slurp._graphutils import _LANGUAGE_BY_EXT, _left_out
 from slurp.audit import log_query, read_audit, top_nodes_from_audit
 # Imported at module level because the --price-model choices are built at decoration time.
@@ -72,39 +73,10 @@ def _find_graph() -> Path | None:
     return None
 
 
-# The top-level keys slurp writes. graphify's graph.json is networkx node-link
-# data and adds directed/multigraph/graph/hyperedges — it writes
-# built_at_commit as well, so that key alone cannot tell them apart.
-# DECISION: "slurp" is the manifest v1.3 adds to every graph it writes
-# (docs/design/mcp-autonomo.md §2.1). This version does not write it, but
-# recognises it, so it re-indexes a v1.3 graph as its own instead of asking
-# before replacing it; v1.3 then rebuilds the manifest it lost.
-_SLURP_GRAPH_KEYS = frozenset({"nodes", "links", "built_at_commit", "slurp"})
-
-
-def _is_foreign_graph(path: Path) -> bool:
-    """Whether *path* holds a file that `slurp index` did not write.
-
-    DECISION: slurp's default output, graphify-out/graph.json, is also where
-    graphify writes its own graph, and that graph carries LLM-extracted
-    relations slurp cannot regenerate. Anything that is not recognisably
-    slurp's output counts as foreign — including a file that does not parse,
-    which may be another tool's half-written graph. A bare {nodes, links}
-    graph is indistinguishable from slurp's and is treated as slurp's.
-
-    Args:
-        path: Output path about to be written.
-
-    Returns:
-        True if the file exists and was not written by slurp.
-    """
-    if not path.exists():
-        return False
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return True
-    return not isinstance(data, dict) or not set(data) <= _SLURP_GRAPH_KEYS
+# Ownership lives in slurp.graphfile since v1.3: the refresh of the server and
+# of every command needs it too. The CLI names are kept for its callers.
+_SLURP_GRAPH_KEYS = _graphfile._SLURP_GRAPH_KEYS
+_is_foreign_graph = _graphfile.is_foreign_graph
 
 
 def _confirm_replacing_foreign_graph(path: Path, keep_both_hint: str) -> None:
@@ -1544,7 +1516,8 @@ def _rel_display(path: Path, root: Path) -> str:
         return str(path)
 
 
-def _run_smart(root: Path, out: Path, ignore, dry_run: bool) -> bool:
+def _run_smart(root: Path, out: Path, ignore, dry_run: bool,
+               ignore_path: Path | None = None) -> bool:
     """Run one incremental re-index and report it.
 
     Args:
@@ -1562,7 +1535,7 @@ def _run_smart(root: Path, out: Path, ignore, dry_run: bool) -> bool:
     mode = "smart mode, dry run" if dry_run else "smart mode"
     click.echo(f"Indexing {root} ({mode}) ...")
 
-    result = smart_reindex(root, out, ignore, dry_run=dry_run)
+    result = smart_reindex(root, out, ignore, dry_run=dry_run, ignore_path=ignore_path)
 
     if not result.is_git_repo:
         click.echo("  No git repository found — running full index")
@@ -1680,29 +1653,36 @@ def index_cmd(
     No graphify or LLM required. Supports Python (ast), TypeScript/JS
     (tree-sitter or regex), and Go (regex).
     """
-    from slurp.graphfile import write_graph
+    from slurp.graphfile import GraphChangedError, GraphLock, graph_identity, write_graph
     from slurp.indexer import (
         _INDEXED_EXTENSIONS,
         format_parser_summary,
-        index_project,
         iter_source_files,
         parser_summary,
     )
-    from slurp.smart import head_commit
+    from slurp.refresh import index_with_manifest
 
     root = Path(path).resolve()
     out = Path(output_path) if output_path else root / "graphify-out" / "graph.json"
-    ignore = load_ignore(Path(ignore_file))
+    ignore_path = Path(ignore_file)
+    ignore = load_ignore(ignore_path)
+
+    def _overtaken() -> click.ClickException:
+        return click.ClickException(
+            f"{out} changed while slurp was indexing — another tool wrote it. "
+            "Nothing was written; run `slurp index` again.")
 
     def _run() -> None:
         click.echo(f"Indexing {root} ...")
-        graph = index_project(root, ignore)
-        # The commit the graph reflects; --smart diffs against it later.
-        graph["built_at_commit"] = head_commit(root)
+        expected = graph_identity(out)
+        graph = index_with_manifest(root, out, ignore_path)
         n_nodes = len(graph["nodes"])
         n_edges = len(graph["links"])
         files_processed = len({n["source_file"] for n in graph["nodes"] if n.get("source_file")})
-        write_graph(out, graph)
+        try:
+            write_graph(out, graph, expected=expected)
+        except GraphChangedError:
+            raise _overtaken() from None
         click.echo(f"✓ {n_nodes} nodes · {n_edges} edges · {files_processed} files")
         if not n_nodes:
             _explain_empty_graph(root)
@@ -1725,7 +1705,7 @@ def index_cmd(
         raise click.ClickException("--dry-run only applies with --smart.")
 
     if dry_run:
-        _run_smart(root, out, ignore, dry_run=True)
+        _run_smart(root, out, ignore, dry_run=True, ignore_path=ignore_path)
         return
 
     foreign = _is_foreign_graph(out)
@@ -1738,10 +1718,27 @@ def index_cmd(
         click.echo("  Existing graph was not written by slurp — running a full "
                    "index instead of --smart")
 
-    # _run_smart returns False when it could not run incrementally (no git repo,
-    # no existing graph); the reason is reported and a full index takes over.
-    if foreign or not smart or not _run_smart(root, out, ignore, dry_run=False):
-        _run()
+    # DECISION: the lock saves two slurp processes from indexing the same
+    # project at once (the MCP server refreshing while this runs); it is held
+    # for one write at a time, so `--watch` never keeps the server out.
+    lock = GraphLock(out)
+    lock.acquire(on_wait=lambda: click.echo(
+        f"waiting for another slurp process to finish writing {out}…", err=True))
+    try:
+        if not foreign and _is_foreign_graph(out) and not force:
+            raise _overtaken()
+        # _run_smart returns False when it could not run incrementally (no git
+        # repo, no existing graph); the reason is reported and a full index
+        # takes over.
+        try:
+            done = (not foreign and smart
+                    and _run_smart(root, out, ignore, dry_run=False, ignore_path=ignore_path))
+        except GraphChangedError:
+            raise _overtaken() from None
+        if not done:
+            _run()
+    finally:
+        lock.release()
 
     if watch:
         try:
@@ -1839,7 +1836,9 @@ def init(yes: bool) -> None:
         n_edges = len(data.get("links", data.get("edges", [])))
         click.echo(f"Using existing graph: {graph_path}")
     else:
-        from slurp.indexer import index_project, iter_source_files
+        from slurp.graphfile import GraphChangedError, GraphLock, graph_identity, write_graph
+        from slurp.indexer import iter_source_files
+        from slurp.refresh import index_with_manifest
 
         graph_path = root / "graphify-out" / "graph.json"
         if _is_foreign_graph(graph_path):
@@ -1850,7 +1849,6 @@ def init(yes: bool) -> None:
                 f"`slurp index . -o {graph_path.parent / 'slurp-graph.json'}` "
                 "and point .mcp.json at that file",
             )
-        ignore = load_ignore(Path(".slurpignore"))
         files = list(iter_source_files(root))
 
         # DECISION: the live progress bar is disabled off-TTY so piped output
@@ -1869,16 +1867,25 @@ def init(yes: bool) -> None:
             disable=not is_tty,
         ) as progress:
             task = progress.add_task("index", total=len(files))
-            graph = index_project(root, ignore, on_file=lambda _p: progress.advance(task))
-        from slurp.smart import head_commit
-
-        from slurp.graphfile import write_graph
-
-        graph["built_at_commit"] = head_commit(root)
+            lock = GraphLock(graph_path)
+            lock.acquire(on_wait=lambda: click.echo(
+                f"waiting for another slurp process to finish writing {graph_path}…",
+                err=True))
+            try:
+                expected = graph_identity(graph_path)
+                graph = index_with_manifest(root, graph_path, Path(".slurpignore"),
+                                            on_file=lambda _p: progress.advance(task))
+                try:
+                    write_graph(graph_path, graph, expected=expected)
+                except GraphChangedError:
+                    raise click.ClickException(
+                        f"{graph_path} changed while slurp was indexing — another tool "
+                        "wrote it. Nothing was written; run `slurp init` again.") from None
+            finally:
+                lock.release()
 
         n_nodes = len(graph["nodes"])
         n_edges = len(graph["links"])
-        write_graph(graph_path, graph)
 
     # --- Step 2: .mcp.json --------------------------------------------------
     existing_cfg: dict | None = None

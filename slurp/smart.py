@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
 
-from slurp.graphfile import write_graph
+from slurp.graphfile import graph_identity, write_graph
 from slurp.ignore import SlurpIgnore
 from slurp.indexer import (
     _INDEXED_EXTENSIONS,
@@ -27,6 +27,7 @@ from slurp.indexer import (
     _should_skip,
     iter_source_files,
 )
+from slurp.manifest import MANIFEST_KEY, build_manifest
 
 _GIT_TIMEOUT_S = 30
 
@@ -261,6 +262,7 @@ def smart_reindex(
     graph_path: Path,
     ignore: SlurpIgnore | None = None,
     dry_run: bool = False,
+    ignore_path: Path | None = None,
 ) -> SmartIndexResult:
     """Update an existing graph in place, re-parsing only what changed.
 
@@ -269,6 +271,8 @@ def smart_reindex(
         graph_path: Path of the graph to read and rewrite.
         ignore: Optional SlurpIgnore rules applied to newly produced nodes.
         dry_run: Compute everything but leave the graph on disk untouched.
+        ignore_path: The file *ignore* was read from, recorded in the graph's
+            manifest. Default: <root>/.slurpignore.
 
     Returns:
         A SmartIndexResult. Check `needs_full_index` first: when there is no git
@@ -283,10 +287,16 @@ def smart_reindex(
     if not graph_path.is_file():
         return SmartIndexResult(graph_found=False, dry_run=dry_run)
     try:
+        identity = graph_identity(graph_path)
         graph = json.loads(graph_path.read_text(encoding="utf-8"))
         graph_mtime = graph_path.stat().st_mtime_ns
     except (OSError, ValueError):
         return SmartIndexResult(graph_found=False, dry_run=dry_run)
+    ignore_path = root / ".slurpignore" if ignore_path is None else ignore_path
+    # The manifest the rewritten graph will carry: taken before git is asked
+    # and before anything is parsed, so an edit made meanwhile shows up as a
+    # stale entry at the next check rather than vanishing (see manifest.file_entry).
+    snapshot = build_manifest(root, ignore_path)
 
     # DECISION: changes are measured against the commit the graph was built
     # from, not against HEAD. Comparing with HEAD made a commit between the
@@ -368,9 +378,10 @@ def smart_reindex(
     kept_edges = [e for e in (graph.get("links") or []) if e.get("source") not in removed_ids]
     rebuilt = _assemble_graph(kept_nodes + new_nodes, kept_edges + new_edges, ignore)
     rebuilt["built_at_commit"] = head_commit(root)
+    rebuilt[MANIFEST_KEY] = snapshot.to_dict(graph_path)
 
     if not dry_run:
-        write_graph(graph_path, rebuilt)
+        write_graph(graph_path, rebuilt, expected=identity)
 
     elapsed_ms = (perf_counter() - start) * 1000
     per_file_ms = parse_ms / len(modified) if modified else 0.0

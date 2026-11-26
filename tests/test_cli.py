@@ -2141,7 +2141,7 @@ class TestIndexKeepsForeignGraphs:
                                   input="y\n")
         assert result.exit_code == 0, result.output
         data = json.loads(out.read_text(encoding="utf-8"))
-        assert set(data) == {"nodes", "links", "built_at_commit"}
+        assert set(data) == {"nodes", "links", "built_at_commit", "slurp"}
 
     def test_force_overwrites_without_asking(self, tmp_path):
         out = self._project(tmp_path)
@@ -2220,7 +2220,7 @@ class TestIndexKeepsForeignGraphs:
                                         "--ignore-file", "/dev/null"])
         assert result.exit_code == 0, result.output
         data = json.loads(out.read_text(encoding="utf-8"))
-        assert set(data) == {"nodes", "links", "built_at_commit"}
+        assert set(data) == {"nodes", "links", "built_at_commit", "slurp"}
         assert "graphify_sentinel" not in json.dumps(data)
 
     def test_init_declining_reuse_still_asks_before_overwriting(self, tmp_path, monkeypatch):

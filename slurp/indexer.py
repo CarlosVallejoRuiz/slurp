@@ -6194,6 +6194,17 @@ def parser_summary(extensions: set[str]) -> list[tuple[str, str, bool]]:
     return summary
 
 
+def parser_for_extension(ext: str) -> str:
+    """The parser this process would use for files with suffix *ext* (".ts").
+
+    The manifest records it per extension, so a graph built before a grammar
+    was installed (or removed) is rebuilt once with the parser now available.
+    Unknown extensions answer "".
+    """
+    summary = parser_summary({ext.lower()})
+    return summary[0][1] if summary else ""
+
+
 _PARSER_PREFIX = "  Parsers: "
 _PARSER_CONT_INDENT = " " * len(_PARSER_PREFIX)   # 11 — aligns under the first language
 _PARSERS_INLINE_MAX = 4                           # up to this many stay on one line
@@ -7059,39 +7070,137 @@ def iter_source_files(root: Path) -> Iterator[Path]:
     Yields:
         Paths of files whose extension has a registered indexer.
     """
+    yield from walk_source_tree(root)[1]
+
+
+def walk_source_tree(root: Path, start: str = "") -> tuple[dict[str, int], list[Path]]:
+    """The directories walked under *root* and the indexable files found in them.
+
+    One walk serves both the index and its manifest (slurp.manifest): the
+    files are exactly those :func:`iter_source_files` yields, and each walked
+    directory comes with the mtime it had *before* it was listed — so a file
+    created while the walk runs changes that mtime after the recorded value,
+    and the next freshness check sees it.
+
+    Args:
+        root: Project root.
+        start: Walk only this root-relative subdirectory (a directory that
+            appeared since the manifest was written); the skip rules still
+            apply relative to *root*.
+
+    Returns:
+        (dirs, files): dirs maps each walked directory, root-relative in POSIX
+        form ("" for the root), to its st_mtime_ns; files are sorted paths.
+    """
+    dirs: dict[str, int] = {}
+    found: list[Path] = []
+    for rel, mtime, _subdirs, files in _walk_dirs(root, start):
+        dirs[rel] = mtime
+        found.extend(files)
     root_resolved = root.resolve()
-    for path in sorted(_walk_files(root)):
-        # Skip rules apply below the root only — see _should_skip. Skipped
-        # directories never reach here; this still drops minified bundles.
-        if not path.is_file() or _should_skip(path.relative_to(root), root):
-            continue
+    return dirs, [p for p in sorted(found) if _is_indexable(p, root, root_resolved)]
+
+
+def list_source_dir(root: Path, rel: str) -> tuple[int, list[str], list[Path]] | None:
+    """One directory of the walk: its mtime, the subdirectories walked, its indexable files.
+
+    The freshness check lists only the directories whose mtime changed, with
+    the rules the full walk applies, so both agree on what a directory holds.
+
+    Args:
+        root: Project root.
+        rel: Root-relative POSIX path of the directory ("" for the root).
+
+    Returns:
+        (mtime_ns, subdirectory names, indexable files sorted), or None when the
+        directory is gone, unreadable, or now skipped (an `out/` that became a
+        Next.js export).
+    """
+    here = root / rel if rel else root
+    if rel and _is_skipped_dir(here.name, here):
+        return None
+    listed = _list_dir(here)
+    if listed is None:
+        return None
+    mtime, subdirs, files = listed
+    root_resolved = root.resolve()
+    return mtime, subdirs, [p for p in sorted(files) if _is_indexable(p, root, root_resolved)]
+
+
+def _is_indexable(path: Path, root: Path, root_resolved: Path) -> bool:
+    """Whether a walked file is one the index processes (see iter_source_files)."""
+    # Skip rules apply below the root only — see _should_skip. Skipped
+    # directories never reach here; this still drops minified bundles.
+    if not path.is_file() or _should_skip(path.relative_to(root), root):
+        return False
+    try:
+        path.resolve().relative_to(root_resolved)
+    except ValueError:
+        # INTENTIONAL: a symlink resolving outside the project root is not
+        # part of this project. Skipping silently is the security
+        # behaviour — following it would index arbitrary files on disk.
+        return False
+    return path.suffix.lower() in _INDEXED_EXTENSIONS
+
+
+def _list_dir(here: Path) -> tuple[int, list[str], list[Path]] | None:
+    """Stat *here*, then list it: (mtime_ns, subdirectories to walk, files).
+
+    DECISION: the stat comes first. Listing first and stating after would
+    record an mtime that already includes a file created in between, and that
+    file would never be noticed. Subdirectories follow os.walk's rules, as
+    _walk_files did until v1.2.1: skipped names are pruned, and a symlinked
+    directory is neither walked nor a file.
+    """
+    try:
+        mtime = os.stat(here).st_mtime_ns
+        with os.scandir(here) as it:
+            entries = list(it)
+    except OSError:
+        return None
+    subdirs: list[str] = []
+    files: list[Path] = []
+    for entry in entries:
         try:
-            path.resolve().relative_to(root_resolved)
-        except ValueError:
-            # INTENTIONAL: a symlink resolving outside the project root is not
-            # part of this project. Skipping silently is the security
-            # behaviour — following it would index arbitrary files on disk.
-            continue
-        if path.suffix.lower() in _INDEXED_EXTENSIONS:
-            yield path
+            is_dir = entry.is_dir()
+        except OSError:
+            is_dir = False
+        if not is_dir:
+            files.append(here / entry.name)
+        elif not entry.is_symlink() and not _is_skipped_dir(entry.name, here / entry.name):
+            subdirs.append(entry.name)
+    return mtime, subdirs, files
 
 
-def _walk_files(root: Path) -> Iterator[Path]:
-    """Every file below *root*, skipped directories pruned before they are entered.
+def _walk_dirs(root: Path, start: str = "") -> Iterator[tuple[str, int, list[str], list[Path]]]:
+    """Every directory below *root*, skipped directories pruned before they are entered.
 
     DECISION: until v1.1.1 discovery walked the whole tree with rglob and threw
     away what fell under node_modules/, .next/ and the rest afterwards — on
-    PrismaStats ~50,000 paths visited for 185 files kept. os.walk lets the
-    directory list be cut in place, so a skipped directory is never opened.
-    Like rglob, it does not descend into symlinked directories; symlinks to
-    files are listed and the caller's containment check judges them. Only
-    names below the root are tested, never the root's own (see _should_skip).
+    PrismaStats ~50,000 paths visited for 185 files kept. Here a skipped
+    directory is never opened. Like rglob, it does not descend into symlinked
+    directories; symlinks to files are listed and the caller's containment
+    check judges them. Only names below the root are tested, never the root's
+    own (see _should_skip).
+
+    Yields:
+        (root-relative POSIX dir, mtime_ns before listing, subdirs, files).
     """
-    for dirpath, dirnames, filenames in os.walk(root):
-        here = Path(dirpath)
-        dirnames[:] = [d for d in dirnames if not _is_skipped_dir(d, here / d)]
-        for name in filenames:
-            yield here / name
+    stack = [start]
+    while stack:
+        rel = stack.pop()
+        listed = _list_dir(root / rel if rel else root)
+        if listed is None:
+            continue
+        mtime, subdirs, files = listed
+        yield rel, mtime, subdirs, files
+        stack.extend(f"{rel}/{name}" if rel else name for name in reversed(subdirs))
+
+
+def _walk_files(root: Path) -> Iterator[Path]:
+    """Every file below *root* that the walk reaches (see _walk_dirs)."""
+    for _rel, _mtime, _subdirs, files in _walk_dirs(root):
+        yield from files
 
 
 def skipped_source_files(root: Path) -> dict[str, int]:
@@ -7123,6 +7232,7 @@ def index_project(
     root: Path,
     ignore: SlurpIgnore | None = None,
     on_file: Callable[[Path], None] | None = None,
+    files: list[Path] | None = None,
 ) -> dict:
     """Index an entire project directory.
 
@@ -7136,6 +7246,8 @@ def index_project(
             been processed, including files skipped due to a parse error. Used
             to drive progress reporting; the file set matches
             :func:`iter_source_files`.
+        files: The files to index, when the caller already walked the tree
+            (the manifest records the same walk). Default: iter_source_files.
 
     Returns:
         dict with 'nodes', 'links', 'built_at_commit' keys (graphify-compatible).
@@ -7145,7 +7257,7 @@ def index_project(
     all_nodes: list[dict] = []
     all_edges: list[dict] = []
 
-    for path in iter_source_files(root):
+    for path in (iter_source_files(root) if files is None else files):
         indexer = _INDEXED_EXTENSIONS[path.suffix.lower()]
         try:
             nodes, edges = indexer(path, root)  # type: ignore[operator]

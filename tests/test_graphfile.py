@@ -262,8 +262,13 @@ class TestEveryWriterIsAtomic:
             def join(self):
                 pass
 
-        def interrupt(_seconds):
-            raise KeyboardInterrupt
+        real_sleep = time.sleep
+
+        def interrupt(seconds):
+            # Only the watch loop's one-second nap: subprocess waits sleep too.
+            if seconds == 1:
+                raise KeyboardInterrupt
+            real_sleep(seconds)
 
         monkeypatch.setattr(watchdog.observers, "Observer", _FakeObserver)
         monkeypatch.setattr(time, "sleep", interrupt)
@@ -272,3 +277,232 @@ class TestEveryWriterIsAtomic:
         assert res.exit_code == 0, res.output
         assert "re-indexing" in res.output
         assert replaced == [out.resolve(), out.resolve()]
+
+
+# ---------------------------------------------------------------------------
+# v1.3: compare-and-swap, the advisory lock, and who owns a graph
+# ---------------------------------------------------------------------------
+
+class TestCompareAndSwap:
+    def test_returns_the_identity_it_wrote(self, tmp_path):
+        from slurp.graphfile import graph_identity
+
+        out = tmp_path / "graph.json"
+        identity = write_graph(out, _NEW)
+        assert identity == graph_identity(out)
+
+    def test_writes_when_the_graph_is_still_the_one_expected(self, tmp_path):
+        from slurp.graphfile import graph_identity
+
+        out = tmp_path / "graph.json"
+        write_graph(out, _OLD)
+        write_graph(out, _NEW, expected=graph_identity(out))
+        assert json.loads(out.read_text(encoding="utf-8")) == _NEW
+
+    def test_aborts_when_another_writer_got_there_first(self, tmp_path):
+        from slurp.graphfile import GraphChangedError, graph_identity
+
+        out = tmp_path / "graph.json"
+        write_graph(out, _OLD)
+        seen = graph_identity(out)
+        graphify = '{"directed": true, "nodes": [], "links": [], "graph": {}}'
+        out.write_text(graphify, encoding="utf-8")  # e.g. graphify, mid-refresh
+        with pytest.raises(GraphChangedError):
+            write_graph(out, _NEW, expected=seen)
+        assert out.read_text(encoding="utf-8") == graphify
+        assert _leftovers(tmp_path) == []
+
+    def test_expecting_no_file_aborts_if_one_appeared(self, tmp_path):
+        from slurp.graphfile import ABSENT, GraphChangedError
+
+        out = tmp_path / "graph.json"
+        out.write_text("{}", encoding="utf-8")
+        with pytest.raises(GraphChangedError):
+            write_graph(out, _NEW, expected=ABSENT)
+        assert out.read_text(encoding="utf-8") == "{}"
+
+    def test_a_missing_file_has_the_absent_identity(self, tmp_path):
+        from slurp.graphfile import ABSENT, graph_identity
+
+        assert graph_identity(tmp_path / "nope.json") == ABSENT
+
+    def test_identity_changes_with_a_rewrite_of_the_same_size(self, tmp_path):
+        from slurp.graphfile import graph_identity
+
+        out = tmp_path / "graph.json"
+        write_graph(out, {"nodes": [{"id": "a"}]})
+        first = graph_identity(out)
+        write_graph(out, {"nodes": [{"id": "b"}]})
+        assert graph_identity(out) != first  # new inode at least
+
+
+class TestGraphLock:
+    def test_a_held_lock_cannot_be_taken_twice(self, tmp_path):
+        from slurp.graphfile import GraphLock
+
+        out = tmp_path / "graph.json"
+        first, second = GraphLock(out), GraphLock(out)
+        assert first.acquire(timeout=0)
+        try:
+            assert not second.acquire(timeout=0)
+        finally:
+            first.release()
+        assert second.acquire(timeout=0)
+        second.release()
+
+    def test_waiting_reports_once_and_succeeds_when_released(self, tmp_path):
+        import threading
+
+        from slurp.graphfile import GraphLock
+
+        out = tmp_path / "graph.json"
+        holder = GraphLock(out)
+        holder.acquire(timeout=0)
+        threading.Timer(0.2, holder.release).start()
+        waits: list[str] = []
+        waiter = GraphLock(out)
+        assert waiter.acquire(timeout=5, on_wait=lambda: waits.append("waiting"))
+        waiter.release()
+        assert waits == ["waiting"]
+
+    def test_gives_up_after_the_timeout(self, tmp_path):
+        from slurp.graphfile import GraphLock
+
+        out = tmp_path / "graph.json"
+        holder = GraphLock(out)
+        holder.acquire(timeout=0)
+        try:
+            assert not GraphLock(out).acquire(timeout=0.1)
+        finally:
+            holder.release()
+
+    def test_the_lock_file_sits_next_to_the_graph_and_is_never_deleted(self, tmp_path):
+        from slurp.graphfile import GraphLock
+
+        out = tmp_path / "graphify-out" / "graph.json"
+        out.parent.mkdir()
+        with GraphLock(out):
+            pass
+        assert (out.parent / ".graph.json.lock").is_file()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+    def test_an_unwritable_directory_goes_on_without_a_lock(self, tmp_path):
+        from slurp.graphfile import GraphLock
+
+        locked = tmp_path / "ro"
+        locked.mkdir()
+        locked.chmod(0o500)
+        try:
+            lock = GraphLock(locked / "graph.json")
+            assert lock.acquire(timeout=0)
+            assert not lock.held
+            lock.release()
+        finally:
+            locked.chmod(0o700)
+
+
+class TestGraphKind:
+    @pytest.mark.parametrize("data,kind", [
+        ({"nodes": [], "links": [], "built_at_commit": None,
+          "slurp": {"format": 1}}, "own"),
+        ({"nodes": [], "links": [], "built_at_commit": "abc"}, "legacy"),
+        ({"directed": True, "multigraph": False, "graph": {}, "nodes": [], "links": [],
+          "hyperedges": [], "built_at_commit": "abc"}, "graphify"),
+        ({"nodes": [], "links": []}, "foreign"),
+        ({"nodes": [], "edges": []}, "foreign"),
+        ({"nodes": [], "links": [], "built_at_commit": None, "slurp": {}}, "foreign"),
+        ([1, 2], "foreign"),
+    ])
+    def test_kinds(self, data, kind):
+        from slurp.graphfile import graph_kind
+
+        assert graph_kind(data) == kind
+
+
+# ---------------------------------------------------------------------------
+# v1.3: every writer records the manifest, under the lock, with compare-and-swap
+# ---------------------------------------------------------------------------
+
+def _manifest_of(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))["slurp"]
+
+
+class TestEveryWriterRecordsTheManifest:
+    def test_index(self, tmp_path):
+        root = _project(tmp_path / "p")
+        (root / "skip.py").write_text("def s():\n    pass\n", encoding="utf-8")
+        (root / ".slurpignore").write_text("file:skip.py\n", encoding="utf-8")
+        out = root / "graphify-out" / "graph.json"
+        res = CliRunner().invoke(cli, ["index", str(root), "--ignore-file",
+                                       str(root / ".slurpignore")])
+        assert res.exit_code == 0, res.output
+        m = _manifest_of(out)
+        assert m["root"] == ".."
+        assert set(m["files"]) == {"app.py", "skip.py"}   # discovered, not source_file
+        assert m["ignore"]["path"] == ".slurpignore" and m["ignore"]["sha"]
+        nodes = json.loads(out.read_text(encoding="utf-8"))["nodes"]
+        assert "skip.py" not in {n["source_file"] for n in nodes}
+
+    def test_init(self, tmp_path, monkeypatch):
+        root = _project(tmp_path / "p")
+        monkeypatch.chdir(root)
+        res = CliRunner().invoke(cli, ["init", "--yes"])
+        assert res.exit_code == 0, res.output
+        assert set(_manifest_of(root / "graphify-out" / "graph.json")["files"]) == {"app.py"}
+
+    def test_smart_on_a_graph_from_slurp_1_2(self, tmp_path):
+        root = _project(tmp_path / "p")
+        _git(root, "init", "-q")
+        _git(root, "add", "-A")
+        _git(root, "commit", "-q", "-m", "init")
+        out = tmp_path / "graph.json"
+        args = ["index", str(root), "-o", str(out), "--ignore-file", "/dev/null"]
+        assert CliRunner().invoke(cli, args).exit_code == 0
+        legacy = json.loads(out.read_text(encoding="utf-8"))
+        del legacy["slurp"]                       # as slurp 1.2 wrote it
+        out.write_text(json.dumps(legacy), encoding="utf-8")
+        (root / "app.py").write_text("def main():\n    return 2\n", encoding="utf-8")
+        res = CliRunner().invoke(cli, [*args, "--smart"])
+        assert res.exit_code == 0, res.output
+        assert "Full index needed" not in res.output
+        assert set(_manifest_of(out)["files"]) == {"app.py"}
+
+
+class TestIndexLocksAndComparesAndSwaps:
+    def test_waits_for_another_slurp_writing_the_same_graph(self, tmp_path):
+        import threading
+
+        from slurp.graphfile import GraphLock
+
+        root = _project(tmp_path / "p")
+        out = tmp_path / "graph.json"
+        holder = GraphLock(out)
+        assert holder.acquire(timeout=0)
+        threading.Timer(0.5, holder.release).start()
+        res = CliRunner().invoke(cli, ["index", str(root), "-o", str(out),
+                                       "--ignore-file", "/dev/null"])
+        assert res.exit_code == 0, res.output
+        assert f"waiting for another slurp process to finish writing {out}" in res.output
+        assert out.is_file()
+
+    def test_never_overwrites_a_graph_another_tool_wrote_while_it_indexed(
+            self, tmp_path, monkeypatch):
+        from slurp import indexer
+
+        root = _project(tmp_path / "p")
+        out = tmp_path / "graph.json"
+        graphify = json.dumps({"directed": True, "multigraph": False, "graph": {},
+                               "nodes": [{"id": "g", "label": "g"}], "links": []})
+        real = indexer.index_project
+
+        def index_and_get_overtaken(*args, **kwargs):
+            result = real(*args, **kwargs)
+            out.write_text(graphify, encoding="utf-8")   # graphify, meanwhile
+            return result
+
+        monkeypatch.setattr(indexer, "index_project", index_and_get_overtaken)
+        res = CliRunner().invoke(cli, ["index", str(root), "-o", str(out),
+                                       "--ignore-file", "/dev/null"])
+        assert res.exit_code != 0
+        assert "changed while" in res.output
+        assert out.read_text(encoding="utf-8") == graphify
