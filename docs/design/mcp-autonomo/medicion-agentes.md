@@ -1,8 +1,10 @@
-# Medición con agentes (§7 del diseño) — protocolo preparado, sin lanzar
+# Medición con agentes (§7 del diseño) — medida el 2026-11-26: cumple el criterio
 
 **Estado:** preparado el 2026-11-26 sobre la v1.3 en desarrollo (`main`, versión 1.2.1 sin
 bump). Tareas confirmadas por el autor el 2026-11-26 (las cinco de PrismaStats le valen).
-Resultados en `resultados/`.
+Resultados en `resultados/`; conclusiones en `resultados/conclusiones.md`. Medida el
+2026-11-26 (condición B, diez sesiones): **cumple el criterio**. Pendiente: el paso 2,
+la comprobación interactiva del diálogo de aprobación, que hace el autor.
 
 **Decisiones del autor antes de lanzar (2026-11-26):**
 

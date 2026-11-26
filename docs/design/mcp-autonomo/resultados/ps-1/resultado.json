@@ -1,0 +1,43 @@
+{
+  "task": "ps-1",
+  "project": "prismastats",
+  "model": "claude-opus-5-5",
+  "slurp_server": "connected",
+  "claude": {
+    "subtype": "success",
+    "is_error": false,
+    "num_turns": 24,
+    "duration_ms": 192568,
+    "total_cost_usd": 1.066672
+  },
+  "slurp_denials": [],
+  "other_denials": [
+    "Bash",
+    "Bash",
+    "Bash",
+    "Bash",
+    "Bash"
+  ],
+  "agent_slurp_calls": {
+    "mcp__slurp__slurp_query": 1,
+    "mcp__slurp__slurp_impact": 2
+  },
+  "agent_tools": {
+    "Bash": 10,
+    "Edit": 5,
+    "Read": 3,
+    "mcp__slurp__slurp_impact": 2,
+    "Write": 2,
+    "mcp__slurp__slurp_query": 1
+  },
+  "graphify": [],
+  "seconds": 193,
+  "diff_stat": [
+    " 5 files changed, 87 insertions(+), 13 deletions(-)"
+  ],
+  "checks": {
+    "tests": "0"
+  },
+  "finished": true,
+  "finished_basis": "claude success, non-empty diff, checks pass (tsc), diff read: does what the prompt asks; the tests it added pass (npm test 7/7)"
+}
