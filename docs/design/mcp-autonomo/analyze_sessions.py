@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import sys
 from collections import Counter
 from dataclasses import dataclass, field
@@ -146,6 +147,14 @@ def load_task(directory: Path) -> TaskResult:
     return result
 
 
+# graphify run as a command (bare, through uvx / uv run / python -m) or imported.
+# Naming its paths (graphify-out/graph.json, a fixture directory) is not using it.
+_RUNS_GRAPHIFY = re.compile(
+    r"(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*"
+    r"(?:uvx\s+|uv\s+run\s+|pipx\s+run\s+|python[\d.]*\s+-m\s+)?graphify(?=\s|$|[;&|)])"
+    r"|\b(?:import|from)\s+graphify\b")
+
+
 def _read_stream(path: Path, result: TaskResult) -> None:
     """The agent's tool calls, and any use of graphify (its skill or its CLI)."""
     if not path.is_file():
@@ -164,7 +173,7 @@ def _read_stream(path: Path, result: TaskResult) -> None:
             result.agent_tools[name] += 1
             if name == "Skill" and "graphify" in str(tool_input.get("skill", "")).lower():
                 result.graphify.append(f"Skill {tool_input.get('skill')}")
-            elif name == "Bash" and "graphify" in str(tool_input.get("command", "")):
+            elif name == "Bash" and _RUNS_GRAPHIFY.search(str(tool_input.get("command", ""))):
                 result.graphify.append(f"Bash: {str(tool_input.get('command'))[:60]}")
 
 

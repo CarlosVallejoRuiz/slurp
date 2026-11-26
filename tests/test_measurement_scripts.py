@@ -84,6 +84,21 @@ class TestAnalyzeSessions:
         _met, lines = mod["analyse"](results)
         assert any("graphify used in 1/2 sessions" in line for line in lines)
 
+    def test_only_running_graphify_counts_not_naming_its_paths(self, tmp_path):
+        # Found in the measurement: every "graphify" match was a path —
+        # graphify-out/graph.json, tests/fixtures/graphify_project, grep -v.
+        paths = ["ls graphify-out/", "grep -rn x . | grep -v graphify-out",
+                 "uv run slurp q --graph graphify-out/graph.json",
+                 "ls tests/fixtures/graphify_project", "echo 'No graphify or LLM'",
+                 "cat docs/graphify.md"]
+        runs = ["graphify .", "cd repo && graphify update .", "uvx graphify .",
+                "python3 -m graphify .", "uv run graphify .", "git status; graphify",
+                "python -c 'import graphify'"]
+        stream = [_tool_use("Bash", command=c) for c in paths + runs]
+        _task(tmp_path, "t0", [], [], stream=stream)
+        found = _analyzer()["load_task"](tmp_path / "t0").graphify
+        assert found == [f"Bash: {c}" for c in runs]
+
     def test_without_an_end_event_the_diff_says_what_was_edited(self, tmp_path):
         # If the client kills the server instead of closing its stdin, the end
         # event never comes; the clone's diff stands in.

@@ -130,10 +130,12 @@ json.dump(last, open(sys.argv[2], 'w'), indent=2)
     esac
     mkdir -p "$OUT/$id"
     PATH="$SLURP_BIN:$PATH" slurp session --sessions --log-dir "$dir/repo/.slurp" > "$OUT/$id/sessions.txt" 2>&1 || true
-    python3 - "$dir" "$OUT/$id/resultado.json" "$id" "$project" <<'PY'
-import collections, json, sys
+    python3 - "$dir" "$OUT/$id/resultado.json" "$id" "$project" \
+        "$REPO/docs/design/mcp-autonomo/analyze_sessions.py" <<'PY'
+import collections, json, runpy, sys
 from pathlib import Path
 d, out, task, project = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3], sys.argv[4]
+runs_graphify = runpy.run_path(sys.argv[5])["_RUNS_GRAPHIFY"]  # the analyzer's own rule
 init, tools, graphify = {}, collections.Counter(), []
 for line in (d / "stream.jsonl").read_text(encoding="utf-8", errors="replace").splitlines() \
         if (d / "stream.jsonl").exists() else []:
@@ -150,7 +152,7 @@ for line in (d / "stream.jsonl").read_text(encoding="utf-8", errors="replace").s
             tools[name] += 1
             if name == "Skill" and "graphify" in str(args.get("skill", "")).lower():
                 graphify.append(f"Skill {args.get('skill')}")
-            elif name == "Bash" and "graphify" in str(args.get("command", "")):
+            elif name == "Bash" and runs_graphify.search(str(args.get("command", ""))):
                 graphify.append(f"Bash: {str(args.get('command'))[:60]}")
 def read(name, default=""):
     p = d / name
