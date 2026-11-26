@@ -15,19 +15,27 @@ import json
 import os
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
 
-from slurp.graphfile import graph_identity, write_graph
-from slurp.ignore import SlurpIgnore
+from slurp.graphfile import graph_identity, graph_kind, write_graph
+from slurp.ignore import SlurpIgnore, load_ignore
 from slurp.indexer import (
     _INDEXED_EXTENSIONS,
     _assemble_graph,
     _should_skip,
     iter_source_files,
 )
-from slurp.manifest import MANIFEST_KEY, build_manifest
+from slurp.manifest import (
+    MANIFEST_KEY,
+    Manifest,
+    ManifestChecker,
+    ManifestError,
+    build_manifest,
+    file_entry,
+)
 
 _GIT_TIMEOUT_S = 30
 
@@ -257,6 +265,93 @@ def _symbols(nodes: list[dict]) -> list[str]:
     )
 
 
+@dataclass
+class Incremental:
+    """The fast path's outcome: the rebuilt graph, or why only a full index will do."""
+
+    graph: dict | None = None
+    fallback_reason: str = ""
+    updated_nodes: int = 0
+    removed_nodes: int = 0
+    updated_edges: int = 0
+    parse_ms: float = 0.0
+
+
+def rebuild_modified(
+    graph: dict,
+    modified: list[str],
+    root: Path,
+    ignore: SlurpIgnore | None,
+) -> Incremental:
+    """Re-parse *modified* files and rebuild *graph* around them, if their symbols held.
+
+    The fast path of --smart and of the refresh, shared by the manifest and the
+    git ways of finding what changed.
+
+    Args:
+        graph: The current graph dict (nodes, links).
+        modified: Root-relative POSIX paths of files that changed and still exist.
+        root: Project root.
+        ignore: The ignore rules the graph is built with.
+
+    Returns:
+        An Incremental: graph set when every re-parsed file kept its symbols
+        (built_at_commit and the manifest are the caller's), fallback_reason
+        otherwise.
+    """
+    old_nodes = graph.get("nodes") or []
+    new_nodes, new_edges, parse_ms = _reindex_files([root / k for k in modified], root)
+    # A single parse can emit one id twice (two imports of the same module);
+    # the assembled graph keeps the first, so compare against that.
+    seen: set[str] = set()
+    new_nodes = [n for n in new_nodes if not (n["id"] in seen or seen.add(n["id"]))]
+    if ignore is not None:
+        new_nodes = [n for n in new_nodes if not ignore.should_ignore(n, n["id"])]
+
+    touched = set(modified)
+    previous = [n for n in old_nodes if n.get("source_file") in touched]
+    if _symbols(previous) != _symbols(new_nodes):
+        return Incremental(fallback_reason="definitions or imports changed, which can change "
+                                           "how other files resolve their calls",
+                           parse_ms=parse_ms)
+
+    # Same symbols, so every symbol index is unchanged and no other file can
+    # resolve differently: keep their nodes and edges, replace the edited files'
+    # slice, and let the shared assembly resolve the new pending calls exactly
+    # as a full index would.
+    removed_ids = {n["id"] for n in previous}
+    kept_nodes = [n for n in old_nodes if n.get("source_file") not in touched]
+    kept_edges = [e for e in (graph.get("links") or []) if e.get("source") not in removed_ids]
+    rebuilt = _assemble_graph(kept_nodes + new_nodes, kept_edges + new_edges, ignore)
+    new_ids = {n["id"] for n in new_nodes}
+    return Incremental(
+        graph=rebuilt, updated_nodes=len(new_nodes), removed_nodes=len(previous),
+        updated_edges=sum(1 for e in rebuilt["links"] if e.get("source") in new_ids),
+        parse_ms=parse_ms)
+
+
+def manifest_after_rebuild(
+    manifest: Manifest,
+    modified: list[str],
+    started_ns: int,
+) -> Manifest:
+    """The manifest of a graph rebuilt by the fast path: fresh entries for *modified*.
+
+    Every other entry is the checker's, verified at the check that found the
+    change. The entries of *modified* must be taken before the files are
+    parsed — the caller passes this function's result to the write, and takes
+    it before calling rebuild_modified.
+    """
+    updated = manifest.copy()
+    updated.started_ns = started_ns
+    for key in modified:
+        try:
+            updated.files[key] = file_entry(manifest.root / key)
+        except OSError:
+            updated.files.pop(key, None)
+    return updated
+
+
 def smart_reindex(
     root: Path,
     graph_path: Path,
@@ -266,23 +361,34 @@ def smart_reindex(
 ) -> SmartIndexResult:
     """Update an existing graph in place, re-parsing only what changed.
 
+    DECISION (v1.3): a graph that carries a manifest is compared with the disk
+    through it — no git, no repository needed — exactly as the MCP server
+    does: only modified files take the fast path; an added, removed or
+    renamed file, a changed ignore file, another slurp version or other
+    parsers mean a full index. Git and built_at_commit remain for graphs
+    without a manifest (slurp ≤ 1.2), whose rewrite then carries one.
+
     Args:
         root: Project root to index.
         graph_path: Path of the graph to read and rewrite.
         ignore: Optional SlurpIgnore rules applied to newly produced nodes.
         dry_run: Compute everything but leave the graph on disk untouched.
         ignore_path: The file *ignore* was read from, recorded in the graph's
-            manifest. Default: <root>/.slurpignore.
+            manifest. Default: the one the manifest records (and its rules when
+            *ignore* is None), else <root>/.slurpignore.
 
     Returns:
-        A SmartIndexResult. Check `needs_full_index` first: when there is no git
-        repo, no existing graph, or a change that could alter cross-file
-        resolution, nothing was written and the caller should run a full index.
+        A SmartIndexResult. Check `needs_full_index` first: when there is no
+        existing graph, no way to tell what changed, or a change that could
+        alter cross-file resolution, nothing was written and the caller should
+        run a full index.
+
+    Raises:
+        GraphChangedError: Another writer replaced the graph meanwhile;
+            nothing was written.
     """
     start = perf_counter()
-
-    if not is_git_repo(root):
-        return SmartIndexResult(is_git_repo=False, dry_run=dry_run)
+    started_ns = time.time_ns()
 
     if not graph_path.is_file():
         return SmartIndexResult(graph_found=False, dry_run=dry_run)
@@ -292,11 +398,18 @@ def smart_reindex(
         graph_mtime = graph_path.stat().st_mtime_ns
     except (OSError, ValueError):
         return SmartIndexResult(graph_found=False, dry_run=dry_run)
+
+    if isinstance(graph, dict) and graph_kind(graph) == "own":
+        return _smart_from_manifest(root, graph_path, graph, identity, ignore, dry_run,
+                                    ignore_path, start, started_ns)
+    if not is_git_repo(root):
+        return SmartIndexResult(is_git_repo=False, dry_run=dry_run)
     ignore_path = root / ".slurpignore" if ignore_path is None else ignore_path
+
     # The manifest the rewritten graph will carry: taken before git is asked
     # and before anything is parsed, so an edit made meanwhile shows up as a
     # stale entry at the next check rather than vanishing (see manifest.file_entry).
-    snapshot = build_manifest(root, ignore_path)
+    snapshot = build_manifest(root, ignore_path, started_ns=started_ns)
 
     # DECISION: changes are measured against the commit the graph was built
     # from, not against HEAD. Comparing with HEAD made a commit between the
@@ -353,47 +466,83 @@ def smart_reindex(
                             "files change what other files can call")
 
     modified = sorted(changed)
-    new_nodes, new_edges, parse_ms = _reindex_files([on_disk[k] for k in modified], root)
-    # A single parse can emit one id twice (two imports of the same module);
-    # the assembled graph keeps the first, so compare against that.
-    seen: set[str] = set()
-    new_nodes = [n for n in new_nodes if not (n["id"] in seen or seen.add(n["id"]))]
-    if ignore is not None:
-        new_nodes = [n for n in new_nodes if not ignore.should_ignore(n, n["id"])]
-
-    touched = set(modified)
-    previous = [n for n in old_nodes if n.get("source_file") in touched]
-    if _symbols(previous) != _symbols(new_nodes):
-        return SmartIndexResult(
-            changed_files=changed_paths, dry_run=dry_run,
-            fallback_reason="definitions or imports changed, which can change how "
-                            "other files resolve their calls")
-
-    # Same symbols, so every symbol index is unchanged and no other file can
-    # resolve differently: keep their nodes and edges, replace the edited files'
-    # slice, and let the shared assembly resolve the new pending calls exactly
-    # as a full index would.
-    removed_ids = {n["id"] for n in previous}
-    kept_nodes = [n for n in old_nodes if n.get("source_file") not in touched]
-    kept_edges = [e for e in (graph.get("links") or []) if e.get("source") not in removed_ids]
-    rebuilt = _assemble_graph(kept_nodes + new_nodes, kept_edges + new_edges, ignore)
+    outcome = rebuild_modified(graph, modified, root, ignore)
+    if outcome.graph is None:
+        return SmartIndexResult(changed_files=changed_paths, dry_run=dry_run,
+                                fallback_reason=outcome.fallback_reason)
+    rebuilt = outcome.graph
     rebuilt["built_at_commit"] = head_commit(root)
     rebuilt[MANIFEST_KEY] = snapshot.to_dict(graph_path)
-
     if not dry_run:
         write_graph(graph_path, rebuilt, expected=identity)
+    return _result(outcome, changed_paths, [on_disk[k] for k in modified], len(on_disk),
+                   start, dry_run)
 
-    elapsed_ms = (perf_counter() - start) * 1000
-    per_file_ms = parse_ms / len(modified) if modified else 0.0
-    new_ids = {n["id"] for n in new_nodes}
 
+def _result(outcome: Incremental, changed: list[Path], reparsed: list[Path],
+            project_files: int, start: float, dry_run: bool) -> SmartIndexResult:
+    per_file_ms = outcome.parse_ms / len(reparsed) if reparsed else 0.0
     return SmartIndexResult(
-        changed_files=changed_paths,
-        expanded_files=[on_disk[k] for k in modified],
-        updated_nodes=len(new_nodes),
-        removed_nodes=len(previous),
-        elapsed_ms=elapsed_ms,
-        full_index_ms_estimate=per_file_ms * len(on_disk),
-        updated_edges=sum(1 for e in rebuilt["links"] if e.get("source") in new_ids),
+        changed_files=changed,
+        expanded_files=reparsed,
+        updated_nodes=outcome.updated_nodes,
+        removed_nodes=outcome.removed_nodes,
+        elapsed_ms=(perf_counter() - start) * 1000,
+        full_index_ms_estimate=per_file_ms * project_files,
+        updated_edges=outcome.updated_edges,
         dry_run=dry_run,
     )
+
+
+def _smart_from_manifest(
+    root: Path,
+    graph_path: Path,
+    graph: dict,
+    identity: tuple,
+    ignore: SlurpIgnore | None,
+    dry_run: bool,
+    ignore_path: Path | None,
+    start: float,
+    started_ns: int,
+) -> SmartIndexResult:
+    """--smart on a graph with a manifest: the manifest says what changed."""
+    try:
+        manifest = Manifest.from_dict(graph[MANIFEST_KEY], graph_path)
+    except ManifestError as exc:
+        return SmartIndexResult(dry_run=dry_run, fallback_reason=f"its {exc}")
+    if manifest.root != root.resolve():
+        return SmartIndexResult(dry_run=dry_run,
+                                fallback_reason=f"it was built for {manifest.root}")
+    if ignore_path is None:
+        ignore = load_ignore(manifest.ignore_path) if ignore is None else ignore
+    elif Path(os.path.abspath(ignore_path)) != manifest.ignore_path:
+        return SmartIndexResult(
+            dry_run=dry_run,
+            fallback_reason=f"it was built with {manifest.ignore_path} as ignore file")
+
+    checker = ManifestChecker(manifest)
+    changes = checker.check()
+    if not changes.any:
+        return SmartIndexResult(elapsed_ms=(perf_counter() - start) * 1000, dry_run=dry_run)
+    changed_paths = [root / key for key in changes.files]
+    if changes.reason:
+        return SmartIndexResult(dry_run=dry_run, fallback_reason=changes.reason)
+    if changes.needs_full:
+        return SmartIndexResult(
+            changed_files=changed_paths, dry_run=dry_run,
+            fallback_reason=f"{len(changes.added)} added and {len(changes.deleted)} removed "
+                            "or renamed files change what other files can call")
+
+    modified = changes.modified
+    updated = manifest_after_rebuild(checker.manifest, modified, started_ns)
+    outcome = rebuild_modified(graph, modified, root, ignore)
+    if outcome.graph is None:
+        return SmartIndexResult(changed_files=changed_paths, dry_run=dry_run,
+                                fallback_reason=outcome.fallback_reason)
+    rebuilt = outcome.graph
+    rebuilt["built_at_commit"] = head_commit(root)
+    rebuilt[MANIFEST_KEY] = updated.to_dict(graph_path)
+    if not dry_run:
+        write_graph(graph_path, rebuilt, expected=identity)
+    return _result(outcome, changed_paths, [root / k for k in modified],
+                   len(manifest.files), start, dry_run)

@@ -89,15 +89,31 @@ def _files_in(path: Path) -> set[str]:
     return {n["source_file"] for n in _load(path)["nodes"] if n.get("source_file")}
 
 
+def _strip_manifest(path: Path) -> None:
+    """Make *path* a graph as slurp ≤ 1.2 wrote it: no manifest."""
+    graph = _load(path)
+    graph.pop("slurp", None)
+    path.write_text(json.dumps(graph, indent=2), encoding="utf-8")
+
+
+def _legacy_graph(root: Path, out: Path) -> None:
+    graph = index_project(root)
+    graph["built_at_commit"] = head_commit(root)
+    out.write_text(json.dumps(graph, indent=2), encoding="utf-8")
+
+
 class TestNoGitRepo:
     def test_is_git_repo_false_outside_repo(self, tmp_path):
         plain = tmp_path / "plain"
         plain.mkdir()
         assert is_git_repo(plain) is False
 
-    def test_smart_reindex_reports_no_repo(self, tmp_path):
+    def test_smart_reindex_reports_no_repo_for_a_graph_without_manifest(self, tmp_path):
+        # Only a slurp ≤ 1.2 graph needs git to tell what changed.
         plain = tmp_path / "plain"
         plain.mkdir()
+        (plain / "mod.py").write_text("def f():\n    pass\n", encoding="utf-8")
+        _legacy_graph(plain, plain / "graph.json")
         result = smart_reindex(plain, plain / "graph.json")
         assert result.is_git_repo is False
         assert result.needs_full_index is True
@@ -108,6 +124,7 @@ class TestNoGitRepo:
         plain.mkdir()
         (plain / "mod.py").write_text("def f():\n    pass\n", encoding="utf-8")
         out = plain / "graph.json"
+        _legacy_graph(plain, out)
         res = CliRunner().invoke(
             cli, ["index", str(plain), "--smart", "-o", str(out)]
         )
@@ -116,6 +133,18 @@ class TestNoGitRepo:
         # The fallback really ran: a full graph exists.
         assert out.is_file()
         assert "mod" in "".join(_node_ids(out))
+
+    def test_a_graph_with_a_manifest_needs_no_repository(self, tmp_path):
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        (plain / "mod.py").write_text("def f():\n    pass\n", encoding="utf-8")
+        out = plain / "graph.json"
+        _cli_index(plain, out)
+        (plain / "mod.py").write_text("def f():\n    return 2\n", encoding="utf-8")
+        res = _cli_index(plain, out, "--smart")
+        assert "No git repository" not in res.output
+        assert "Full index needed" not in res.output
+        assert "✓ Updated" in res.output
 
 
 class TestNoChanges:
@@ -491,11 +520,15 @@ _INCREMENTAL = {"caller_body_adds_cross_file_call", "callee_body_edit",
 
 @requires_git
 class TestSmartEquivalence:
+    @pytest.mark.parametrize("way", ["manifest", "git"])
     @pytest.mark.parametrize("committed", [False, True], ids=["uncommitted", "committed"])
     @pytest.mark.parametrize("scenario", sorted(_SCENARIOS))
-    def test_smart_matches_full_index(self, mixed_project, tmp_path, scenario, committed):
+    def test_smart_matches_full_index(self, mixed_project, tmp_path, scenario, committed, way):
+        # "git": the graph carries no manifest, as slurp ≤ 1.2 wrote it.
         graph = tmp_path / "graph.json"
         _cli_index(mixed_project, graph)
+        if way == "git":
+            _strip_manifest(graph)
         _SCENARIOS[scenario](mixed_project)
         if committed:
             _commit_all(mixed_project, scenario)
@@ -645,26 +678,37 @@ class TestFilesWithoutNodes:
         assert result.changed_files == []
 
     def test_editing_the_ignored_file_changes_nothing(self, ignored_project, tmp_path):
+        # The manifest records b.py, so an edit is a modification: the fast
+        # path re-parses it, finds no node to keep, and only the manifest moves.
         graph = tmp_path / "graph.json"
         _index_with_ignore(ignored_project, graph)
-        before = graph.read_bytes()
+        before = _public(_load(graph))
         _write(ignored_project, "b.py", "def dropped():\n    return 3\n\n\ndef more():\n    pass\n")
         res = _index_with_ignore(ignored_project, graph, "--smart")
-        assert "index is up to date" in res.output, res.output
-        assert graph.read_bytes() == before
+        assert "Full index needed" not in res.output, res.output
+        assert _public(_load(graph)) == before
+        again = _index_with_ignore(ignored_project, graph, "--smart")
+        assert "index is up to date" in again.output, again.output
 
-    def test_new_ignored_file_matches_a_full_index(self, ignored_project, tmp_path):
+    @pytest.mark.parametrize("legacy", [False, True], ids=["manifest", "legacy"])
+    def test_new_ignored_file_matches_a_full_index(self, ignored_project, tmp_path, legacy):
+        # The manifest treats any new file as an addition — one full index —
+        # and then knows it; a graph without one asks the parser (v1.2.1).
         graph = tmp_path / "graph.json"
         _index_with_ignore(ignored_project, graph)
         _write(ignored_project, ".slurpignore", "file:b.py\nfile:gen_*.py\n")
         _commit_all(ignored_project, "ignore generated files")
         _index_with_ignore(ignored_project, graph)
+        if legacy:
+            _strip_manifest(graph)
         _write(ignored_project, "gen_models.py", "def generated():\n    return 4\n")
         res = _index_with_ignore(ignored_project, graph, "--smart")
-        assert "Full index needed" not in res.output, res.output
+        assert ("Full index needed" in res.output) is not legacy, res.output
         full = tmp_path / "full.json"
         _index_with_ignore(ignored_project, full)
         assert _public(_load(graph)) == _public(_load(full))
+        again = _index_with_ignore(ignored_project, graph, "--smart")
+        assert "index is up to date" in again.output, again.output
 
     def test_file_excluded_by_type_and_id_rules_is_not_added(self, ignored_project, tmp_path):
         # No `file:` rule names it, but every node it would have is excluded.
@@ -695,12 +739,80 @@ class TestFilesWithoutNodes:
         assert "1 added and 0 removed" in res.output, res.output
         assert "c.py" in _files_in(graph)
 
-    def test_unignoring_a_file_is_still_a_limitation(self, ignored_project, tmp_path):
-        # Documented: --smart does not watch .slurpignore. Dropping the rule
-        # leaves b.py on disk with nodes to give, which now counts as added.
+    def test_dropping_a_rule_runs_a_full_index(self, ignored_project, tmp_path):
+        # The manifest records the ignore file's hash: any change is a full index.
         graph = tmp_path / "graph.json"
         _index_with_ignore(ignored_project, graph)
         _write(ignored_project, ".slurpignore", "")
         res = _index_with_ignore(ignored_project, graph, "--smart")
         assert "Full index needed" in res.output, res.output
         assert "b.py" in _files_in(graph)
+
+
+# ---------------------------------------------------------------------------
+# v1.3: --smart reads the manifest
+# ---------------------------------------------------------------------------
+
+class TestSmartFromTheManifest:
+    def test_util_ts_and_util_js_no_longer_force_a_full_index(self, tmp_path):
+        # v1.2.1's documented leftover: util.js's nodes all lose the dedup to
+        # util.ts's, so it has no source_file in the graph — but the manifest
+        # records it as walked.
+        root = tmp_path / "web"
+        _write(root, "util.ts", "export function f(): number { return 1 }\n")
+        _write(root, "util.js", "export function f() { return 1 }\n")
+        graph = tmp_path / "graph.json"
+        _cli_index(root, graph)
+        assert _files_in(graph) == {"util.js"} or _files_in(graph) == {"util.ts"}
+        before = graph.read_bytes()
+        for _ in range(2):
+            res = _cli_index(root, graph, "--smart")
+            assert "index is up to date" in res.output, res.output
+        assert graph.read_bytes() == before
+
+    def test_a_slurpignore_change_runs_a_full_index_and_says_why(self, ignored_project, tmp_path):
+        graph = tmp_path / "graph.json"
+        _index_with_ignore(ignored_project, graph)
+        _write(ignored_project, ".slurpignore", "file:a.py\n")
+        res = _index_with_ignore(ignored_project, graph, "--smart")
+        assert "Full index needed: .slurpignore changed" in res.output, res.output
+        assert _files_in(graph) == {"b.py"}
+
+    def test_another_ignore_file_runs_a_full_index(self, ignored_project, tmp_path):
+        graph = tmp_path / "graph.json"
+        _index_with_ignore(ignored_project, graph)
+        res = _cli_index(ignored_project, graph, "--smart")   # --ignore-file /dev/null
+        assert "as ignore file" in res.output, res.output
+        assert _files_in(graph) == {"a.py", "b.py"}
+
+    def test_a_graph_from_another_slurp_version_is_rebuilt(self, tmp_path):
+        root = tmp_path / "p"
+        _write(root, "a.py", "def a():\n    return 1\n")
+        graph = tmp_path / "graph.json"
+        _cli_index(root, graph)
+        data = _load(graph)
+        data["slurp"]["slurp_version"] = "1.2.9"
+        graph.write_text(json.dumps(data), encoding="utf-8")
+        res = _cli_index(root, graph, "--smart")
+        assert "built by slurp 1.2.9" in res.output, res.output
+        from slurp import __version__
+        assert _load(graph)["slurp"]["slurp_version"] == __version__
+
+    def test_the_fast_path_refreshes_the_manifest_entries_it_reparsed(self, tmp_path):
+        root = tmp_path / "p"
+        _write(root, "a.py", "def a():\n    return 1\n")
+        _write(root, "b.py", "def b():\n    return 2\n")
+        graph = tmp_path / "graph.json"
+        _cli_index(root, graph)
+        _write(root, "a.py", "def a():\n    return 3\n")
+        _cli_index(root, graph, "--smart")
+        from slurp.manifest import content_hash
+        assert _load(graph)["slurp"]["files"]["a.py"][3] == content_hash(root / "a.py")
+        res = _cli_index(root, graph, "--smart")
+        assert "index is up to date" in res.output, res.output
+
+    def test_a_library_caller_without_an_ignore_path_uses_the_recorded_one(self, ignored_project,
+                                                                         tmp_path):
+        graph = tmp_path / "graph.json"
+        _index_with_ignore(ignored_project, graph)
+        assert not smart_reindex(ignored_project, graph).needs_full_index
