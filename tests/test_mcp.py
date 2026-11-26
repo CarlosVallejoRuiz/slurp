@@ -920,7 +920,10 @@ class TestInstructionsMentionEveryTool:
         words = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
                  "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
         instructions = _invoke(_req("initialize", {}))["result"]["instructions"]
-        stated = re.findall(r"\b(\w+) tools\b", instructions, re.IGNORECASE)
+        # v1.3's approved text says it as "All five are read-only."
+        stated = re.findall(r"\b(\w+) tools\b|\bAll (\w+) are\b", instructions,
+                            re.IGNORECASE)
+        stated = [a or b for a, b in stated]
         assert stated, "instructions should say how many tools there are"
         assert all(words.get(w.lower()) == len(_TOOLS) for w in stated), stated
 

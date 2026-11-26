@@ -36,40 +36,93 @@ from slurp.impact import analyze_impact, format_impact
 from slurp.suggester import format_suggestions, suggest_queries
 from slurp.scorer import clear_pagerank_cache, score_nodes
 
-_PROTOCOL_VERSION = "2024-11-05"
+# Protocol revisions this server speaks (docs/design/mcp-autonomo.md §6). A
+# legacy client negotiates once, in `initialize`; a 2026-07-28 client names the
+# revision in every request's _meta and is served statelessly.
+MODERN_VERSIONS = ("2026-07-28",)
+LEGACY_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
+_ALL_VERSIONS = (*MODERN_VERSIONS, *LEGACY_VERSIONS)
+#: What `initialize` answers when the client asks for a revision this server
+#: does not speak: the latest legacy one, as the specification says.
+_PROTOCOL_VERSION = LEGACY_VERSIONS[0]
+
+_PROTOCOL_META = "io.modelcontextprotocol/protocolVersion"
+_CLIENT_META = "io.modelcontextprotocol/clientInfo"
+_SERVER_META = "io.modelcontextprotocol/serverInfo"
+# How long a 2026-07-28 client may cache the instructions and the tool list.
+# They change only when the served graph changes owner (graphify rewrites it).
+_TTL_MS = 600_000
 
 # The one default every entry point shares (see budget.DEFAULT_MIN_SCORE), so the
 # same query returns the same subgraph through MCP and through the terminal.
 _MIN_SCORE = DEFAULT_MIN_SCORE
 
-_INSTRUCTIONS = (
-    "Slurp serves token-budget-aware slices of a codebase knowledge graph. "
-    "Five tools, for five different questions.\n\n"
-    "slurp_query — 'where is the code that does X?'. Call it before reading "
-    "files when you need to orient yourself in an unfamiliar codebase, locate "
-    "the code responsible for a feature, or understand how components relate. "
-    "It returns only the most relevant nodes that fit the token budget, so it "
-    "is far cheaper than reading files speculatively. Pass a natural-language "
-    "description (for example 'user authentication flow'), not a filename or a "
-    "bare keyword. Raise the budget when you need broader context; lower it "
-    "when you only need a pointer to the right area.\n\n"
-    "slurp_explain — 'what is this one thing, and what breaks if I change "
-    "it?'. Call it once slurp_query has pointed you at a function, class or "
-    "module and you are about to modify it. It names the part that node plays, "
-    "who depends on it, and how risky a change is. Answers from the graph "
-    "alone by default, with no API cost.\n\n"
-    "slurp_diff — 'what does this change affect?'. Call it with two graph "
-    "snapshots, typically before merging, to see which parts of the codebase "
-    "sit in the blast radius of what changed.\n\n"
-    "slurp_suggest — 'what else should I look at?'. Call it after a "
-    "slurp_query whose answer felt incomplete. It reads the nodes that sat "
-    "just outside the budget and proposes the two or three queries that would "
-    "reach them.\n\n"
-    "slurp_impact — 'what breaks if I edit this file?'. Call it before "
-    "editing any file. Unlike slurp_diff it needs no second snapshot: it "
-    "reads the current graph and reports which definitions in that file carry "
-    "dependants, how far they reach, and which are free to touch."
+# DECISION (v1.3, design §5.3): the server instructions and tool descriptions are
+# the texts the author approved, written for the model: when to reach for slurp
+# before grep, which tool for which moment, what it is not for. Claude Code cuts
+# instructions past 4,096 characters and Codex wants the first 512 to stand on
+# their own (1,230 and 470 here). The last sentence of the first paragraph and of
+# slurp_query's description say whether the graph follows the working tree, so
+# they depend on whose graph is served.
+_INSTRUCTIONS_HEAD = (
+    "slurp answers structural questions about this codebase from its code graph: "
+    "where a behaviour lives, what calls what, and what breaks if a file or "
+    "function changes. Use it before grep or reading whole files when you orient "
+    "yourself or are about to edit: one call returns the relevant functions, "
+    "classes and modules, their relations and their files, within a token budget. "
 )
+_INSTRUCTIONS_REST = (
+    "\n"
+    "\n"
+    "Which tool:\n"
+    "- Starting a task, or unsure where something lives -> slurp_query, in plain "
+    "language (\"how an uploaded stats file is validated\").\n"
+    "- About to edit a file -> slurp_impact with its path: which definitions have "
+    "callers elsewhere, which only tests use, which are free to change.\n"
+    "- About to change one function or class -> slurp_explain with its name: its "
+    "role, production callers vs tests, risk.\n"
+    "- A slurp_query answer looks incomplete -> slurp_suggest with the same query.\n"
+    "- Comparing two graph.json snapshots, e.g. two branches -> slurp_diff. Rarely "
+    "needed.\n"
+    "\n"
+    "All five are read-only. Not for exact strings or regexes (use grep), a file "
+    "you already know (read it), or non-code files. Answers are pointers: open the "
+    "files they name before editing them."
+)
+_FRESHNESS_SENTENCE = {
+    "own": "The graph follows the working tree: edits, new and deleted files are picked up before each answer.",
+    "graphify": ("This graph was built by graphify and slurp does not rebuild it: answers "
+                 "can lag behind recent edits, and say so when files they cover have "
+                 "changed."),
+    # Not in the design, which names two cases: a graph that is neither slurp's
+    # nor graphify's (a generic or GraphML graph, a slurp 1.2 graph whose root
+    # did not validate) must not claim to follow the working tree either.
+    "readonly": ("This graph is served as it is on disk and slurp does not rebuild it: "
+                 "answers can lag behind recent edits, and say so when files they cover "
+                 "have changed."),
+}
+
+_QUERY_HEAD = (
+    "Find where something lives in this codebase. Returns the functions, classes "
+    "and modules most relevant to a plain-language description, with their files "
+    "and the call/import relations between them, trimmed to a token budget. Call it "
+    "first when starting a task or when you don't know which files are involved — "
+    "it is cheaper than grepping and reading files speculatively. Describe "
+    "behaviour ('where uploaded stats files are validated'), not a bare identifier: "
+    "for one known symbol use slurp_explain; for exact text use grep. Default "
+    "budget 4000 tokens; 8000–12000 for broad architecture questions. Tests and "
+    "import nodes are left out unless include_tests / include_imports. "
+)
+_QUERY_FRESHNESS = {
+    "own": "Reflects the current working tree, uncommitted edits included.",
+    "graphify": "Reflects graph.json as graphify last built it; answers flag files changed since.",
+    "readonly": "Reflects graph.json as it is on disk; answers flag files changed since.",
+}
+
+
+def _instructions(variant: str) -> str:
+    return _INSTRUCTIONS_HEAD + _FRESHNESS_SENTENCE[variant] + _INSTRUCTIONS_REST
+
 
 # Tests and import nodes do not compete for a place by default (see
 # _graphutils._left_out); these let each kind back in, as the CLI flags do.
@@ -77,12 +130,12 @@ _INCLUDE_PROPERTIES = {
     "include_tests": {
         "type": "boolean",
         "default": False,
-        "description": "Let test code compete for a place (left out by default).",
+        "description": "Also rank test code (left out by default).",
     },
     "include_imports": {
         "type": "boolean",
         "default": False,
-        "description": "Let import nodes compete for a place (left out by default).",
+        "description": "Also rank import statements (left out by default).",
     },
 }
 
@@ -98,39 +151,41 @@ def _include_flags(args: dict) -> tuple[bool, bool] | str:
     return flags[0], flags[1]
 
 
+# DECISION: every tool is read-only and idempotent, and says so. The hints
+# approve nothing in Claude Code: there readOnlyHint lets a call run in parallel
+# with other read-only tools, and readOnlyHint/idempotentHint let it be retried
+# after a reconnection; approval takes a permission rule or "don't ask again".
+# Codex does count readOnlyHint for approval: with default_tools_approval_mode =
+# "writes" it only asks about tools not marked read-only. The MCP spec calls
+# annotations untrusted hints, so no client has to act on them.
+# DECISION (v1.3, design §5.1): readOnlyHint stays although a call may now
+# refresh graph.json. What it rewrites is a cache derived from the code, never
+# the code — as the server already wrote session.log, and as Claude Code counts
+# `git status` read-only though it refreshes .git/index. Dropping the hint
+# would lose parallel calls in Claude Code and gain nothing.
+_READ_ONLY = {"readOnlyHint": True, "idempotentHint": True, "destructiveHint": False,
+               "openWorldHint": False}
+
 _TOOL_DEFINITION = {
     "name": "slurp_query",
-    "description": (
-        "Select the most relevant nodes from a knowledge graph for a query "
-        "within a token budget. Returns structured markdown with selected "
-        "nodes, their relationships, and token usage statistics."
-    ),
-    # DECISION: slurp_query only reads a graph loaded at startup, so it is
-    # read-only and idempotent, and says so. The hints approve nothing in Claude
-    # Code: there readOnlyHint lets a call run in parallel with other read-only
-    # tools, and readOnlyHint/idempotentHint let it be retried after a
-    # reconnection; approval takes a permission rule or "don't ask again".
-    # Codex does count readOnlyHint for approval: with
-    # default_tools_approval_mode = "writes" it only asks about tools not marked
-    # read-only. The MCP spec calls annotations untrusted hints, so no client
-    # has to act on them.
-    "annotations": {
-        "title": "Slurp graph query",
-        "readOnlyHint": True,
-        "idempotentHint": True,
-        "destructiveHint": False,
-        "openWorldHint": False,
-    },
+    "description": _QUERY_HEAD + _QUERY_FRESHNESS["own"],
+    # DECISION (design §5.1, decision 5): with tool search, on by default in
+    # Claude Code, only tool names are visible at first; the entry-point tool
+    # loads its description from the start. A few hundred tokens a session.
+    "_meta": {"anthropic/alwaysLoad": True},
+    "annotations": {"title": "Slurp graph query", **_READ_ONLY},
     "inputSchema": {
         "type": "object",
         "properties": {
             "query": {
                 "type": "string",
-                "description": "Natural language query to find relevant nodes.",
+                "description": "Plain-language description of the behaviour or feature you "
+                               "are looking for.",
             },
             "budget": {
                 "type": "integer",
-                "description": "Maximum token budget for the result.",
+                "description": "Token budget for the answer (default 4000). Raise it for "
+                               "broad questions.",
                 "default": 4000,
             },
             **_INCLUDE_PROPERTIES,
@@ -139,33 +194,30 @@ _TOOL_DEFINITION = {
     },
 }
 
-
 _EXPLAIN_TOOL_DEFINITION = {
     "name": "slurp_explain",
     "description": (
-        "Explains a specific function or node in natural language — what it "
-        "does, who calls it, and the risk of changing it. Use this when you "
-        "need to understand a specific part of the codebase before modifying "
-        "it."
-    ),
-    "annotations": {
-        "title": "Slurp node explanation",
-        "readOnlyHint": True,
-        "idempotentHint": True,
-        "destructiveHint": False,
-        "openWorldHint": False,
-    },
+    "Explain one function, class or module by name: the role it plays, who calls it "
+    "(production callers and tests counted apart), what it calls, and how risky "
+    "changing it is. Call it once you know which symbol you will change, or when a "
+    "name from slurp_query needs context. Accepts a plain name "
+    "('createAdminClient') or a dotted id. An unknown name falls back to the "
+    "closest match — check the name in the answer. Structural by default, no API "
+    "cost; no_llm=false adds prose only if the user configured an LLM provider."
+),
+    "annotations": {"title": "Slurp node explanation", **_READ_ONLY},
     "inputSchema": {
         "type": "object",
         "properties": {
             "node_name": {
                 "type": "string",
-                "description": "Name of the function, class or module to explain",
+                "description": "Function, class or module name, or a dotted node id.",
             },
             "no_llm": {
                 "type": "boolean",
                 "default": True,
-                "description": "Use structural analysis only (faster, no API cost)",
+                "description": "Keep true (default) for the structural answer; false asks "
+                               "the configured LLM for prose.",
             },
         },
         "required": ["node_name"],
@@ -175,19 +227,15 @@ _EXPLAIN_TOOL_DEFINITION = {
 _DIFF_TOOL_DEFINITION = {
     "name": "slurp_diff",
     "description": (
-        "Shows the blast radius of changes between two graph snapshots. Use "
-        "this before merging a PR to see what parts of the codebase are "
-        "affected."
-    ),
-    # Reads two files named by the caller rather than the graph loaded at
-    # startup, so unlike the other two this one does reach outside the server.
-    "annotations": {
-        "title": "Slurp change impact",
-        "readOnlyHint": True,
-        "idempotentHint": True,
-        "destructiveHint": False,
-        "openWorldHint": False,
-    },
+    "Compare two graph.json snapshots — e.g. built on two branches, or before and "
+    "after a refactor — and report added, removed and modified nodes plus the "
+    "production callers put at risk. Needs paths to two graph files; it does not "
+    "read git or the working tree. For the effect of editing a file now, use "
+    "slurp_impact."
+),
+    # Reads two files named by the caller rather than the graph being served.
+    # openWorldHint stays false: local disk, no network — debatable.
+    "annotations": {"title": "Slurp change impact", **_READ_ONLY},
     "inputSchema": {
         "type": "object",
         "properties": {
@@ -212,17 +260,13 @@ _DIFF_TOOL_DEFINITION = {
 _SUGGEST_TOOL_DEFINITION = {
     "name": "slurp_suggest",
     "description": (
-        "Suggests related queries to explore after a slurp_query call. Use "
-        "this when you want to understand the broader context around what you "
-        "just found."
-    ),
-    "annotations": {
-        "title": "Slurp follow-up queries",
-        "readOnlyHint": True,
-        "idempotentHint": True,
-        "destructiveHint": False,
-        "openWorldHint": False,
-    },
+    "Follow-up queries after a slurp_query answer that looks incomplete. Reads the "
+    "nodes that fell just outside the budget and proposes two or three queries that "
+    "reach them: a drill-down into the top result, a related cluster, or a "
+    "heavily-used neighbour. Pass the same query and budget you used. An empty "
+    "answer means the budget already covered the neighbourhood."
+),
+    "annotations": {"title": "Slurp follow-up queries", **_READ_ONLY},
     "inputSchema": {
         "type": "object",
         "properties": {
@@ -244,28 +288,27 @@ _SUGGEST_TOOL_DEFINITION = {
 _IMPACT_TOOL_DEFINITION = {
     "name": "slurp_impact",
     "description": (
-        "Analyzes the blast radius of editing a specific file before making "
-        "changes. Use this before editing any file to understand what might "
-        "break."
-    ),
-    "annotations": {
-        "title": "Slurp edit impact",
-        "readOnlyHint": True,
-        "idempotentHint": True,
-        "destructiveHint": False,
-        "openWorldHint": False,
-    },
+    "Blast radius of editing a file, before you edit it. For each definition in the "
+    "file: callers in other files (direct and transitive), affected files, risk "
+    "level; plus which definitions only tests call and which nothing calls. Call it "
+    "before modifying, deleting, renaming or changing the signature of code in a "
+    "file. Pass the path relative to the project root; a unique suffix such as "
+    "'auth/session.ts' works. Risk is UNKNOWN, not LOW, for languages without a "
+    "call graph — don't read that as safe."
+),
+    "annotations": {"title": "Slurp edit impact", **_READ_ONLY},
     "inputSchema": {
         "type": "object",
         "properties": {
             "file_path": {
                 "type": "string",
-                "description": "Relative path to the file about to be edited",
+                "description": "Project-relative path (or unique suffix) of the file you are "
+                               "about to edit.",
             },
             "hops": {
                 "type": "integer",
                 "default": 2,
-                "description": "How far to follow dependants outward.",
+                "description": "How many levels of indirect callers to follow (default 2).",
             },
         },
         "required": ["file_path"],
@@ -275,6 +318,25 @@ _IMPACT_TOOL_DEFINITION = {
 _TOOLS = [_TOOL_DEFINITION, _EXPLAIN_TOOL_DEFINITION, _DIFF_TOOL_DEFINITION,
           _SUGGEST_TOOL_DEFINITION, _IMPACT_TOOL_DEFINITION]
 _TOOL_NAMES = frozenset(t["name"] for t in _TOOLS)
+
+
+def _tools_for(variant: str, version: str | None) -> list[dict]:
+    """The tool list as this client should see it.
+
+    slurp_query's last sentence follows the graph's owner; a top-level `title`
+    (from annotations.title) exists from revision 2025-06-18 on.
+    """
+    tools = []
+    for tool in _TOOLS:
+        tool = dict(tool)
+        if tool["name"] == "slurp_query":
+            tool["description"] = _QUERY_HEAD + _QUERY_FRESHNESS[variant]
+        if version is not None and version >= "2025-06-18":
+            tool = {"name": tool["name"], "title": tool["annotations"]["title"],
+                    **{k: v for k, v in tool.items() if k != "name"}}
+        tools.append(tool)
+    return tools
+
 
 
 SESSION_LOG_FILE = "session.log"
@@ -677,17 +739,20 @@ _HANDLERS = {
 }
 
 
-def _call_tool(msg_id, params: dict, G, out, session_log: bool,
-               state: "GraphState | None") -> None:
-    """Answer one tools/call: freshness first, then the tool, then the envelope."""
+def _call_tool(params: dict, G, session_log: bool, state: "GraphState | None",
+               invalid_as_tool_error: bool) -> tuple[dict | None, tuple[int, str] | None]:
+    """Answer one tools/call: freshness first, then the tool, then the envelope.
+
+    Returns:
+        (result, None) or (None, (JSON-RPC error code, message)).
+    """
     name = params.get("name")
     if name not in _TOOL_NAMES:
-        _write(_err(msg_id, -32602, f"Unknown tool: {name!r}"), out)
-        return
+        # An unknown tool is a protocol error in every revision.
+        return None, (-32602, f"Unknown tool: {name!r}")
     args = params.get("arguments") or {}
     if not isinstance(args, dict):
-        _write(_err(msg_id, -32602, "'arguments' must be an object"), out)
-        return
+        return None, (-32602, "'arguments' must be an object")
 
     fresh: Freshness | None = None
     if name != "slurp_diff":   # diff reads two files named by the caller
@@ -695,16 +760,19 @@ def _call_tool(msg_id, params: dict, G, out, session_log: bool,
             fresh = state.prepare()
             G = state.graph
         if G is None:
-            _write(_err(msg_id, -32603, "Graph not loaded"), out)
-            return
+            return None, (-32603, "Graph not loaded")
 
     try:
         text, info = _HANDLERS[name](args, G)
     except _Invalid as exc:
-        _write(_err(msg_id, -32602, str(exc)), out)
-        return
-    except _Failed as exc:
+        # DECISION (v1.3, design §6, decision 10): revision 2025-11-25 asks for
+        # input validation errors as tool errors, so the model reads the message
+        # and corrects the call; earlier revisions keep JSON-RPC -32602.
+        if not invalid_as_tool_error:
+            return None, (-32602, str(exc))
         result: dict = {"content": [{"type": "text", "text": str(exc)}], "isError": True}
+    except _Failed as exc:
+        result = {"content": [{"type": "text", "text": str(exc)}], "isError": True}
     else:
         if name == "slurp_query" and session_log:
             log_session(info["query"], info["budget"], info["stats"])
@@ -718,10 +786,32 @@ def _call_tool(msg_id, params: dict, G, out, session_log: bool,
     # Only present when federating, so single-graph responses are unchanged.
     if state is not None and state.graphs_count > 1 and not result.get("isError"):
         result["graphs_count"] = state.graphs_count
-    _write(_ok(msg_id, result), out)
+    return result, None
 
 
-def _handle(msg: dict, G, out, session_log: bool = True, state: "GraphState | None" = None) -> None:
+class Session:
+    """What one stdio connection negotiated — stdio means one client per process."""
+
+    def __init__(self) -> None:
+        #: The legacy revision fixed by `initialize`, or None before it.
+        self.protocol: str | None = None
+        #: clientInfo from `initialize`, or from the latest 2026-07-28 request.
+        self.client: dict | None = None
+
+
+def _variant(state: "GraphState | None") -> str:
+    """Which freshness wording the served graphs deserve: own, graphify or readonly."""
+    if state is None or all(t.refreshable for t in state.trackers):
+        return "own"
+    return "graphify" if any(t.kind == "graphify" for t in state.trackers) else "readonly"
+
+
+def _server_info() -> dict:
+    return {"name": "slurp", "version": __version__}
+
+
+def _handle(msg: dict, G, out, session_log: bool = True, state: "GraphState | None" = None,
+            session: Session | None = None) -> None:
     """Dispatch one JSON-RPC message and write the response to *out*.
 
     Args:
@@ -730,12 +820,15 @@ def _handle(msg: dict, G, out, session_log: bool = True, state: "GraphState | No
              *state* is given, which owns the current graph.
         out: File-like object to write responses to.
         session_log: Whether to append successful queries to .slurp/session.log.
-        state: Optional GraphState enabling on-disk staleness detection. When
-            omitted, *G* is served as-is and no reload check runs.
+        state: Optional GraphState that keeps the graph current. When omitted,
+            *G* is served as-is.
+        session: What this connection negotiated. A fresh one when omitted —
+            no `initialize` yet, so the oldest revision's rules.
 
     Notifications (messages without an 'id' field) are silently ignored
     per the JSON-RPC 2.0 spec.
     """
+    session = Session() if session is None else session
     if "id" not in msg:
         return  # notification — no response required
 
@@ -748,39 +841,92 @@ def _handle(msg: dict, G, out, session_log: bool = True, state: "GraphState | No
     method = msg.get("method", "")
     raw_params = msg.get("params")
     params: dict = raw_params if isinstance(raw_params, dict) else {}
+    meta = params.get("_meta") if isinstance(params.get("_meta"), dict) else {}
+
+    # A 2026-07-28 request names its revision; a legacy one relies on initialize.
+    requested = meta.get(_PROTOCOL_META)
+    modern = False
+    if requested is None:
+        version = session.protocol
+    elif requested in MODERN_VERSIONS:
+        version, modern = requested, True
+    elif requested in LEGACY_VERSIONS:
+        version = requested
+    else:
+        _write({"jsonrpc": "2.0", "id": msg_id, "error": {
+            "code": -32022, "message": "Unsupported protocol version",
+            "data": {"supported": list(_ALL_VERSIONS), "requested": requested}}}, out)
+        return
+    if isinstance(meta.get(_CLIENT_META), dict):
+        session.client = meta[_CLIENT_META]
+    variant = _variant(state)
+
+    def reply(result: dict) -> None:
+        if modern:
+            # Served statelessly: every result says it is complete and names the server.
+            result = {**result, "resultType": "complete",
+                      "_meta": {**result.get("_meta", {}), _SERVER_META: _server_info()}}
+        _write(_ok(msg_id, result), out)
 
     if method == "initialize":
-        _write(
-            _ok(msg_id, {
-                "protocolVersion": _PROTOCOL_VERSION,
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "slurp", "version": __version__},
-                "instructions": _INSTRUCTIONS,
-            }),
-            out,
-        )
+        asked = params.get("protocolVersion")
+        # DECISION (design §6, decision 7): echo a revision this server speaks,
+        # else answer the latest legacy one. Fixed for the whole process.
+        session.protocol = asked if asked in LEGACY_VERSIONS else _PROTOCOL_VERSION
+        if isinstance(params.get("clientInfo"), dict):
+            session.client = params["clientInfo"]
+        reply({
+            "protocolVersion": session.protocol,
+            "capabilities": {"tools": {}},
+            "serverInfo": _server_info(),
+            "instructions": _instructions(variant),
+        })
+
+    elif method == "server/discover":
+        _write(_ok(msg_id, {
+            "supportedVersions": list(_ALL_VERSIONS),
+            "capabilities": {"tools": {}},
+            "instructions": _instructions(variant),
+            # The instructions depend on the local graph: never shared.
+            "ttlMs": _TTL_MS,
+            "cacheScope": "private",
+            "resultType": "complete",
+            "_meta": {_SERVER_META: _server_info()},
+        }), out)
 
     elif method == "ping":
-        _write(_ok(msg_id, {}), out)
+        if modern:   # removed in 2026-07-28
+            _write(_err(msg_id, -32601, f"Method not found: {method!r}"), out)
+        else:
+            reply({})
 
     elif method == "tools/list":
-        _write(_ok(msg_id, {"tools": _TOOLS}), out)
+        result: dict = {"tools": _tools_for(variant, version)}
+        if modern:
+            result.update(ttlMs=_TTL_MS, cacheScope="private")
+        reply(result)
 
     # DECISION: slurp exposes no resources or prompts, so per spec these
     # methods could return -32601. Several clients probe them at startup
     # regardless of advertised capabilities and treat the error as a failing
     # server, so answer with empty lists instead.
     elif method == "resources/list":
-        _write(_ok(msg_id, {"resources": []}), out)
+        reply({"resources": []})
 
     elif method == "resources/templates/list":
-        _write(_ok(msg_id, {"resourceTemplates": []}), out)
+        reply({"resourceTemplates": []})
 
     elif method == "prompts/list":
-        _write(_ok(msg_id, {"prompts": []}), out)
+        reply({"prompts": []})
 
     elif method == "tools/call":
-        _call_tool(msg_id, params, G, out, session_log, state)
+        tool_errors = modern or (version is not None and version >= "2025-11-25")
+        result, error = _call_tool(params, G, session_log, state, tool_errors)
+        if error is not None:
+            _write(_err(msg_id, *error), out)
+        else:
+            assert result is not None
+            reply(result)
 
     else:
         _write(_err(msg_id, -32601, f"Method not found: {method!r}"), out)
@@ -847,7 +993,25 @@ def serve(
                   file=sys.stderr)
     # The startup check runs in the background: `initialize` never waits on it.
     state.start()
+    _serve_lines(inp, out, state, session_log=session_log, session=Session())
 
+
+class _Lines:
+    """A stand-in for stdout that keeps what one batch's requests answer."""
+
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+
+    def write(self, text: str) -> None:
+        self.lines.extend(line for line in text.splitlines() if line.strip())
+
+    def flush(self) -> None:
+        pass
+
+
+def _serve_lines(inp: TextIO, out: TextIO, state: "GraphState | None", *,
+                 session_log: bool, session: Session) -> None:
+    """Read newline-delimited JSON-RPC from *inp* until EOF, answering on *out*."""
     for raw_line in inp:
         line = raw_line.strip()
         if not line:
@@ -863,6 +1027,21 @@ def serve(
             )
             continue
 
+        # DECISION (design §6): revision 2025-03-26 is the only one with JSON-RPC
+        # batches — each message answered, notifications omitted, one array back.
+        if isinstance(msg, list) and msg and session.protocol == "2025-03-26":
+            collected = _Lines()
+            for item in msg:
+                if isinstance(item, dict):
+                    _handle(item, state.graph if state else None, collected,
+                            session_log=session_log, state=state, session=session)
+                else:
+                    _write(_err(None, -32600, "Request must be a JSON object"), collected)
+            if collected.lines:
+                out.write(json.dumps([json.loads(r) for r in collected.lines]) + "\n")
+                out.flush()
+            continue
+
         if not isinstance(msg, dict):
             _write(
                 {"jsonrpc": "2.0", "id": None,
@@ -871,4 +1050,5 @@ def serve(
             )
             continue
 
-        _handle(msg, state.graph, out, session_log=session_log, state=state)
+        _handle(msg, state.graph if state else None, out, session_log=session_log,
+                state=state, session=session)
