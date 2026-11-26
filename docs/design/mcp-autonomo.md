@@ -508,13 +508,21 @@ slurp answers structural questions about this codebase from its code graph: wher
 
 Which tool:
 - Starting a task, or unsure where something lives -> slurp_query, in plain language ("how an uploaded stats file is validated").
-- About to edit a file -> slurp_impact with its path: which definitions have callers elsewhere, which only tests use, which are free to change.
-- About to change one function or class -> slurp_explain with its name: its role, production callers vs tests, risk.
+- About to edit a file -> slurp_impact(file_path=...) with its path: which definitions have callers elsewhere, which only tests use, which are free to change.
+- About to change one function or class -> slurp_explain(node_name=...) with its name: its role, production callers vs tests, risk.
 - A slurp_query answer looks incomplete -> slurp_suggest with the same query.
 - Comparing two graph.json snapshots, e.g. two branches -> slurp_diff. Rarely needed.
 
 All five are read-only. Not for exact strings or regexes (use grep), a file you already know (read it), or non-code files. Answers are pointers: open the files they name before editing them.
 ```
+
+Cambiado en #93, tras la medición con agentes: la versión aprobada decía "slurp_impact with
+its path" y "slurp_explain with its name". Las dos herramientas son diferidas, y en las tres
+sesiones que usaron `slurp_impact` la primera llamada adivinó el argumento (`target`,
+`path`) sin haber cargado el esquema. Ahora las instrucciones lo nombran, y el servidor
+acepta también `target` y `path` en `slurp_impact` (gana `file_path` si vienen los dos). Las
+instrucciones pasan a tener 1.260 caracteres. `alwaysLoad` sigue solo en `slurp_query`
+(decisión del autor).
 
 **slurp_query** (lleva `alwaysLoad`)
 

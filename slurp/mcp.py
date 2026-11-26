@@ -66,7 +66,9 @@ _MIN_SCORE = DEFAULT_MIN_SCORE
 # the texts the author approved, written for the model: when to reach for slurp
 # before grep, which tool for which moment, what it is not for. Claude Code cuts
 # instructions past 4,096 characters and Codex wants the first 512 to stand on
-# their own (1,230 and 470 here). The last sentence of the first paragraph and of
+# their own (1,260 and 470 here). #93: the lines for slurp_impact and
+# slurp_explain name their argument — both tools are deferred, and in the agent
+# measurement the model called slurp_impact before loading its schema. The last sentence of the first paragraph and of
 # slurp_query's description say whether the graph follows the working tree, so
 # they depend on whose graph is served.
 _INSTRUCTIONS_HEAD = (
@@ -82,10 +84,11 @@ _INSTRUCTIONS_REST = (
     "Which tool:\n"
     "- Starting a task, or unsure where something lives -> slurp_query, in plain "
     "language (\"how an uploaded stats file is validated\").\n"
-    "- About to edit a file -> slurp_impact with its path: which definitions have "
-    "callers elsewhere, which only tests use, which are free to change.\n"
-    "- About to change one function or class -> slurp_explain with its name: its "
-    "role, production callers vs tests, risk.\n"
+    "- About to edit a file -> slurp_impact(file_path=...) with its path: which "
+    "definitions have callers elsewhere, which only tests use, which are free to "
+    "change.\n"
+    "- About to change one function or class -> slurp_explain(node_name=...) with "
+    "its name: its role, production callers vs tests, risk.\n"
     "- A slurp_query answer looks incomplete -> slurp_suggest with the same query.\n"
     "- Comparing two graph.json snapshots, e.g. two branches -> slurp_diff. Rarely "
     "needed.\n"
@@ -643,8 +646,19 @@ def _tool_explain(args: dict, G) -> tuple[str, dict]:
                   "file": str(attrs.get("source_file") or attrs.get("file_path") or "")}
 
 
+# DECISION (#93): slurp_impact is deferred (only slurp_query has alwaysLoad), and
+# in the agent measurement each first call guessed the argument before loading the
+# schema: `target`, `path`. Those names are accepted too; the schema still asks
+# for file_path, which wins when both are given, and the log records file_path.
+_IMPACT_ALIASES = ("target", "path")
+
+
 def _tool_impact(args: dict, G) -> tuple[str, dict]:
     """slurp_impact: what editing a file could break, from the graph already loaded."""
+    if not args.get("file_path"):
+        alias = next((a for a in _IMPACT_ALIASES if args.get(a)), None)
+        if alias is not None:
+            args = {**args, "file_path": args[alias]}
     file_path = _required_text(args, "file_path")
     hops = _positive_int(args, "hops", 2)
     try:

@@ -100,6 +100,13 @@ class TestOneLinePerCall:
         assert calls[2]["args"] == {"file_path": "lib/billing.py", "hops": 2}
         assert "graph" not in calls[4]          # diff does not read the served graph
 
+    def test_an_aliased_argument_is_logged_under_its_real_name(self, project):
+        # #93: the analysis reads args.file_path; an alias must not hide the file.
+        log = _session(project, [INIT, _tool(1, "slurp_impact", target="lib/billing.py")])
+        [call] = [e for e in log if e.get("event") == "call"]
+        assert call["args"] == {"file_path": "lib/billing.py", "hops": 2}
+        assert "error" not in call
+
     def test_a_refresh_is_recorded_with_its_files(self, project):
         log = _session(project, [
             INIT,

@@ -1181,6 +1181,34 @@ class TestImpactTool:
     def test_missing_file_path_is_an_invalid_params_error(self):
         assert self._call({})["error"]["code"] == -32602
 
+    # #93: the measurement's agents called slurp_impact before its schema was
+    # loaded (it is deferred) and guessed the argument: `target`, `path`.
+    @pytest.mark.parametrize("alias", ["target", "path"])
+    def test_the_names_agents_guessed_are_accepted(self, alias):
+        expected = self._call({"file_path": self.source})["result"]["content"][0]["text"]
+        resp = self._call({alias: self.source})
+        assert "isError" not in resp["result"]
+        assert resp["result"]["content"][0]["text"] == expected
+
+    def test_file_path_wins_over_an_alias(self):
+        resp = self._call({"file_path": self.source, "target": "nowhere/at/all.py"})
+        assert "Impact Analysis" in resp["result"]["content"][0]["text"]
+
+    def test_with_no_name_at_all_the_error_names_file_path(self):
+        resp = self._call({"file": self.source})
+        assert resp["error"]["message"] == "Missing required argument: 'file_path'"
+
+    def test_the_schema_still_asks_for_file_path_only(self):
+        tools = _invoke(_req("tools/list", {}))["result"]["tools"]
+        schema = next(t for t in tools if t["name"] == "slurp_impact")["inputSchema"]
+        assert schema["required"] == ["file_path"]
+        assert set(schema["properties"]) == {"file_path", "hops"}
+
+    def test_instructions_name_the_arguments(self):
+        text = _invoke(_req("initialize", {}))["result"]["instructions"]
+        assert "slurp_impact(file_path=...)" in text
+        assert "slurp_explain(node_name=...)" in text
+
     def test_non_positive_hops_is_rejected(self):
         resp = self._call({"file_path": self.source, "hops": 0})
         assert resp["error"]["code"] == -32602
