@@ -2060,11 +2060,18 @@ def init(yes: bool, keep_graphify: bool, instructions: str) -> None:
                 f"[cyan]{_rel_display(settings_path, root)}[/]")
     if instructions == "none":
         plan.append("  4. No instructions for the agent (--instructions none)")
+    elif instruction_plan.mentioning:
+        # #94: nothing will be written (never twice); the plan used to say "in —".
+        names = ", ".join(_rel_display(p, root) for p in instruction_plan.mentioning)
+        verb = "mentions" if len(instruction_plan.mentioning) == 1 else "mention"
+        plan.append(f"  4. No paragraph for the agent: [cyan]{escape(names)}[/] already "
+                    f"{verb} slurp_query or mcp__slurp")
     else:
-        where = ", ".join(_rel_display(p, root) for p in instruction_plan.targets) or "—"
+        where = ", ".join(_rel_display(p, root) for p in instruction_plan.targets)
         kind = "local, not versioned" if instructions == "local" else "versioned"
         plan.append(f"  4. Tell the agent when to use slurp in [cyan]{where}[/] ({kind})")
-    plan.append("     [dim]Or: --instructions versioned (CLAUDE.md/AGENTS.md) | none[/]")
+    if not instruction_plan.mentioning:
+        plan.append("     [dim]Or: --instructions versioned (CLAUDE.md/AGENTS.md) | none[/]")
     plan.append("  5. Keep .slurp/, settings.local.json, CLAUDE.local.md out of git "
                 "[dim](.gitignore)[/]")
     plan.append("")

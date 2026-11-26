@@ -194,6 +194,31 @@ class TestClaudeCodeApprovals:
 
 
 class TestInstructions:
+    # #94: with a CLAUDE.md that already mentions slurp, the plan said
+    # "4. Tell the agent when to use slurp in — (local, not versioned)".
+    def test_the_plan_says_no_paragraph_when_a_file_already_mentions_slurp(
+            self, tmp_path, monkeypatch):
+        root = _project(tmp_path / "p")
+        (root / "CLAUDE.md").write_text("Use slurp_query first.\n", encoding="utf-8")
+        res = _init(root, monkeypatch, "--yes")
+        assert res.exit_code == 0, res.output
+        text = " ".join(res.output.replace("│", " ").split())
+        assert ("4. No paragraph for the agent: CLAUDE.md already mentions slurp_query or "
+                "mcp__slurp") in text
+        assert "in — " not in text and "Tell the agent when to use slurp in" not in text
+        assert "Or: --instructions" not in text
+        assert ("CLAUDE.md already mentions slurp_query or mcp__slurp — no paragraph written, "
+                "to avoid saying it twice.") in text
+        assert not (root / "CLAUDE.local.md").exists()
+
+    def test_two_files_that_mention_it_are_both_named(self, tmp_path, monkeypatch):
+        root = _project(tmp_path / "p")
+        (root / "CLAUDE.md").write_text("Use slurp_query first.\n", encoding="utf-8")
+        (root / "AGENTS.md").write_text("Tools: mcp__slurp__slurp_query.\n", encoding="utf-8")
+        text = " ".join(_init(root, monkeypatch, "--yes").output.replace("│", " ").split())
+        assert ("4. No paragraph for the agent: CLAUDE.md, AGENTS.md already mention "
+                "slurp_query or mcp__slurp") in text
+
     def test_local_by_default(self, tmp_path, monkeypatch):
         root = _project(tmp_path / "p")
         assert _init(root, monkeypatch, "--yes").exit_code == 0

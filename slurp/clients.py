@@ -191,6 +191,8 @@ class InstructionPlan:
     replace: list[Path] = field(default_factory=list)
     #: Start a new CLAUDE.local.md with "@AGENTS.md" so Claude Code keeps reading it.
     import_agents: bool = False
+    #: Files that already mention slurp: nothing is written (never twice).
+    mentioning: list[Path] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -266,8 +268,10 @@ def plan_instructions(root: Path, mode: str, variant: str) -> InstructionPlan:
         return plan
     mentioning = [p for p in existing if "slurp_query" in _read(p) or "mcp__slurp" in _read(p)]
     if mentioning:
+        plan.mentioning = mentioning
+        verb = "mentions" if len(mentioning) == 1 else "mention"
         plan.warnings.append(
-            f"{', '.join(p.name for p in mentioning)} already mention slurp_query or "
+            f"{', '.join(p.name for p in mentioning)} already {verb} slurp_query or "
             "mcp__slurp — no paragraph written, to avoid saying it twice.")
         return plan
 
