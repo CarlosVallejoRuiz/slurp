@@ -1717,7 +1717,8 @@ def _plural(count: int, word: str) -> str:
 @click.option("--output", "-o", "output_path", default=None, type=click.Path(),
               help="Output path for graph.json (default: <path>/graphify-out/graph.json).")
 @click.option("--watch", is_flag=True, default=False,
-              help="Re-index on file changes (requires watchdog).")
+              help="Keep the graph current until Ctrl+C: polls every second, refreshes "
+                   "after a quiet second.")
 @click.option("--ignore-file", "ignore_file", default=".slurpignore", show_default=True,
               help="Path to .slurpignore rules.")
 @click.option("--smart", is_flag=True, default=False,
@@ -1743,7 +1744,6 @@ def index_cmd(
     """
     from slurp.graphfile import GraphChangedError, GraphLock, graph_identity, write_graph
     from slurp.indexer import (
-        _INDEXED_EXTENSIONS,
         format_parser_summary,
         iter_source_files,
         parser_summary,
@@ -1829,33 +1829,77 @@ def index_cmd(
         lock.release()
 
     if watch:
-        try:
-            from watchdog.events import FileSystemEventHandler  # noqa: PLC0415
-            from watchdog.observers import Observer  # noqa: PLC0415
-        except ImportError:
-            raise click.ClickException(
-                "--watch requires watchdog. Install: pip install watchdog"
-            )
+        _watch(out)
 
-        class _Handler(FileSystemEventHandler):  # type: ignore[misc]
-            def on_modified(self, event) -> None:
-                if not event.is_directory:
-                    if Path(event.src_path).suffix.lower() in _INDEXED_EXTENSIONS:
-                        safe_path = event.src_path.encode("unicode_escape").decode("ascii")
-                        click.echo(f"  Changed: {safe_path} — re-indexing...")
-                        _run()
 
-        observer = Observer()
-        observer.schedule(_Handler(), str(root), recursive=True)
-        observer.start()
-        click.echo(f"\nWatching {root} for changes (Ctrl+C to stop)...")
-        try:
-            import time
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            observer.stop()
-        observer.join()
+# Seconds between two looks at the manifest in `slurp index --watch`.
+_WATCH_INTERVAL_S = 1.0
+
+
+def _watch_sleep(seconds: float) -> None:
+    import time
+
+    time.sleep(seconds)
+
+
+def _watch(graph_path: Path) -> None:
+    """Keep *graph_path* current until Ctrl+C: a poll over its manifest, debounced.
+
+    DECISION (v1.3, design §4): every second the manifest is checked (0.4 ms on
+    PrismaStats); a change is acted on only once a whole poll passed with the
+    disk as it was, so a save that writes twice or a checkout of a hundred
+    files is one refresh. The refresh is the server's — fast path or full
+    index, atomic write under the lock — so new, deleted and renamed files and
+    .slurpignore are all seen, skipped directories never wake it, and nothing
+    depends on inotify, FSEvents or the watchdog package (no longer a
+    dependency). The v1.2 watcher re-indexed on every modify event of any
+    indexable file, node_modules/ included, and missed creations and renames.
+    """
+    import time
+
+    from slurp.refresh import GraphTracker
+
+    try:
+        tracker = GraphTracker(graph_path)
+    except SlurpLoadError as exc:
+        raise click.ClickException(str(exc)) from None
+    if not tracker.refreshable:
+        raise click.ClickException(f"--watch keeps slurp's own graphs current; {graph_path} "
+                                   f"is not one ({tracker.note or tracker.kind}).")
+    click.echo(f"\nWatching {tracker.root} for changes (Ctrl+C to stop)...")
+    pending = None
+    try:
+        while True:
+            _watch_sleep(_WATCH_INTERVAL_S)
+            if tracker.disk_changed():
+                tracker.load()          # another slurp wrote it: start from that
+                pending = None
+                continue
+            changes = tracker.check()
+            if not changes.any or tracker.failed_signature == changes.signature():
+                pending = None
+                continue
+            if changes.signature() != pending:
+                pending = changes.signature()   # still moving: wait for a quiet poll
+                continue
+            pending = None
+            started = time.perf_counter()
+            try:
+                rebuilt = tracker.rebuild(changes)
+            except Exception as exc:
+                tracker.failed_signature = changes.signature()
+                click.echo(f"✗ refresh failed: {type(exc).__name__}: {exc}", err=True)
+                continue
+            if rebuilt.reloaded:
+                tracker.load()
+                continue
+            tracker.apply(rebuilt)
+            what = changes.describe().replace(" since this graph was built", "")
+            how = ("smart update" if rebuilt.way == "smart"
+                   else f"full index ({rebuilt.reason})")
+            click.echo(f"↻ {what} — {how} in {time.perf_counter() - started:.1f}s")
+    except KeyboardInterrupt:
+        click.echo("Stopped.")
 
 
 @cli.command("init")

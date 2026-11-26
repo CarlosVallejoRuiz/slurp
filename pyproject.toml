@@ -27,7 +27,6 @@ dependencies = [
     "pathspec>=1.1.1",
     "rich>=15.0.0",
     "tiktoken>=0.13.0",
-    "watchdog>=3.0.0",
 ]
 
 [project.optional-dependencies]

@@ -5,7 +5,6 @@ import os
 import stat
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -239,43 +238,26 @@ class TestEveryWriterIsAtomic:
         assert replaced == [out.resolve()]
 
     def test_watch(self, tmp_path, monkeypatch, replaced):
-        # --watch re-indexes on every change event; each re-index is a write.
-        import watchdog.observers
-
+        # --watch refreshes after a quiet poll; each refresh is a write.
         root = _project(tmp_path / "p")
         out = tmp_path / "graph.json"
+        polls = iter([
+            lambda: (root / "app.py").write_text("def main():\n    return 2\n",
+                                                 encoding="utf-8"),
+            lambda: None,      # the quiet poll: refresh now
+            None,
+        ])
 
-        class _Event:
-            is_directory = False
-            src_path = str(root / "app.py")
-
-        class _FakeObserver:
-            def schedule(self, handler, path, recursive):
-                self.handler = handler
-
-            def start(self):
-                self.handler.on_modified(_Event())
-
-            def stop(self):
-                pass
-
-            def join(self):
-                pass
-
-        real_sleep = time.sleep
-
-        def interrupt(seconds):
-            # Only the watch loop's one-second nap: subprocess waits sleep too.
-            if seconds == 1:
+        def poll(_seconds):
+            step = next(polls)
+            if step is None:
                 raise KeyboardInterrupt
-            real_sleep(seconds)
+            step()
 
-        monkeypatch.setattr(watchdog.observers, "Observer", _FakeObserver)
-        monkeypatch.setattr(time, "sleep", interrupt)
+        monkeypatch.setattr("slurp.cli._watch_sleep", poll)
         res = CliRunner().invoke(cli, ["index", str(root), "-o", str(out), "--watch",
                                        "--ignore-file", "/dev/null"])
         assert res.exit_code == 0, res.output
-        assert "re-indexing" in res.output
         assert replaced == [out.resolve(), out.resolve()]
 
 
