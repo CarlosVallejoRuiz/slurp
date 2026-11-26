@@ -7128,7 +7128,13 @@ def list_source_dir(root: Path, rel: str) -> tuple[int, list[str], list[Path]] |
 
 
 def _is_indexable(path: Path, root: Path, root_resolved: Path) -> bool:
-    """Whether a walked file is one the index processes (see iter_source_files)."""
+    """Whether a walked file is one the index processes (see iter_source_files).
+
+    The extension is tested first: it costs a string comparison, and most files
+    of a directory listing (READMEs, images, lock files) fail it.
+    """
+    if path.suffix.lower() not in _INDEXED_EXTENSIONS:
+        return False
     # Skip rules apply below the root only — see _should_skip. Skipped
     # directories never reach here; this still drops minified bundles.
     if not path.is_file() or _should_skip(path.relative_to(root), root):
@@ -7140,7 +7146,7 @@ def _is_indexable(path: Path, root: Path, root_resolved: Path) -> bool:
         # part of this project. Skipping silently is the security
         # behaviour — following it would index arbitrary files on disk.
         return False
-    return path.suffix.lower() in _INDEXED_EXTENSIONS
+    return True
 
 
 def _list_dir(here: Path) -> tuple[int, list[str], list[Path]] | None:

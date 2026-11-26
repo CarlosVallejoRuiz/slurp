@@ -302,3 +302,58 @@ class TestDescribe:
 
     def test_the_signature_tells_two_states_apart(self):
         assert Changes(modified=["a"]).signature() != Changes(modified=["b"]).signature()
+
+
+class TestSteadyStateCost:
+    """Recently touched files and directories are verified once, not on every call."""
+
+    def test_a_racy_file_is_hashed_until_it_is_two_seconds_old_then_trusted(
+            self, project, monkeypatch):
+        from slurp import manifest
+
+        m = _manifest(project)              # built now: every file sits in the window
+        checker = ManifestChecker(m)
+        hashed: list = []
+        real = manifest.content_hash
+        monkeypatch.setattr(manifest, "content_hash",
+                            lambda p: (hashed.append(p), real(p))[1])
+        checker.check()
+        assert hashed                       # in the window: verified by hash
+        later = time.time_ns() + 5_000_000_000
+        monkeypatch.setattr(manifest.time, "time_ns", lambda: later)
+        checker.check()                     # verified again, now well past the mtime…
+        hashed.clear()
+        checker.check()
+        assert hashed == []                 # …so the stat is trusted from here on
+
+    def test_a_racy_directory_is_listed_until_it_is_two_seconds_old(self, project, monkeypatch):
+        from slurp import manifest
+
+        m = _manifest(project)
+        checker = ManifestChecker(m)
+        listed: list = []
+        real = manifest.list_source_dir
+        monkeypatch.setattr(manifest, "list_source_dir",
+                            lambda root, rel: (listed.append(rel), real(root, rel))[1])
+        checker.check()
+        assert listed
+        later = time.time_ns() + 5_000_000_000
+        monkeypatch.setattr(manifest.time, "time_ns", lambda: later)
+        checker.check()
+        listed.clear()
+        checker.check()
+        assert listed == []
+
+    def test_an_edit_after_the_trust_is_still_seen(self, project, monkeypatch):
+        from slurp import manifest
+
+        m = _manifest(project)
+        checker = ManifestChecker(m)
+        later = time.time_ns() + 5_000_000_000
+        monkeypatch.setattr(manifest.time, "time_ns", lambda: later)
+        checker.check()
+        checker.check()
+        _put(project, "lib/util.py", "def helper():\n    return 3\n")
+        _put(project, "lib/new.py", "def new():\n    pass\n")
+        changes = checker.check()
+        assert changes.modified == ["lib/util.py"] and changes.added == ["lib/new.py"]

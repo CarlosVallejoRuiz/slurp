@@ -262,6 +262,14 @@ class ManifestChecker:
         self.manifest = manifest
         self._ignore_stat: tuple | None = None
         self._last_walk_ns = manifest.started_ns
+        # DECISION: when each entry was last verified (hashed, or listed). An
+        # entry is in the racy window while its mtime is within 2 s of that
+        # moment — the build's start until it is verified again. Without this, a
+        # directory touched just before a build (the graph's own graphify-out/,
+        # the project root) was listed on every call until the next build: 2.7
+        # ms a call instead of 0.5 on PrismaStats.
+        self._seen_dirs: dict[str, int] = {}
+        self._seen_files: dict[str, int] = {}
 
     def check(self) -> Changes:
         """What changed on disk since the manifest was written (or last checked clean)."""
@@ -286,18 +294,22 @@ class ManifestChecker:
             added, deleted = self._rescan_dirs()
 
         changes = Changes(added=sorted(added), deleted=sorted(deleted))
-        racy_floor = m.started_ns - RACY_WINDOW_NS
+        # Plain strings, not Path objects: building ~200 Paths a call cost three
+        # times the stat calls themselves on PrismaStats.
+        base = str(m.root) + os.sep
         for key, entry in m.files.items():
             if key in deleted:
                 continue
-            path = m.root / key
+            path = base + key
+            seen = time.time_ns()
             try:
                 st = os.stat(path)
             except OSError:
                 changes.deleted.append(key)
                 continue
             stamp = (st.st_mtime_ns, st.st_size, st.st_ino)
-            if stamp == tuple(entry[:3]) and entry[0] < racy_floor:
+            if stamp == tuple(entry[:3]) and \
+                    entry[0] < self._seen_files.get(key, m.started_ns) - RACY_WINDOW_NS:
                 continue
             try:
                 digest = content_hash(path)
@@ -309,6 +321,7 @@ class ManifestChecker:
                 changes.stamps[key] = stamp[:2]
             else:
                 entry[0:3] = list(stamp)
+                self._seen_files[key] = seen
         changes.modified.sort()
         changes.deleted.sort()
         for key in changes.added:
@@ -352,21 +365,23 @@ class ManifestChecker:
         a case-only rename on a case-insensitive filesystem.
         """
         m = self.manifest
-        racy_floor = m.started_ns - RACY_WINDOW_NS
         added: set[str] = set()
         deleted: set[str] = set()
         removed: list[str] = []
         by_parent: dict[str, set[str]] | None = None
+        root = str(m.root)
         for rel in sorted(m.dirs):
-            if any(_under(rel, gone) for gone in removed):
+            if removed and any(_under(rel, gone) for gone in removed):
                 continue
             recorded = m.dirs[rel]
             try:
-                now = os.stat(m.root / rel if rel else m.root).st_mtime_ns
+                now = os.stat(root + os.sep + rel if rel else root).st_mtime_ns
             except OSError:
                 now = None
-            if now == recorded and recorded < racy_floor:
+            if now == recorded and \
+                    recorded < self._seen_dirs.get(rel, m.started_ns) - RACY_WINDOW_NS:
                 continue
+            seen = time.time_ns()
             listed = list_source_dir(m.root, rel)
             if listed is None:
                 removed.append(rel)
@@ -396,6 +411,7 @@ class ManifestChecker:
             if not new_here and not gone_here:
                 m.dirs[rel] = mtime
                 m.dirs.update(new_dirs)
+                self._seen_dirs[rel] = seen
         for gone in removed:
             under = {k for k in m.files if _under(k, gone)}
             deleted |= under
