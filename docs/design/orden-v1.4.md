@@ -2,7 +2,8 @@
 
 ## Estado
 
-- **Fecha y situación:** propuesta del 2026-11-27, **sin aprobar**.
+- **Fecha y situación:** propuesta del 2026-11-27, **aprobada por el autor ese mismo día** con
+  las condiciones de «Decisiones del autor».
 - **Alcance:** solo diseño. No se ha cambiado el scorer.
 - **Lo único medido:**
   - un diagnóstico de por qué fallan las preguntas de commits, hecho **solo sobre el grupo de
@@ -13,6 +14,67 @@
   - los scripts del diagnóstico, en `~/slurp-bench/tools/diag_v14.py` y `diag_v14_areas.py`,
     fuera del repo;
   - sus resultados, en `~/slurp-bench/diag_v14*.json`.
+
+## Decisiones del autor (2026-11-27)
+
+**Variantes y rejillas** (§3): aprobadas, con una condición en V6:
+
+- **La lista de palabras vacías es genérica del inglés, no sacada del vocabulario de los
+  commits.** Queda fijada aquí y son solo palabras funcionales: artículos, preposiciones,
+  conjunciones, pronombres, auxiliares y cuantificadores. Ningún verbo de commit (add, fix,
+  support, handle…) está en ella.
+
+  > a, an, the, and, or, but, nor, so, yet, if, then, than, as, at, by, for, from, in, into, of,
+  > off, on, onto, out, over, to, up, with, without, within, about, above, after, against,
+  > before, below, between, during, through, under, until, via, per, i, me, my, we, us, our,
+  > you, your, he, him, his, she, her, it, its, they, them, their, this, that, these, those,
+  > who, whom, which, what, whose, am, is, are, was, were, be, been, being, do, does, did,
+  > doing, have, has, had, having, will, would, shall, should, can, could, may, might, must,
+  > there, here, when, where, why, how, all, any, both, each, few, more, most, other, some,
+  > such, no, not, only, own, same, too, very, just, also
+
+- **Si V6 mejora el banco pero empeora alguna pregunta etiquetada de PrismaStats o slurp, no
+  entra.** «Empeora» quiere decir que su recall a 4000 en markdown baja con V6 frente a la misma
+  combinación sin V6, mirando las 31 preguntas una a una.
+
+**Criterio** (§6): aprobado tal cual.
+
+**Regla del docstring**, fijada antes de medir:
+
+- Se decide con la combinación elegida, comparando el recall medio a 4000 en markdown de los 7
+  proyectos de derivación.
+- Si imprimir la primera línea (V1a) cuesta **menos de 0,01** frente a usarla solo para puntuar
+  (V1b), se imprime: R(V1b) − R(V1a) < 0,01.
+- Si cuesta 0,01 o más, solo para puntuar.
+
+**Reserva para un segundo intento**, elegida y congelada ahora, antes de abrir nada:
+
+- Solo se usa si la validación falla.
+- Generador congelado (`questions.py`, `cfeaddc`), semilla 12, 120 preguntas por proyecto, con
+  los mismos filtros.
+- Las preguntas se generan desde estos HEAD exactos; no se ha generado ninguna todavía.
+
+| Proyecto | Lenguaje | Licencia | HEAD | Nodos | Candidatos | Commits que pasan la etapa A |
+|---|---|---|---|---|---|---|
+| httpx | Python | BSD-3-Clause | `e347fb5e93b9` | 1.784 | 544 | 506 |
+| gson | Java | Apache-2.0 | `d9b5079eaa45` | 8.190 | 1.856 | 730 |
+| echo (labstack) | Go | MIT | `59aacddc4a13` | 2.545 | 698 | 635 |
+| zod | TypeScript | MIT | `d40c32991043` | 4.002 | 2.273 | 424 |
+| axum | Rust | MIT | `8d8944e6db1a` | 4.570 | 1.881 | 244 |
+
+**Dos precisiones de la medición**, anotadas antes de medir:
+
+- **Docstrings sin reindexar con la rama.** Se aplica la extracción de la rama #21
+  (`ast.get_docstring` y `_doc_comment_above`, copiadas tal cual) a los grafos de los padres de la
+  v1.3, en vez de reindexar con el indexador de la rama, que parte de la v1.2.
+  - Comprobado: el indexador de la rama da exactamente los mismos nodos que el de la v1.3 en hono,
+    jsoup y sqlalchemy (2.880, 8.138 y 59.518, ninguna diferencia).
+  - Así lo único que cambia es la documentación, y las aristas siguen siendo las del banco.
+  - El docstring completo va a un atributo que solo lee el scorer experimental. En V1a,
+    `description` lleva su primera línea, que es lo que imprimiría la rama.
+- **V2: empates del PPR.** Los nodos que el PageRank personalizado no alcanza empatan a 0. Esos
+  empates exactos se ordenan por el PageRank global con un peso de 1e-6, para no dejarlos al
+  orden de los ids. No cambia ningún otro orden.
 
 ## Por qué
 
