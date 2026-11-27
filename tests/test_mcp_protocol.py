@@ -107,6 +107,25 @@ class TestInstructions:
         assert "built by graphify" in result["instructions"]
 
 
+class TestBudgetGuidance:
+    """#99: the budget study (docs/design/presupuesto-optimo/resultados/conclusiones.md)."""
+
+    def test_query_description(self, slurp_state):
+        tools = _call(_req("tools/list", {}), _initialized("2025-11-25"), slurp_state)
+        desc = next(t for t in tools["result"]["tools"] if t["name"] == "slurp_query")[
+            "description"]
+        assert "8000–12000 for broad architecture" not in desc
+        assert ("The default budget, 4000 tokens, answers architecture and orientation "
+                "questions; to pin down the specific function to change in a large project, "
+                "raise it to 16000–32000.") in desc
+
+    def test_instructions(self, slurp_state):
+        text = _call(_req("initialize", {}), Session(), slurp_state)["result"]["instructions"]
+        assert ("The default budget answers architecture questions; to pin down one specific "
+                "function in a large project, pass budget 16000–32000.") in text
+        assert len(text) <= 4096 and len(text.split("\n\n")[0]) <= 512
+
+
 class TestToolTexts:
     def _tools(self, state, session=None) -> dict:
         resp = _call(_req("tools/list", {}), session or _initialized("2025-11-25"), state)
@@ -128,7 +147,8 @@ class TestToolTexts:
         assert props["slurp_query"]["query"]["description"] == (
             "Plain-language description of the behaviour or feature you are looking for.")
         assert props["slurp_query"]["budget"]["description"] == (
-            "Token budget for the answer (default 4000). Raise it for broad questions.")
+            "Token budget for the answer (default 4000, enough for architecture questions). "
+            "Raise it to 16000–32000 to pin down a specific function in a large project.")
         assert props["slurp_query"]["include_tests"]["description"] == (
             "Also rank test code (left out by default).")
         assert props["slurp_query"]["include_imports"]["description"] == (

@@ -66,7 +66,9 @@ _MIN_SCORE = DEFAULT_MIN_SCORE
 # the texts the author approved, written for the model: when to reach for slurp
 # before grep, which tool for which moment, what it is not for. Claude Code cuts
 # instructions past 4,096 characters and Codex wants the first 512 to stand on
-# their own (1,260 and 470 here). #93: the lines for slurp_impact and
+# their own (1,390 and 470 here). #99: the budget guidance follows the budget study
+# (docs/design/presupuesto-optimo/): the default answers architecture questions, a
+# specific function in a large project needs 16000–32000. #93: the lines for slurp_impact and
 # slurp_explain name their argument — both tools are deferred, and in the agent
 # measurement the model called slurp_impact before loading its schema. The last sentence of the first paragraph and of
 # slurp_query's description say whether the graph follows the working tree, so
@@ -83,7 +85,9 @@ _INSTRUCTIONS_REST = (
     "\n"
     "Which tool:\n"
     "- Starting a task, or unsure where something lives -> slurp_query, in plain "
-    "language (\"how an uploaded stats file is validated\").\n"
+    "language (\"how an uploaded stats file is validated\"). The default budget answers "
+    "architecture questions; to pin down one specific function in a large project, pass "
+    "budget 16000–32000.\n"
     "- About to edit a file -> slurp_impact(file_path=...) with its path: which "
     "definitions have callers elsewhere, which only tests use, which are free to "
     "change.\n"
@@ -117,9 +121,10 @@ _QUERY_HEAD = (
     "first when starting a task or when you don't know which files are involved — "
     "it is cheaper than grepping and reading files speculatively. Describe "
     "behaviour ('where uploaded stats files are validated'), not a bare identifier: "
-    "for one known symbol use slurp_explain; for exact text use grep. Default "
-    "budget 4000 tokens; 8000–12000 for broad architecture questions. Tests and "
-    "import nodes are left out unless include_tests / include_imports. "
+    "for one known symbol use slurp_explain; for exact text use grep. The default "
+    "budget, 4000 tokens, answers architecture and orientation questions; to pin down "
+    "the specific function to change in a large project, raise it to 16000–32000. "
+    "Tests and import nodes are left out unless include_tests / include_imports. "
 )
 _QUERY_FRESHNESS = {
     "own": "Reflects the current working tree, uncommitted edits included.",
@@ -192,8 +197,9 @@ _TOOL_DEFINITION = {
             },
             "budget": {
                 "type": "integer",
-                "description": "Token budget for the answer (default 4000). Raise it for "
-                               "broad questions.",
+                "description": "Token budget for the answer (default 4000, enough for "
+                               "architecture questions). Raise it to 16000–32000 to pin "
+                               "down a specific function in a large project.",
                 "default": 4000,
             },
             **_INCLUDE_PROPERTIES,

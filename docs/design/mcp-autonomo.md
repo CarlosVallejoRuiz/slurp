@@ -507,7 +507,7 @@ primer párrafo se sustituye por
 slurp answers structural questions about this codebase from its code graph: where a behaviour lives, what calls what, and what breaks if a file or function changes. Use it before grep or reading whole files when you orient yourself or are about to edit: one call returns the relevant functions, classes and modules, their relations and their files, within a token budget. The graph follows the working tree: edits, new and deleted files are picked up before each answer.
 
 Which tool:
-- Starting a task, or unsure where something lives -> slurp_query, in plain language ("how an uploaded stats file is validated").
+- Starting a task, or unsure where something lives -> slurp_query, in plain language ("how an uploaded stats file is validated"). The default budget answers architecture questions; to pin down one specific function in a large project, pass budget 16000–32000.
 - About to edit a file -> slurp_impact(file_path=...) with its path: which definitions have callers elsewhere, which only tests use, which are free to change.
 - About to change one function or class -> slurp_explain(node_name=...) with its name: its role, production callers vs tests, risk.
 - A slurp_query answer looks incomplete -> slurp_suggest with the same query.
@@ -527,12 +527,26 @@ instrucciones pasan a tener 1.260 caracteres. `alwaysLoad` sigue solo en `slurp_
 **slurp_query** (lleva `alwaysLoad`)
 
 ```
-Find where something lives in this codebase. Returns the functions, classes and modules most relevant to a plain-language description, with their files and the call/import relations between them, trimmed to a token budget. Call it first when starting a task or when you don't know which files are involved — it is cheaper than grepping and reading files speculatively. Describe behaviour ('where uploaded stats files are validated'), not a bare identifier: for one known symbol use slurp_explain; for exact text use grep. Default budget 4000 tokens; 8000–12000 for broad architecture questions. Tests and import nodes are left out unless include_tests / include_imports. Reflects the current working tree, uncommitted edits included.
+Find where something lives in this codebase. Returns the functions, classes and modules most relevant to a plain-language description, with their files and the call/import relations between them, trimmed to a token budget. Call it first when starting a task or when you don't know which files are involved — it is cheaper than grepping and reading files speculatively. Describe behaviour ('where uploaded stats files are validated'), not a bare identifier: for one known symbol use slurp_explain; for exact text use grep. The default budget, 4000 tokens, answers architecture and orientation questions; to pin down the specific function to change in a large project, raise it to 16000–32000. Tests and import nodes are left out unless include_tests / include_imports. Reflects the current working tree, uncommitted edits included.
 ```
 
 Parámetros:
 - `query`: `Plain-language description of the behaviour or feature you are looking for.`
-- `budget`: `Token budget for the answer (default 4000). Raise it for broad questions.`
+- `budget`: `Token budget for the answer (default 4000, enough for architecture questions). Raise it to 16000–32000 to pin down a specific function in a large project.`
+
+Cambiado en #99, tras el estudio del presupuesto óptimo
+(`docs/design/presupuesto-optimo/resultados/conclusiones.md`). La versión aprobada decía
+«Default budget 4000 tokens; 8000–12000 for broad architecture questions» y, para `budget`,
+«Raise it for broad questions». El estudio mide lo contrario:
+
+- las preguntas de arquitectura se resuelven con el valor por defecto (las etiquetadas de
+  PrismaStats: recall 0,97 en 4000);
+- localizar la función concreta que cambia un commit, en proyectos con más de unos 2.000
+  candidatos, sigue ganando recall hasta 32000 (16000 encuentra del 52 al 75 %, 32000 del 59
+  al 81 %, frente al 34–68 % de 4000).
+
+Las instrucciones del servidor ganan la misma frase en la línea de `slurp_query` y pasan a 1.390
+caracteres (el primer párrafo sigue en 470). El valor por defecto no cambia.
 - `include_tests`: `Also rank test code (left out by default).`
 - `include_imports`: `Also rank import statements (left out by default).`
 

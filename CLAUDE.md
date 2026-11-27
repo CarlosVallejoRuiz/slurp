@@ -1061,6 +1061,11 @@ relaciones: `--budget 8000` daba 19k–42k tokens reales.
     - **Corte por relevancia:** un `min_score` por consulta. Ninguna forma cumple los márgenes,
       porque los relevantes suelen estar en el suelo de scores.
     - **4000:** se mantiene. Encuentra el ~55 % de las definiciones cambiadas.
+    - **Guía corregida en #99:** la descripción de `slurp_query`, su parámetro `budget` y las
+      instrucciones del servidor dicen que el valor por defecto resuelve las preguntas de
+      arquitectura y que localizar una función concreta en un proyecto grande pide 16000–32000.
+      Antes decían «8000–12000 for broad architecture questions»; el texto aprobado del diseño
+      del MCP lleva la nota.
     - **Conclusión:** la palanca es el orden. El primer relevante cae, en mediana, en el puesto
       4–270, frente a 3,5–4 en los juegos etiquetados.
     - **Banco reutilizable:** `run_study.py` + `analyze.py`.

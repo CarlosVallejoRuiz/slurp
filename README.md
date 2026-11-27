@@ -91,6 +91,19 @@ averaged, went from 0.812 to 1.000 (PrismaStats) and 0.750 to 1.000 (slurp) on t
 tuning half, and from 0.780 to 0.893 and 0.562 to 0.750 on the held-out half.
 `scripts/retrieval.py` reproduces every figure in this section, split included.
 
+**Finding the code to change needs more.** A later study (slurp v1.3.0, 14 open-source
+projects, 1,525 questions taken from commit history: the commit subject as the question, the
+definitions the commit changed as the answer, on the graph of its parent) looked for the budget
+past which more tokens find nothing new. For architecture questions like the ones above, the
+default is enough. For pinning down the specific function a change touches, recall keeps
+growing, about 10 points per doubling, up to 32000 with no plateau, in projects with more than
+about 2,000 candidate nodes (those slurp may return: no tests, no imports). There, in markdown,
+4000 finds 34–68 % of the changed definitions, 16000 finds 52–75 % and 32000 finds 59–81 %.
+The default stays 4000: doubling the context for ten points is a trade-off, not an optimum.
+`slurp_query`'s description tells the agent to pass 16000–32000 when it is after one specific
+function in a large project. Details, in Spanish:
+[conclusiones.md](https://github.com/CarlosVallejoRuiz/slurp/blob/main/docs/design/presupuesto-optimo/resultados/conclusiones.md).
+
 MRR does not depend on the budget. Its definition changed in v1.2: a relevant node's rank
 now counts only the nodes slurp can return — tests and imports, left out of selection,
 are left out of the ranking — because that is the order a reader meets them in. By the
@@ -1785,7 +1798,9 @@ Run slurp as an MCP server so Claude Code (or any MCP-compatible agent) can quer
 **Five tools exposed.** Claude Code calls them automatically, each answering a different
 question. The server runs over stdio and returns formatted markdown — no HTTP, no ports.
 `slurp_query` always answers in markdown, with `budget` 4000 unless the client asks for
-another; see [Choosing a budget](#choosing-a-budget).
+another. Its description and the server's instructions tell the agent that the default answers
+architecture questions and that pinning down one specific function in a large project needs
+16000–32000; see [Choosing a budget](#choosing-a-budget).
 
 | Tool | Answers | Claude Code reaches for it when… |
 |---|---|---|
