@@ -85,30 +85,64 @@ class Index:
         self.left_out = _left_out(G)
 
     def fields(self, stemmed: bool) -> dict:
+        """Tokens per field and node; postings and counts are built when first asked for.
+
+        DECISION: a file's path and a scope's terms are tokenized once and shared by
+        every node in them, and counts exist only for nodes a query touches: the first
+        query on a large graph pays for little more than v1.3's own tokenization.
+        """
         if stemmed in self._fields:
             return self._fields[stemmed]
         f = (lambda ts: [stem(t) for t in ts]) if stemmed else (lambda ts: ts)
         name, doc, path = {}, {}, {}
+        per_file: dict[str, set] = {}
+        per_scope: dict[str, set] = {}
         for n in self.G.nodes:
             a = self.G.nodes[n]
             desc0 = a.get("_desc0", a.get("description", ""))
             name[n] = f(_tokenize(f"{a.get('label', '')} {desc0}"))
-            doc[n] = f(_tokenize(a.get("doc", ""))) if a.get("doc") else []
+            if a.get("doc"):
+                doc[n] = f(_tokenize(a["doc"]))
             src = str(a.get("source_file") or a.get("file_path") or "")
-            scope = " ".join(str(n).split(".")[:-1])
-            terms = {t for t in _tokenize(src) + _tokenize(scope) if t not in GENERIC_PATH}
-            path[n] = f(sorted(terms))
-        post: dict[str, dict[str, set]] = {"name": {}, "doc": {}, "path": {}}
-        for field, toks in (("name", name), ("doc", doc), ("path", path)):
-            for n, ts in toks.items():
-                for t in ts:
-                    post[field].setdefault(t, set()).add(n)
-        out = {"name": name, "doc": doc, "path": path,
-               "cname": {n: Counter(ts) for n, ts in name.items()},
-               "cdoc": {n: Counter(ts) for n, ts in doc.items()},
-               "cpath": {n: Counter(ts) for n, ts in path.items()}, "post": post}
+            scope = str(n).rsplit(".", 1)[0] if "." in str(n) else ""
+            if src not in per_file:
+                per_file[src] = {t for t in _tokenize(src) if t not in GENERIC_PATH}
+            if scope not in per_scope:
+                per_scope[scope] = {t for t in _tokenize(scope.replace(".", " "))
+                                    if t not in GENERIC_PATH}
+            path[n] = (src, scope)
+        cache: dict[tuple, list] = {}
+
+        def path_tokens(n: str) -> list[str]:
+            key = path[n]
+            if key not in cache:
+                cache[key] = f(sorted(per_file[key[0]] | per_scope[key[1]]))
+            return cache[key]
+        out = {"name": name, "doc": doc, "path_of": path_tokens, "post": {}, "count": {}}
         self._fields[stemmed] = out
         return out
+
+    def tokens(self, F: dict, field: str, n: str) -> list[str]:
+        if field == "name":
+            return F["name"][n]
+        if field == "doc":
+            return F["doc"].get(n, [])
+        return F["path_of"](n)
+
+    def postings(self, F: dict, field: str) -> dict[str, set]:
+        if field not in F["post"]:
+            post: dict[str, set] = {}
+            for n in self.G.nodes:
+                for t in self.tokens(F, field, n):
+                    post.setdefault(t, set()).add(n)
+            F["post"][field] = post
+        return F["post"][field]
+
+    def count(self, F: dict, field: str, n: str) -> Counter:
+        key = (field, n)
+        if key not in F["count"]:
+            F["count"][key] = Counter(self.tokens(F, field, n))
+        return F["count"][key]
 
     def groups(self) -> tuple[dict, dict]:
         """node -> its file's nodes, node -> its siblings (same parent id)."""
@@ -156,25 +190,27 @@ def _tfidf(G: nx.DiGraph, q: list[str], cfg: dict, idx: Index) -> dict[str, floa
     wp = cfg["w_path"]
     N = G.number_of_nodes()
     idf: dict[str, float] = {}
+    pname = idx.postings(F, "name")
+    ppath = idx.postings(F, "path") if wp else {}
     for term in set(q):
-        holders = set(F["post"]["name"].get(term, ()))
+        holders = set(pname.get(term, ()))
         if wp:
-            holders |= F["post"]["path"].get(term, set())
+            holders |= ppath.get(term, set())
         idf[term] = math.log((N + 1) / (len(holders) + 1)) + 1
     q_tf = Counter(q)
     q_vec = {t: (cnt / len(q)) * idf[t] for t, cnt in q_tf.items()}
     q_norm = math.sqrt(sum(v * v for v in q_vec.values()))
     touched: set = set()
     for t in idf:
-        touched |= F["post"]["name"].get(t, set())
+        touched |= pname.get(t, set())
         if wp:
-            touched |= F["post"]["path"].get(t, set())
+            touched |= ppath.get(t, set())
     scores = {n: 0.0 for n in G.nodes}
     for n in touched:
-        cn = F["cname"][n]
+        cn = idx.count(F, "name", n)
         if wp:
-            cp = F["cpath"][n]
-            length = len(F["name"][n]) + wp * len(F["path"][n])
+            cp = idx.count(F, "path", n)
+            length = len(F["name"][n]) + wp * len(idx.tokens(F, "path", n))
             d_vec = {t: ((cn[t] + wp * cp[t]) / length) * idf[t] for t in idf
                      if cn[t] + wp * cp[t] > 0}
         else:
@@ -199,22 +235,26 @@ def _bm25(G: nx.DiGraph, q: list[str], cfg: dict, idx: Index) -> dict[str, float
     k1, b = cfg["k1"], cfg["b"]
     key = ("dl", cfg["stem"], wn, wd, wp)
     if key not in F:
-        dl = {n: wn * len(F["name"][n]) + wd * len(F["doc"][n]) + wp * len(F["path"][n])
-              for n in G.nodes}
+        dl = {n: wn * len(F["name"][n]) + wd * len(F["doc"].get(n, ()))
+              + (wp * len(idx.tokens(F, "path", n)) if wp else 0.0) for n in G.nodes}
         F[key] = (dl, (sum(dl.values()) / max(1, sum(1 for v in dl.values() if v))) or 1.0)
     dl, avgdl = F[key]
     N = G.number_of_nodes()
+    pname = idx.postings(F, "name")
+    pdoc = idx.postings(F, "doc") if wd else {}
+    ppath = idx.postings(F, "path") if wp else {}
     for t in terms:
-        holders = set(F["post"]["name"].get(t, ()))
+        holders = set(pname.get(t, ()))
         if wd:
-            holders |= F["post"]["doc"].get(t, set())
+            holders |= pdoc.get(t, set())
         if wp:
-            holders |= F["post"]["path"].get(t, set())
+            holders |= ppath.get(t, set())
         if not holders:
             continue
         idf = math.log(1 + (N - len(holders) + 0.5) / (len(holders) + 0.5))
         for n in holders:
-            tf = wn * F["cname"][n][t] + wd * F["cdoc"][n][t] + wp * F["cpath"][n][t]
+            tf = (wn * idx.count(F, "name", n)[t] + (wd * idx.count(F, "doc", n)[t] if wd else 0)
+                  + (wp * idx.count(F, "path", n)[t] if wp else 0))
             if tf > 0:
                 scores[n] += idf * tf * (k1 + 1) / (tf + k1 * (1 - b + b * dl[n] / avgdl))
     best = max(scores.values())
@@ -253,24 +293,30 @@ def structural(G: nx.DiGraph, lex: dict[str, float], cfg: dict, idx: Index) -> d
     res = {s: lex[s] / total for s in seeds}
     queue = list(seeds)
     queued = set(queue)
+    # Local push, LIFO. The bindings below only save lookups: the order of the
+    # pushes and every operation are those of the plain loop (a test compares).
+    eps, stay = PPR_EPS, 1 - alpha
+    res_get, adj_get, p_get = res.get, adj.get, p.get
+    pop, push, mark, unmark = queue.pop, queue.append, queued.add, queued.discard
     while queue:
-        u = queue.pop()
-        queued.discard(u)
-        ru = res.get(u, 0.0)
-        if ru < PPR_EPS:
+        u = pop()
+        unmark(u)
+        ru = res_get(u, 0.0)
+        if ru < eps:
             continue
         res[u] = 0.0
-        p[u] = p.get(u, 0.0) + alpha * ru
-        out = adj.get(u)
+        p[u] = p_get(u, 0.0) + alpha * ru
+        out = adj_get(u)
         if not out:                       # nowhere to go: the walk stays
-            p[u] += (1 - alpha) * ru
+            p[u] += stay * ru
             continue
-        spread = (1 - alpha) * ru
+        spread = stay * ru
         for v, w in out:
-            res[v] = res.get(v, 0.0) + spread * w
-            if res[v] >= PPR_EPS and v not in queued:
-                queue.append(v)
-                queued.add(v)
+            nv = res_get(v, 0.0) + spread * w
+            res[v] = nv
+            if nv >= eps and v not in queued:
+                push(v)
+                mark(v)
     top = max(p.values())
     return {n: p.get(n, 0.0) / top + PPR_TIE * pr[n] for n in G.nodes}
 

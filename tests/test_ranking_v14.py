@@ -219,3 +219,14 @@ class TestGrids:
         assert (cfg["lex"], cfg["doc"], cfg["k1"], cfg["w_path"], cfg["stop"]) == (
             "bm25", True, 0.9, 0.5, True)
         assert R["cfg_of"]([], V["BASE"]) == V["BASE"]
+
+
+class TestPushOrder:
+    def test_local_push_is_deterministic_and_sums_to_one(self, V):
+        G = _code_graph()
+        cfg = {**V["BASE"], "struct": "ppr", "restart": 0.15, "r": 1.0, "k": 10}
+        idx = V["Index"](G)
+        lex = V["lexical"](G, "handle create request", cfg, idx)
+        a = V["structural"](G, lex, cfg, idx)
+        b = V["structural"](G, lex, cfg, V["Index"](G))
+        assert a == b and max(a.values()) == pytest.approx(1.0, abs=1e-5)
