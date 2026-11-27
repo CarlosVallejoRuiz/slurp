@@ -1,5 +1,11 @@
 # v1.4 — puerta en derivación (2026-11-27), registrada antes de abrir la validación
 
+> **Corrección posterior (2026-11-27): la latencia en frío se midió con sesgo.** El candidato se
+> midió después de la v1.3, en el mismo proceso, con la caché de costes de `budget.py` ya
+> caliente. Medido en un proceso nuevo por grafo, no cumple el límite en frío en hono (70 ms
+> frente a 63) ni en tokio (209 ms frente a 197). Así que la condición de latencia de esta puerta
+> no se cumplía. Detalles en `latencia.md`. El recall de abajo no cambia.
+
 ## Selección hacia delante (§3, Combinaciones)
 
 Las tablas completas están en `derivacion.md`.
@@ -48,7 +54,7 @@ semillas, empuje local con ε = 1e-4).
 | prometheus | 113 ms | 35 ms (141) | 262 ms | 242 ms (428) |
 | sqlalchemy | 284 ms | 67 ms (356) | 632 ms | 767 ms (1.004) |
 
-**PUERTA: PASA.**
+**PUERTA: PASA**, tal como se midió entonces. Ver la corrección arriba: con la medida justa, la latencia en frío no pasa.
 
 ## Cómo se llegó a cumplir la latencia
 

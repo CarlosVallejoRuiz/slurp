@@ -25,15 +25,19 @@
 
 1. **Mejora media:** +0,131 (≥ +0,05). **Cumple.**
 2. **Peor proyecto:** gin, +0,044 (≥ −0,03). **Cumple.**
-3. **Latencia:** dentro de los límites en los seis grafos, medida en la puerta con el prototipo.
-   Se vuelve a medir con la implementación en slurp.
+3. **Latencia:** en la puerta pareció dentro de los límites, pero esa medida estaba sesgada.
+   Medida bien, con la implementación en slurp (`latencia.md`), **no cumple en frío** en hono
+   (70 ms, límite 63) ni en tokio (209 ms, límite 197). En caliente cumple, y es de 2,5 a 3 veces
+   más rápida que la v1.3 en los grafos grandes. **No cumple.**
 4. **Juegos de arquitectura, recall a 4000 en markdown:**
    - PrismaStats, de 0,967 a 0,967, ninguna pregunta peor;
    - slurp, de 0,875 a 0,938, ninguna pregunta peor.
 
    **Cumple.**
 
-**VALIDACIÓN: PASA.**
+**VALIDACIÓN: el recall pasa (condiciones 1, 2 y 4); la latencia en frío no (condición 3).**
+Según el criterio fijado, la v1.4 no se acepta tal cual. La implementación queda en la rama
+`v1.4-orden`, sin fusionar, hasta que el autor decida.
 
 ## Informativo, sin que decida
 
