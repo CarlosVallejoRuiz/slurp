@@ -764,3 +764,116 @@ class TestPagerankCache:
         G = self._graph()
         score_nodes(G, "a")
         assert len(_pagerank_cache) == 1
+
+
+# ---------------------------------------------------------------------------
+# v1.4 ranking: path and scope terms, directed personalised PageRank
+# (docs/design/orden-v1.4.md; accepted in resultados/validacion.md)
+# ---------------------------------------------------------------------------
+
+def _v14_code_graph() -> nx.DiGraph:
+    G = nx.DiGraph()
+    nodes = [
+        ("src.router.trie.Node", "Node", "class", "src/router/trie.ts", 3),
+        ("src.router.trie.Node.insert", "insert", "function", "src/router/trie.ts", 10),
+        ("src.router.trie.Node.search", "search", "function", "src/router/trie.ts", 30),
+        ("src.router.trie", "trie.ts", "module", "src/router/trie.ts", 1),
+        ("src.adapter.lambda.handle", "handle", "function", "src/adapter/lambda.ts", 5),
+        ("src.adapter.lambda.createRequest", "createRequest", "function",
+         "src/adapter/lambda.ts", 40),
+        ("src.adapter.lambda.headers", "parseHeaders", "function", "src/adapter/lambda.ts", 60),
+        ("src.adapter.lambda", "lambda.ts", "module", "src/adapter/lambda.ts", 1),
+        ("tests.test_lambda.test_zebra", "test_zebra", "function", "tests/test_lambda.ts", 3),
+    ]
+    for nid, label, typ, path, line in nodes:
+        G.add_node(nid, label=label, type=typ, description="", source_file=path,
+                   source_location=f"L{line}", file_type="code")
+    for src, dst, rel in [("src.router.trie", "src.router.trie.Node", "contains"),
+                          ("src.router.trie.Node", "src.router.trie.Node.insert", "contains"),
+                          ("src.router.trie.Node", "src.router.trie.Node.search", "contains"),
+                          ("src.adapter.lambda", "src.adapter.lambda.handle", "contains"),
+                          ("src.adapter.lambda", "src.adapter.lambda.createRequest", "contains"),
+                          ("src.adapter.lambda", "src.adapter.lambda.headers", "contains"),
+                          ("src.adapter.lambda.handle", "src.adapter.lambda.createRequest",
+                           "calls"),
+                          ("src.adapter.lambda.createRequest", "src.adapter.lambda.headers",
+                           "calls"),
+                          ("tests.test_lambda.test_zebra", "src.adapter.lambda.handle",
+                           "calls")]:
+        G.add_edge(src, dst, relation=rel)
+    return G
+
+
+@pytest.fixture(scope="module")
+def _prototype():
+    """The scorer the bank validated: docs/design/orden-v1.4/variants.py, V3#2+V2#2."""
+    import runpy
+    from pathlib import Path
+    design = Path(__file__).resolve().parent.parent / "docs" / "design" / "orden-v1.4"
+    V = runpy.run_path(str(design / "variants.py"))
+    R = runpy.run_path(str(design / "run_v14.py"))
+    cfg = R["cfg_of"](["V3#2", "V2#2"], V["BASE"])
+    return lambda G, q: V["score"](G, q, cfg, V["Index"](G))
+
+
+class TestV14Ranking:
+    @pytest.mark.parametrize("query", ["insert into the trie router", "handle multi value headers",
+                                       "lambda request", "nothing matches here", "test zebra"])
+    def test_identical_to_the_validated_prototype(self, _prototype, query):
+        G = _v14_code_graph()
+        clear_pagerank_cache()
+        assert score_nodes(G, query) == _prototype(G, query)
+
+    def test_identical_on_real_graphs(self, _prototype, sample_graph, real_graphify_json):
+        from pathlib import Path
+
+        from slurp.loader import load_graph
+        for G in (sample_graph, load_graph(Path(real_graphify_json))):
+            for query in ("authentication flow", "parse the configuration file", "user token"):
+                assert score_nodes(G, query) == _prototype(G, query)
+
+    def test_path_terms_reach_a_node_whose_name_shares_nothing(self):
+        G = _v14_code_graph()
+        _final, _structural, semantic = score_nodes_detailed(G, "router quantifiers")
+        assert semantic["src.router.trie.Node.insert"] > 0
+
+    def test_ppr_lifts_what_the_matches_call(self):
+        G = _v14_code_graph()
+        s = score_nodes(G, "handle")
+        assert s["src.adapter.lambda.createRequest"] > s["src.router.trie.Node.insert"]
+
+    def test_without_a_lexical_match_the_structure_is_v13s_pagerank(self):
+        G = _v14_code_graph()
+        _final, structural, _semantic = score_nodes_detailed(G, "zzz qqq")
+        pr = _pagerank(G)
+        top = max(pr.values())
+        assert structural == {n: v / top for n, v in pr.items()}
+
+    def test_tests_never_seed_the_walk(self):
+        G = _v14_code_graph()
+        # Only the test node's name matches: no production seed, v1.3's PageRank.
+        _f, structural, semantic = score_nodes_detailed(G, "zebra")
+        assert semantic["tests.test_lambda.test_zebra"] > 0
+        pr = _pagerank(G)
+        assert structural == {n: v / max(pr.values()) for n, v in pr.items()}
+
+    def test_the_caches_follow_a_graph_that_grows(self):
+        G = _v14_code_graph()
+        before = score_nodes_detailed(G, "cookies")[2]
+        G.nodes["src.adapter.lambda.headers"]["label"] = "parseCookies"
+        G.add_node("src.adapter.lambda.extra", label="cookieJar", type="function",
+                   description="", source_file="src/adapter/lambda.ts",
+                   source_location="L90", file_type="code")
+        after = score_nodes_detailed(G, "cookies")[2]
+        assert before["src.adapter.lambda.headers"] == 0
+        assert after["src.adapter.lambda.headers"] > 0
+        assert "src.adapter.lambda.extra" in score_nodes(G, "cookies")
+
+    def test_clear_pagerank_cache_clears_the_tokens_too(self):
+        G = _v14_code_graph()
+        before = score_nodes_detailed(G, "cookies")[2]
+        G.nodes["src.adapter.lambda.headers"]["label"] = "parseCookies"   # same counts
+        clear_pagerank_cache()
+        after = score_nodes_detailed(G, "cookies")[2]
+        assert before["src.adapter.lambda.headers"] == 0
+        assert after["src.adapter.lambda.headers"] > 0

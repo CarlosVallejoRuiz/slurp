@@ -48,18 +48,26 @@ def _code_graph():
     return G
 
 
-class TestBaselineIsV13:
+class TestCandidateIsSlurp:
+    """BASE reproduced v1.3's score_nodes on every bank question (run_v14.py checked it,
+    0 mismatches) until v1.4 replaced it; now the validated candidate is slurp's scorer."""
+
+    @pytest.fixture(scope="class")
+    def cand(self, V):
+        R = runpy.run_path(str(DESIGN / "run_v14.py"))
+        return R["cfg_of"](["V3#2", "V2#2"], V["BASE"])
+
     @pytest.mark.parametrize("query", ["insert into the trie", "handle multi value headers",
                                        "lambda request", "nothing matches here"])
-    def test_identical_to_score_nodes(self, V, query):
+    def test_identical_to_score_nodes(self, V, cand, query):
         G = _code_graph()
-        assert V["score"](G, query, V["BASE"], V["Index"](G)) == score_nodes(G, query)
+        assert V["score"](G, query, cand, V["Index"](G)) == score_nodes(G, query)
 
-    def test_identical_on_a_real_graph(self, V, real_graphify_json):
+    def test_identical_on_a_real_graph(self, V, cand, real_graphify_json):
         from slurp.loader import load_graph
         G = load_graph(Path(real_graphify_json))
         for query in ("authentication flow", "parse the configuration file"):
-            assert V["score"](G, query, V["BASE"], V["Index"](G)) == score_nodes(G, query)
+            assert V["score"](G, query, cand, V["Index"](G)) == score_nodes(G, query)
 
 
 class TestVariants:

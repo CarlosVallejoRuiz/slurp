@@ -318,7 +318,9 @@ def structural(G: nx.DiGraph, lex: dict[str, float], cfg: dict, idx: Index) -> d
                 push(v)
                 mark(v)
     top = max(p.values())
-    return {n: p.get(n, 0.0) / top + PPR_TIE * pr[n] for n in G.nodes}
+    # Capped at 1.0 after validation (resultados/validacion.md): the tie-break lifted the
+    # walk's best node a hair above 1, breaking scores in 0–1; recall re-checked unchanged.
+    return {n: min(1.0, p.get(n, 0.0) / top + PPR_TIE * pr[n]) for n in G.nodes}
 
 
 def score(G: nx.DiGraph, query: str, cfg: dict, idx: Index) -> dict[str, float]:

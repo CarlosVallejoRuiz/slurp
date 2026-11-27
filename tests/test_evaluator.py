@@ -475,8 +475,10 @@ def _retrieval_graph() -> nx.DiGraph:
 
 
 def _with_a_test() -> nx.DiGraph:
-    """_retrieval_graph plus a test that outscores auth.login for "login user
-    session", and an import of it that does not."""
+    """_retrieval_graph plus a test that outscores auth.login for "test login user
+    session", and an import of it that does not. (Until v1.4 the query was "login
+    user session"; since v1.4 a test never seeds the query's PageRank walk, so the
+    query names the test for it to stay ahead.)"""
     G = _retrieval_graph()
     G.add_node("tests.test_auth.test_login_user", label="test_login_user_session",
                type="function", source_file="tests/test_auth.py")
@@ -524,14 +526,14 @@ class TestRetrievalEval:
         from slurp.scorer import score_nodes
 
         G = _with_a_test()
-        scores = score_nodes(G, "login user session")
+        scores = score_nodes(G, "test login user session")
         ahead = [n for n in G if scores[n] > scores["auth.login"]]
         assert set(ahead) == {"tests.test_auth.test_login_user"}
 
-        r = run_retrieval_eval(G, [_q("a", "login user session", ["auth.login"])]).results[0]
+        r = run_retrieval_eval(G, [_q("a", "test login user session", ["auth.login"])]).results[0]
         assert r.first_rank == 1 and r.first_rank_all == 2
         assert r.reciprocal_rank == 1.0 and r.reciprocal_rank_all == 0.5
-        suite = run_retrieval_eval(G, [_q("a", "login user session", ["auth.login"])])
+        suite = run_retrieval_eval(G, [_q("a", "test login user session", ["auth.login"])])
         assert suite.mrr == 1.0 and suite.mrr_all == 0.5
         d = suite.to_dict()
         assert d["mrr_all"] == 0.5 and d["results"][0]["first_rank_all"] == 2
@@ -540,7 +542,7 @@ class TestRetrievalEval:
         from slurp.evaluator import run_retrieval_eval
 
         G = _with_a_test()
-        q = [_q("a", "login user session", ["auth.login"])]
+        q = [_q("a", "test login user session", ["auth.login"])]
         r = run_retrieval_eval(G, q, include_tests=True).results[0]
         assert r.first_rank == r.first_rank_all == 2
         both = run_retrieval_eval(G, q, include_tests=True, include_imports=True).results[0]
@@ -552,7 +554,7 @@ class TestRetrievalEval:
         from slurp.evaluator import run_retrieval_eval
 
         r = run_retrieval_eval(_with_a_test(), [
-            _q("t", "login user session", ["tests.test_auth.test_login_user"])]).results[0]
+            _q("t", "test login user session", ["tests.test_auth.test_login_user"])]).results[0]
         assert r.scorable and r.recall == 0.0
         assert r.first_rank is None and r.reciprocal_rank == 0.0
         assert r.first_rank_all == 1
@@ -667,7 +669,7 @@ class TestRetrievalEval:
         graph = tmp_path / "g.json"
         graph.write_text(json.dumps(nx.node_link_data(_with_a_test(), edges="links")))
         questions = tmp_path / "q.json"
-        questions.write_text(json.dumps([{"id": "a", "question": "login user session",
+        questions.write_text(json.dumps([{"id": "a", "question": "test login user session",
                                           "ground_truth": "-", "relevant_nodes": ["auth.login"]}]))
         ranks = {}
         for flags in ([], ["--include-tests"], ["--include-tests", "--include-imports"]):
@@ -683,7 +685,7 @@ class TestRetrievalEval:
         graph = tmp_path / "g.json"
         graph.write_text(json.dumps(nx.node_link_data(_with_a_test(), edges="links")))
         questions = tmp_path / "q.json"
-        questions.write_text(json.dumps([{"id": "a", "question": "login user session",
+        questions.write_text(json.dumps([{"id": "a", "question": "test login user session",
                                           "ground_truth": "-", "relevant_nodes": ["auth.login"]}]))
         res = CliRunner().invoke(cli, ["eval", "--retrieval", "--graph", str(graph),
                                        "--questions", str(questions)])
