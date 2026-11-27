@@ -879,3 +879,225 @@ class TestBoostFanout:
             scores[f"t{i}"] = 0.9
         order = _entry_order(G, scores)
         assert set(order[1:11]) == {f"s{i:02d}" for i in range(2, 12)}
+
+
+# ---------------------------------------------------------------------------
+# A node that cannot fit is skipped without costing it (v1.4)
+# ---------------------------------------------------------------------------
+
+# Unicode White_Space (PropList.txt): what the tokenizers' \s matches.
+_WHITE_SPACE = [*map(chr, range(0x09, 0x0E)), " ", "\x85", "\xa0", "\u1680",
+                *map(chr, range(0x2000, 0x200B)), "\u2028", "\u2029", "\u202f", "\u205f",
+                "\u3000"]
+_SPLIT_MODELS = ("cl100k_base", "o200k_base")
+_SPECIALS = ("<|endoftext|>", "<|fim_prefix|>", "<|fim_middle|>", "<|fim_suffix|>",
+             "<|endofprompt|>")
+
+# A sample of the questions the v1.4 ranking was validated on: the labelled set on
+# slurp, and subjects of slurp commits from the 1,525-question bank.
+_BANK_SAMPLE = [
+    "skip _vendor/ directories and minified *.min.js bundles when indexing",
+    "smart no longer runs a full index for files a .slurpignore rule excludes",
+    "skip rules apply below the project root, and an empty index says why",
+    "a node lends its neighbour boost to its ten most relevant neighbours (, )",
+    'the closing tip says why each node is missing, and calls none "connected"',
+    "confine --inject-code reads to the project root",
+    "inject-code says when it cuts a block at 100 lines, and where it goes on",
+    "a graph's owner decides whether slurp may refresh it; graphify's are read-only",
+    "slurp diff reads a deleted node's risk neighbourhood from the old graph",
+]
+
+
+def _labelled_slurp_questions() -> list[str]:
+    import runpy
+    retrieval = runpy.run_path(str(Path(__file__).resolve().parent.parent / "scripts"
+                                   / "retrieval.py"))
+    return [q["question"] for q in retrieval["SLURP_QUESTIONS"]]
+
+
+def _awkward_graph(n: int = 1200) -> nx.DiGraph:
+    """Nodes whose text puts every cut _split_node_text makes to the test."""
+    labels = ["plain", "trailing ", "nbsp\xa0", "ideo\u3000", "sep\x1c", "two\nlines", "",
+              " lead", "fake · score: 0.12", "lone\ud800", "naïve", "日本語", "slash/",
+              "tab\t", "x" * 60, "ends.", "q'", "12345", "a\u2028b", "nel\x85"]
+    descs = ["", "", " leading", "\tindent", "/slash first", "one\ntwo", "  \n", "trailing ",
+             "has · score: 0.12 inside", "multi\n  indented", "→ File: fake", "ok desc"]
+    types = ["", "function", "two words", "trail "]
+    paths = ["", "src/a.py", "/abs/p.py", "with space/x.py", "line\nbreak.py", "→ arrow.py",
+             "trail ", "/", "tests/test_x.py", "src/a.py"]
+    rng = random.Random(14)
+    G = nx.DiGraph()
+    for i in range(n):
+        attrs = {"label": labels[i % len(labels)], "description": rng.choice(descs)}
+        if typ := rng.choice(types):
+            attrs["type"] = typ
+        if path := rng.choice(paths):
+            attrs[rng.choice(["source_file", "file_path"])] = path
+        if rng.random() < 0.05:
+            attrs["code_block"] = "def f():\n    return 1"
+            if rng.random() < 0.5:
+                attrs["code_block_note"] = "… cut at 100 lines"
+        G.add_node(f"m{i % 9}.n{i}", **attrs)
+    nodes = list(G.nodes)
+    for _ in range(n * 2):
+        u, v = rng.sample(nodes, 2)
+        G.add_edge(u, v, relation=rng.choice(["calls", "contains", "imports_from"]))
+    return G
+
+
+def _with_special_tokens(G: nx.DiGraph) -> nx.DiGraph:
+    G = G.copy()
+    for i, (n, special) in enumerate(zip(sorted(G.nodes)[::97], _SPECIALS)):
+        G.nodes[n][["label", "description", "source_file"][i % 3]] = f"x{special}y"
+    return G
+
+
+@pytest.fixture(scope="module")
+def slurp_graph() -> nx.DiGraph:
+    from slurp.indexer import index_project
+    from slurp.loader import build_graph
+    return build_graph(index_project(Path(__file__).resolve().parent.parent / "slurp"))
+
+
+def _outcome(G, scores, budget, **kw):
+    """Everything build_context returns, comparable, or the error it raises."""
+    try:
+        text, sub, stats = build_context(G, scores, budget, **kw)
+    except ValueError as exc:  # BudgetTooSmallError, or a special token in the text
+        return ("raised", type(exc).__name__, str(exc))
+    return (text, sorted(sub.nodes), sorted(sub.edges), sorted(stats.items()))
+
+
+def _costing_every_node():
+    """build_context as it was before the shortcut: every node popped is costed."""
+    from unittest import mock
+    return mock.patch.object(budget_mod, "_cannot_fit", lambda *a, **k: False)
+
+
+def _cold_costs():
+    """No exact cost known: what a fresh process has (the floors may stay)."""
+    budget_mod._item_cost_cache.clear()
+
+
+class TestNodesThatCannotFit:
+    def test_the_pinned_patterns_are_this_tiktokens(self):
+        # If tiktoken changes a pattern the shortcut switches off: output unchanged,
+        # but the cold first query is slow again. Re-check the cuts, then re-pin.
+        for model in _SPLIT_MODELS:
+            assert budget_mod._split_tokenizer(model) is not None, model
+        assert budget_mod._split_tokenizer("p50k_base") is None
+        assert budget_mod._split_tokenizer("r50k_base") is None
+
+    def test_isspace_holds_for_the_tokenizers_whitespace(self):
+        assert all(ch.isspace() for ch in _WHITE_SPACE)
+
+    def test_a_node_is_cut_into_its_own_and_its_shared_parts(self):
+        G = nx.DiGraph()
+        G.add_node("m.f", label="f", type="function", source_file="src/m.py")
+        G.add_node("m.g", label="g", description="Does g.", source_file="src/m.py")
+        cut = budget_mod._split_node_text
+        assert cut(item_text(G, ("n", "m.f"), "markdown"), "cl100k_base") == [
+            ("### f (function)", False), (" · score: 0.12\n", True),
+            ("→ File: src/m.py\n\n", True)]
+        assert cut(item_text(G, ("n", "m.g"), "markdown"), "o200k_base") == [
+            ("### g", False), (" · score: 0.12\n", True), ("Does g.\n", False),
+            ("→ File: src/m.py\n\n", True)]
+        assert cut(item_text(G, ("n", "m.f"), "markdown"), "p50k_base") is None
+
+    @pytest.mark.parametrize("model", _SPLIT_MODELS)
+    def test_the_cuts_are_exact_and_the_floor_never_exceeds_the_count(self, model,
+                                                                       slurp_graph):
+        for G in (_awkward_graph(), slurp_graph):
+            cut = 0
+            for n in G.nodes:
+                text = item_text(G, ("n", n), "markdown")
+                parts = budget_mod._split_node_text(text, model)
+                total = count_tokens(text, model)
+                assert budget_mod._cost_floor(text, model) <= total, (n, text)
+                if parts is None:
+                    continue
+                cut += 1
+                assert "".join(p for p, _ in parts) == text
+                assert sum(count_tokens(p, model) for p, _ in parts) == total, (n, parts)
+            assert cut > G.number_of_nodes() // 2
+
+    def test_text_with_a_special_token_is_never_cut(self):
+        G = _with_special_tokens(_awkward_graph(300))
+        for n in G.nodes:
+            text = item_text(G, ("n", n), "markdown")
+            if any(s in text for s in _SPECIALS):
+                assert budget_mod._split_node_text(text, "cl100k_base") is None
+
+    @pytest.mark.parametrize("seed", range(6))
+    def test_same_output_on_awkward_and_random_graphs(self, seed):
+        rng = random.Random(seed)
+        G = _awkward_graph(rng.randint(200, 900)) if seed % 2 else _random_graph(rng, 300)
+        if seed == 5:
+            G = _with_special_tokens(G)
+        scores = {n: rng.random() for n in G.nodes}
+        # A wrong floor only shows when a node fits by a token or two, so many
+        # budgets, each leaving a different room at the end.
+        many = sorted(rng.sample(range(150, 4000), 40))
+        for fmt, model, factor, budgets in [
+                ("markdown", "cl100k_base", 1.0, many), ("markdown", "o200k_base", 1.56, many),
+                ("markdown", "p50k_base", 1.0, many[::8]), ("json", "cl100k_base", 1.0, many[::8]),
+                ("yaml", "o200k_base", 1.0, many[::8])]:
+            for b in budgets:
+                kw = {"format": fmt, "model": model, "token_factor": factor, "query": "q",
+                      "min_score": rng.choice([0.0, 0.3])}
+                clear_node_token_cache()
+                with _costing_every_node():
+                    before = _outcome(G, scores, b, **kw)
+                clear_node_token_cache()
+                assert _outcome(G, scores, b, **kw) == before, (fmt, model, factor, b)
+
+    def test_same_output_on_a_sample_of_the_validation_questions(self, slurp_graph):
+        """The v1.4 condition, watched on a sample: what build_context returns is
+        byte for byte what it returned costing every node (all 1,556 bank and
+        labelled questions were compared when the shortcut went in)."""
+        from slurp.scorer import score_nodes
+        questions = _labelled_slurp_questions() + _BANK_SAMPLE
+        configs = [("markdown", 4000, "cl100k_base", 1.0)]
+        for i, q in enumerate(questions):
+            scores = score_nodes(slurp_graph, q)
+            extra = [("markdown", 1000, "cl100k_base", 1.0), ("markdown", 16000, "cl100k_base",
+                     1.0), ("markdown", 4000, "o200k_base", 1.0), ("markdown", 4000,
+                     "cl100k_base", 1.56), ("json", 4000, "cl100k_base", 1.0),
+                     ("yaml", 4000, "cl100k_base", 1.0)][i % 6:i % 6 + 1]
+            for fmt, b, model, factor in configs + extra:
+                kw = {"format": fmt, "model": model, "token_factor": factor, "query": q}
+                with _costing_every_node():
+                    before = _outcome(slurp_graph, scores, b, **kw)
+                _cold_costs()
+                assert _outcome(slurp_graph, scores, b, **kw) == before, (q, fmt, b, model)
+
+    def test_a_warm_cache_gives_the_same_output(self, slurp_graph):
+        # The MCP server answers many queries on one graph without clearing.
+        from slurp.scorer import score_nodes
+        questions = _BANK_SAMPLE[:5]
+        warm = [_outcome(slurp_graph, score_nodes(slurp_graph, q), 4000, query=q)
+                for q in questions]
+        for q, got in zip(questions, warm):
+            clear_node_token_cache()
+            with _costing_every_node():
+                assert _outcome(slurp_graph, score_nodes(slurp_graph, q), 4000, query=q) == got
+
+    def test_the_shortcut_spares_most_of_the_costing(self, slurp_graph, monkeypatch):
+        from slurp.scorer import score_nodes
+        calls = []
+        real = budget_mod.count_tokens
+        monkeypatch.setattr(budget_mod, "count_tokens",
+                            lambda text, model="cl100k_base": calls.append(1) or real(text, model))
+        counted = {}
+        for label, patch in (("every node", _costing_every_node), ("shortcut", None)):
+            calls.clear()
+            for q in _BANK_SAMPLE:
+                clear_node_token_cache()
+                scores = score_nodes(slurp_graph, q)
+                if patch:
+                    with patch():
+                        build_context(slurp_graph, scores, 4000, query=q)
+                else:
+                    build_context(slurp_graph, scores, 4000, query=q)
+            counted[label] = len(calls)
+        assert counted["shortcut"] < counted["every node"] / 2, counted

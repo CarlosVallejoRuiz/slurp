@@ -101,6 +101,11 @@ def _build_data(G: nx.DiGraph, stats: dict, scores: dict[str, float] | None) -> 
     }
 
 
+# A node's score as its markdown heading writes it. The budget selector looks for it
+# too (budget._split_node_text), so the two read the same text.
+_MD_SCORE = " · score: {:.2f}"
+
+
 def _md_node_lines(G: nx.DiGraph, nid: str, scores: dict[str, float] | None) -> list[str]:
     """One node's block in the markdown format, trailing blank line included."""
     attrs = G.nodes[nid]
@@ -113,7 +118,7 @@ def _md_node_lines(G: nx.DiGraph, nid: str, scores: dict[str, float] | None) -> 
     if ntype:
         heading += f" ({ntype})"
     if scores and nid in scores:
-        heading += f" · score: {scores[nid]:.2f}"
+        heading += _MD_SCORE.format(scores[nid])
     lines = [heading]
     if desc:
         lines.append(desc)

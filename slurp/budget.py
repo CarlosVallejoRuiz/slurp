@@ -16,7 +16,7 @@ import networkx as nx
 import tiktoken
 
 from slurp._graphutils import _left_out, _left_out_sets
-from slurp.formatter import format_subgraph, item_text
+from slurp.formatter import _MD_SCORE, _PLACEHOLDER_SCORE, format_subgraph, item_text
 
 
 @functools.lru_cache(maxsize=8)
@@ -137,8 +137,12 @@ _FIXPOINT_ROUNDS = 8
 # must not hold two graphs that share ids with different content without
 # calling clear_node_token_cache() in between. The MCP server does this on
 # reload. A stale cost can only make the selection less tight: the final
-# measurement of the real text still enforces the budget.
+# measurement of the real text still enforces the budget. The lower bounds in
+# _item_floor_cache are keyed and invalidated the same way; _part_cost_cache is
+# keyed by the text it counts, so it cannot go stale.
 _item_cost_cache: dict[tuple, int] = {}
+_item_floor_cache: dict[tuple, int] = {}
+_part_cost_cache: dict[tuple[str, str], int] = {}
 
 Renderer = Callable[[nx.DiGraph, dict], str]
 
@@ -150,6 +154,8 @@ def clear_node_token_cache() -> None:
     on reload — so no stale costs survive.
     """
     _item_cost_cache.clear()
+    _item_floor_cache.clear()
+    _part_cost_cache.clear()
 
 
 def _item_cost(G: nx.DiGraph, item: tuple, fmt: str, model: str, factor: float = 1.0) -> int:
@@ -159,6 +165,130 @@ def _item_cost(G: nx.DiGraph, item: tuple, fmt: str, model: str, factor: float =
         cost = count_tokens(item_text(G, item, fmt), model)
         _item_cost_cache[key] = cost
     return _scaled(cost, factor)
+
+
+# DECISION: a node that cannot fit is told apart without tokenizing it. Measured on
+# the v1.4 ranking (2026-11-27), in a fresh process: once the budget is nearly full
+# the room left (1-26 tokens) stays below the cheapest node (20 or more), yet the
+# selection loop runs until the room is used up exactly or the queue is empty, so
+# a cold query costed every candidate. On tokio 6,096 of the 6,197 nodes costed did
+# not fit: 40 of build_context's 58 ms. Tokenizing in batches does not help there
+# (tiktoken's encode_batch is 4x slower on these short texts, calling its encoder
+# directly saves ~12 %), so the work is avoided: _cost_floor bounds a node's cost
+# from below with the parts of its text that many nodes share, and a node whose
+# bound exceeds the room is skipped, as it would have been once costed. The output
+# cannot change: the bound never exceeds the true cost, and a skipped node is never
+# selected, so its cost is never needed. Only markdown, the format the MCP server
+# sends, takes the shortcut; JSON and YAML cost every node as before.
+#
+# The tokenizers the cuts in _split_node_text rely on, with their pre-tokenizer
+# patterns pinned verbatim: if tiktoken changes one, the shortcut switches off for
+# it instead of being trusted. In both, no piece holds a space after a non-space
+# character, and no piece holds a non-space character after a line break — save
+# "/" in o200k_base, which a punctuation piece may take after one. So a text cut
+# just before a space that follows a non-space character, or just after a line
+# break followed by a non-space character other than "/", is split by the
+# tokenizer at that very point, and its count is the sum of its parts' counts.
+# (str.isspace() holds for every character these patterns' \s matches, so a
+# character it rejects is a non-space character to them; a test checks it.)
+_SPLIT_PATTERNS = {
+    "cl100k_base": (r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}++|\p{N}{1,3}+|"""
+                    r""" ?[^\s\p{L}\p{N}]++[\r\n]*+|\s++$|\s*[\r\n]|\s+(?!\S)|\s"""),
+    "o200k_base": (r"""[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*"""
+                   r"""[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?|"""
+                   r"""[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+"""
+                   r"""[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?|"""
+                   r"""\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+"""),
+}
+_SCORE_MARK = _MD_SCORE.format(_PLACEHOLDER_SCORE)
+_split_specials: dict[str, frozenset[str] | None] = {}
+
+
+def _split_tokenizer(model: str) -> frozenset[str] | None:
+    """The special tokens of *model* if its pattern is one in _SPLIT_PATTERNS, else None."""
+    if model not in _split_specials:
+        enc = _get_encoding(model)
+        pattern = _SPLIT_PATTERNS.get(model)
+        ok = pattern is not None and getattr(enc, "_pat_str", None) == pattern
+        _split_specials[model] = frozenset(enc.special_tokens_set) if ok else None
+    return _split_specials[model]
+
+
+def _starts_part(text: str, i: int, model: str) -> bool:
+    """Whether text[i], right after a line break, starts a piece in any text."""
+    ch = text[i]
+    return not ch.isspace() and not (ch == "/" and model == "o200k_base")
+
+
+def _split_node_text(text: str, model: str) -> list[tuple[str, bool]] | None:
+    """A markdown node's text cut where *model*'s tokenizer always splits it.
+
+    Returns:
+        [(part, shared)], in order, joining back into *text*, with
+        count_tokens(text) equal to the sum of the parts' counts. Normally
+        "### label (type)", " · score: 0.12\\n" (shared), the description lines
+        if any, and the last line, "→ File: path\\n\\n" (shared): the shared
+        parts recur across nodes. If the score cannot be cut off, the head runs
+        up to the last line. None if *model* is not covered, if the text holds
+        a special token (counting it raises, and must go on raising) or if not
+        even the last line can be cut off.
+    """
+    specials = _split_tokenizer(model)
+    if specials is None or any(tok in text for tok in specials):
+        return None
+    end = len(text) - 2
+    if end <= 0 or not text.endswith("\n\n"):
+        return None
+    last = text.rfind("\n", 0, end) + 1
+    if last == 0 or not _starts_part(text, last, model):
+        return None
+    tail = (text[last:], True)
+    score = text.find(_SCORE_MARK, 0, last)
+    if score <= 0 or text[score - 1].isspace():
+        return [(text[:last], False), tail]
+    lines = text.find("\n", score, last) + 1  # the line ends before `last` at the latest
+    if lines < last and not _starts_part(text, lines, model):
+        return [(text[:last], False), tail]
+    parts = [(text[:score], False), (text[score:lines], True)]
+    if lines < last:
+        parts.append((text[lines:last], False))
+    return parts + [tail]
+
+
+def _cost_floor(text: str, model: str) -> int:
+    """A lower bound on count_tokens(text, model) for a markdown node's text, or 0.
+
+    The shared parts from _split_node_text are counted, each text once; every
+    other part holds at least one token.
+    """
+    parts = _split_node_text(text, model)
+    if parts is None:
+        return 0
+    floor = 0
+    for part, shared in parts:
+        if not shared:
+            floor += 1
+            continue
+        key = (model, part)
+        cost = _part_cost_cache.get(key)
+        if cost is None:
+            cost = _part_cost_cache[key] = count_tokens(part, model)
+        floor += cost
+    return floor
+
+
+def _cannot_fit(G: nx.DiGraph, item: tuple, fmt: str, model: str, factor: float,
+                room_left: int) -> bool:
+    """True if *item* is known not to fit in *room_left* without costing it."""
+    if fmt != "markdown" or item[0] != "n":
+        return False
+    key = (item, fmt, model)
+    if key in _item_cost_cache:
+        return False  # the exact cost is at hand
+    floor = _item_floor_cache.get(key)
+    if floor is None:
+        floor = _item_floor_cache[key] = _cost_floor(item_text(G, item, fmt), model)
+    return _scaled(floor, factor) > room_left
 
 
 def _edge_weight(G: nx.DiGraph, u: str, v: str) -> float:
@@ -466,10 +596,10 @@ def build_context(
 
     while heap and room - used > 0:
         neg_value, _kind, item = heapq.heappop(heap)
-        cost = costs.get(item)
-        if cost is None:
-            cost = costs[item] = _item_cost(G, item, format, model, token_factor)
         if item[0] == "e":
+            cost = costs.get(item)
+            if cost is None:
+                cost = costs[item] = _item_cost(G, item, format, model, token_factor)
             if cost <= room - used:
                 chosen_edges.append((item[1], item[2]))
                 values[item] = -neg_value
@@ -480,6 +610,14 @@ def build_context(
         if node in processed:
             continue  # a stale entry superseded by a boosted one
         processed.add(node)
+        cost = costs.get(item)
+        if cost is None:
+            # Skipped exactly as it would be once costed (see _cost_floor); the
+            # first node is always costed, for the "too small" message.
+            if top_cost is not None and _cannot_fit(G, item, format, model, token_factor,
+                                                    room - used):
+                continue
+            cost = costs[item] = _item_cost(G, item, format, model, token_factor)
         if top_cost is None:
             top_cost = cost
         if cost > room - used:
