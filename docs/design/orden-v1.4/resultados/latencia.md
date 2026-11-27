@@ -1,5 +1,9 @@
 # v1.4 — latencia de la implementación (2026-11-27)
 
+> **Posterior (2026-11-27):** tras optimizar `budget.py` sin cambiar la salida, y medido con la
+> v1.3 al lado, solo hono en frío pasa de 1,5 × la v1.3 (1,54 ×), dentro de la excepción de la
+> regla de decisión. Ver `latencia-optimizada.md`. Lo de abajo describe la v1.4 sin optimizar.
+
 **Dónde está y qué se midió.**
 
 - La implementación está en la rama `v1.4-orden` (`6be8f4f`), **sin fusionar**.

@@ -29,6 +29,8 @@
    Medida bien, con la implementación en slurp (`latencia.md`), **no cumple en frío** en hono
    (70 ms, límite 63) ni en tokio (209 ms, límite 197). En caliente cumple, y es de 2,5 a 3 veces
    más rápida que la v1.3 en los grafos grandes. **No cumple.**
+   - *Posterior:* con `budget.py` optimizado se aplica la excepción de la regla de decisión
+     (`orden-v1.4.md`); ver `latencia-optimizada.md`.
 4. **Juegos de arquitectura, recall a 4000 en markdown:**
    - PrismaStats, de 0,967 a 0,967, ninguna pregunta peor;
    - slurp, de 0,875 a 0,938, ninguna pregunta peor.

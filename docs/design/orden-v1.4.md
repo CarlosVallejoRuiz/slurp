@@ -132,6 +132,16 @@ la optimización. Un test lo vigila sobre una muestra.
   memoria del equipo estaba bajo presión y las cifras salían hasta 4 veces más altas que en
   `latencia.md` (tokio v1.3 en frío: 510 ms frente a 131 ms).
 
+**Resultado (2026-11-27): rama 2, la excepción.** Detalle en `resultados/latencia-optimizada.md`.
+
+- **La salida no cambia:** idéntica byte a byte en las 1.556 preguntas.
+- **No cumple los límites originales** solo en un punto: hono en frío, 1,54 × la v1.3.
+- **La excepción sí se cumple:** en frío ningún grafo pasa de 1,67 ×, y en caliente y tras un
+  refresco cumplen los seis.
+- **Motivo de la excepción:** lo que queda en hono es el scorer nuevo, que en la primera consulta
+  construye una vez por grafo los tokens de nombres y rutas y las listas del paseo. Gracias a eso, en
+  caliente es más rápido que la v1.3: en hono, de 16,5 a 11,6 ms.
+
 ## Por qué
 
 El estudio del presupuesto óptimo (`docs/design/presupuesto-optimo/resultados/conclusiones.md`)
