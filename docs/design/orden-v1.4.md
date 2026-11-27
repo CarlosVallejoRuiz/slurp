@@ -116,6 +116,22 @@ la optimización. Un test lo vigila sobre una muestra.
    La excepción y su motivo se documentan aquí y en las notas de la versión.
 3. **Si tampoco cumple eso, no se fusiona** y se para.
 
+**Cómo se leen los límites (autor, 2026-11-27), fijado antes de volver a medir:**
+
+- **Deciden los cocientes frente a la v1.3 medida en esta misma sesión**, con el mismo método y en
+  las mismas condiciones, como dice el criterio original de §6:
+  - en caliente, como mucho 1,25 × la v1.3, con un margen absoluto de 5 ms: el límite es el
+    mayor de 1,25 × v1.3 y v1.3 + 5 ms;
+  - en frío, como mucho 1,5 × la v1.3; la excepción de la regla 2, hasta 1,67 ×, vale solo para
+    la primera consulta en frío;
+  - tras un refresco, como mucho 1,5 × la v1.3.
+- **La tabla fija de §6 se informa, pero no decide.** Sus límites aplican los cocientes a la v1.3
+  medida al diseñar, en otra sesión. `resultados/latencia.md` comparó con ella; con la v1.3
+  medida al lado, el cociente es la comparación que el criterio pide.
+- La primera tanda de esta sesión se descartó sin usarla: con un modelo de Ollama cargado, la
+  memoria del equipo estaba bajo presión y las cifras salían hasta 4 veces más altas que en
+  `latencia.md` (tokio v1.3 en frío: 510 ms frente a 131 ms).
+
 ## Por qué
 
 El estudio del presupuesto óptimo (`docs/design/presupuesto-optimo/resultados/conclusiones.md`)
