@@ -101,7 +101,9 @@ about 2,000 candidate nodes (those slurp may return: no tests, no imports). Ther
 4000 finds 34–68 % of the changed definitions, 16000 finds 52–75 % and 32000 finds 59–81 %.
 The default stays 4000: doubling the context for ten points is a trade-off, not an optimum.
 `slurp_query`'s description tells the agent to pass 16000–32000 when it is after one specific
-function in a large project. Details, in Spanish:
+function in a large project. v1.4.0 ranks better for exactly these questions: on six projects of that
+study it was not tuned on, recall at 4000 goes from 0.543 to 0.674 with the same tokens
+([Upgrading to v1.4.0](#upgrading-to-v140)). Details, in Spanish:
 [conclusiones.md](https://github.com/CarlosVallejoRuiz/slurp/blob/main/docs/design/presupuesto-optimo/resultados/conclusiones.md).
 
 MRR does not depend on the budget. Its definition changed in v1.2: a relevant node's rank
@@ -264,30 +266,30 @@ Then query it:
 slurp "player stats" --graph graph.json --budget 4000
 ```
 
-Real output with v1.2.0, on a 2,111-node graph of a Next.js codebase:
+Real output with v1.4.0, on a 2,111-node graph of a Next.js codebase:
 
-<!-- example: quickstart · slurp v1.2.0 · slurp "player stats" --graph graph.json --budget 4000 -->
+<!-- example: quickstart · slurp v1.4.0 · slurp "player stats" --graph graph.json --budget 4000 -->
 ```
 ╭─ Slurp — Subgraph for: "player stats" (budget: 4,000 tokens) ╮
-│ Selected 108/2111 nodes · 3,928/4,000 tokens used (5.1%)     │
+│ Selected 103/2111 nodes · 3,926/4,000 tokens used (4.9%)     │
 ╰──────────────────────────────────────────────────────────────╯
 
 ## Relevant Nodes
 
-### recalcularPlayerStats() · score: 0.91
-→ File: lib/supabase/admin-actions.ts
-
-### getPlayerStatsAdmin() · score: 0.91
-→ File: lib/supabase/admin-actions.ts
-
-### updatePlayerStatsAdmin() · score: 0.91
-→ File: lib/supabase/admin-actions.ts
-
-### PlayerStats · score: 0.91
+### PlayerStatsInsert · score: 0.96
 → File: types/database.ts
 
-### PlayerStatsInsert · score: 0.91
+### PlayerStats · score: 0.96
 → File: types/database.ts
+
+### recalcularPlayerStats() · score: 0.95
+→ File: lib/supabase/admin-actions.ts
+
+### updatePlayerStatsAdmin() · score: 0.94
+→ File: lib/supabase/admin-actions.ts
+
+### getPlayerStatsAdmin() · score: 0.94
+→ File: lib/supabase/admin-actions.ts
 
 …
 
@@ -298,8 +300,8 @@ Real output with v1.2.0, on a 2,111-node graph of a Next.js codebase:
 …
 
 ---
-💡 1350 more nodes scored 0.15 or more but did not fit the budget — increase --budget to include them
-💡 643 nodes scored below the minimum score 0.15 — a bigger budget will not include them (see --min-score)
+💡 1356 more nodes scored 0.15 or more but did not fit the budget — increase --budget to include them
+💡 642 nodes scored below the minimum score 0.15 — a bigger budget will not include them (see --min-score)
 💡 10 test nodes are left out by default — --include-tests to let them compete
 ```
 
@@ -318,9 +320,9 @@ Add `--inject-code` to embed the actual function body next to each node:
 slurp "recalcularPlayerStats" --graph graphify-out/graph.json --budget 2000 --inject-code --min-score 0.8 --project-root .
 ```
 
-<!-- example: inject-code · slurp v1.2.1 · slurp "recalcularPlayerStats" --graph graphify-out/graph.json --budget 2000 --inject-code --min-score 0.8 --project-root . -->
+<!-- example: inject-code · slurp v1.4.0 · slurp "recalcularPlayerStats" --graph graphify-out/graph.json --budget 2000 --inject-code --min-score 0.8 --project-root . -->
 ````
-### recalcularPlayerStats() · score: 0.91
+### recalcularPlayerStats() · score: 1.00
 → File: lib/supabase/admin-actions.ts
 ```typescript
 export async function recalcularPlayerStats(playerNombre: string, clubId: string, temporada: string) {
@@ -450,38 +452,38 @@ graph:
 slurp "auth flow" --graph prismastats/graphify-out/graph.json --graph slurp/graphify-out/graph.json
 ```
 
-Real output with v1.2.0, federating two unrelated projects: PrismaStats, a Next.js app
+Real output with v1.4.0, federating two unrelated projects: PrismaStats, a Next.js app
 (its graphify graph, 2,111 nodes), and slurp's own source at v1.2.0 (its `slurp index`
 graph, 4,465 nodes). The top and the end of the answer:
 
-<!-- example: federation · slurp v1.2.0 · slurp "auth flow" --graph prismastats/graphify-out/graph.json --graph slurp/graphify-out/graph.json -->
+<!-- example: federation · slurp v1.4.0 · slurp "auth flow" --graph prismastats/graphify-out/graph.json --graph slurp/graphify-out/graph.json -->
 ```
 Federated: 2 graphs · 6,576 nodes total
 
 ╭─ Slurp — Subgraph for: "auth flow" (budget: 4,000 tokens) ╮
-│ Selected 79/6576 nodes · 3,923/4,000 tokens used (1.2%)   │
+│ Selected 119/6576 nodes · 3,929/4,000 tokens used (1.8%)  │
 ╰───────────────────────────────────────────────────────────╯
 
 ## Relevant Nodes
 
-### AuthResult · score: 0.71
+### actions.ts · score: 1.00
 → File: lib/auth/actions.ts
 
-### lib/auth/actions.ts · score: 0.70
-→ File: AGENTS.md
+### route.ts · score: 0.84
+→ File: app/auth/callback/route.ts
 
-### format_subgraph (function) · score: 0.50
-→ File: slurp/formatter.py
+### GET() · score: 0.84
+→ File: app/auth/callback/route.ts
 
 …
 
 ## Key Relationships
-- prismastats::favoritos_route_resolveclubid → calls → prismastats::supabase_admin_createadminclient
+- prismastats::asistencia_page_asistenciapage → calls → prismastats::supabase_admin_createadminclient
 …
 
 ---
-💡 2095 more nodes scored 0.15 or more but did not fit the budget — increase --budget to include them
-💡 674 nodes scored below the minimum score 0.15 — a bigger budget will not include them (see --min-score)
+💡 2057 more nodes scored 0.15 or more but did not fit the budget — increase --budget to include them
+💡 672 nodes scored below the minimum score 0.15 — a bigger budget will not include them (see --min-score)
 💡 3374 test nodes and 354 import nodes are left out by default — --include-tests / --include-imports to let them compete
 ```
 
@@ -552,36 +554,36 @@ slurp audit --top-nodes 20
 slurp audit --audit-dir /custom/.slurp
 ```
 
-Real output with v1.2.0, after five queries at `--budget 3000` on slurp's own graph
+Real output with v1.4.0, after five queries at `--budget 3000` on slurp's own graph
 (`budget selection`, `graph loader`, `mcp server`, `token counting`, `call graph extraction`):
 
-<!-- example: audit · slurp v1.2.0 · slurp audit, after five queries at --budget 3000 on slurp's own graph -->
+<!-- example: audit · slurp v1.4.0 · slurp audit, after five queries at --budget 3000 on slurp's own graph -->
 ```
                       Query History (last 5 of 5)
 ┏━━━━━━┳━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━┳━━━━━━━━┓
 ┃ #    ┃ Timestamp           ┃ Query                 ┃ Nodes ┃ Tokens ┃
 ┡━━━━━━╇━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━╇━━━━━━━━┩
-│ 1    │ 2026-11-25T20:23:50 │ budget selection      │    64 │  2,935 │
-│ 2    │ 2026-11-25T20:23:51 │ graph loader          │    64 │  2,937 │
-│ 3    │ 2026-11-25T20:23:51 │ mcp server            │    65 │  2,937 │
-│ 4    │ 2026-11-25T20:23:52 │ token counting        │    60 │  2,945 │
-│ 5    │ 2026-11-25T20:23:52 │ call graph extraction │    66 │  2,947 │
+│ 1    │ 2026-11-27T22:23:23 │ budget selection      │    62 │  2,948 │
+│ 2    │ 2026-11-27T22:23:24 │ graph loader          │    69 │  2,943 │
+│ 3    │ 2026-11-27T22:23:24 │ mcp server            │    54 │  2,948 │
+│ 4    │ 2026-11-27T22:23:24 │ token counting        │    64 │  2,948 │
+│ 5    │ 2026-11-27T22:23:25 │ call graph extraction │    73 │  2,938 │
 └──────┴─────────────────────┴───────────────────────┴───────┴────────┘
-                   Top 10 Most Selected Nodes
-┏━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┓
-┃ Rank  ┃ Node                                ┃ Times Selected ┃
-┡━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━┩
-│ 1     │ slurp.formatter.format_subgraph     │              5 │
-│ 2     │ slurp.indexer._BaseVisitor._recurse │              5 │
-│ 3     │ slurp.loader.load_graph             │              5 │
-│ 4     │ slurp.indexer._BaseVisitor.visit    │              5 │
-│ 5     │ slurp.indexer.index_project         │              5 │
-│ 6     │ slurp.diff.diff_graphs              │              5 │
-│ 7     │ slurp.benchmark.run_benchmark       │              5 │
-│ 8     │ slurp.loader.load_graph_neo4j       │              5 │
-│ 9     │ slurp.scorer.score_nodes            │              4 │
-│ 10    │ slurp.mcp._handle                   │              4 │
-└───────┴─────────────────────────────────────┴────────────────┘
+                      Top 10 Most Selected Nodes
+┏━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┓
+┃ Rank  ┃ Node                                       ┃ Times Selected ┃
+┡━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━┩
+│ 1     │ slurp.cli                                  │              5 │
+│ 2     │ slurp.loader.load_graph                    │              5 │
+│ 3     │ slurp.mcp.FederatedGraphState.check_reload │              5 │
+│ 4     │ slurp.mcp.GraphState.check_reload          │              5 │
+│ 5     │ slurp.budget.full_graph_tokens             │              4 │
+│ 6     │ slurp.budget.clear_node_token_cache        │              4 │
+│ 7     │ slurp.cli.run                              │              4 │
+│ 8     │ slurp.mcp._handle                          │              4 │
+│ 9     │ slurp.scorer.score_nodes                   │              4 │
+│ 10    │ slurp.cli._find_graph                      │              4 │
+└───────┴────────────────────────────────────────────┴────────────────┘
 ```
 
 Every query is appended as a JSON line (unless `--no-audit` is passed). Useful for tracking which parts of your codebase an AI agent visits most.
@@ -606,56 +608,56 @@ slurp advisor "budget selection" --graph graph.json
 slurp advisor "auth flow" --graph graph.json
 ```
 
-Real output with v1.2.0 on slurp's own graph, after the five queries of the `slurp audit`
+Real output with v1.4.0 on slurp's own graph, after the five queries of the `slurp audit`
 example and `budget selection heap` at `--budget` 1500, 2500, 4000 and 6000:
 
-<!-- example: advisor-budget · slurp v1.2.0 · slurp advisor "budget selection" --graph graph.json -->
+<!-- example: advisor-budget · slurp v1.4.0 · slurp advisor "budget selection" --graph graph.json -->
 ```
 ╭────────────────────────────── Budget Advisor — "budget selection" ───────────────────────────────╮
 │ Based on 5 similar past queries                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 
-Recommended budget:  3,928 tokens
-Expected coverage:   93.4% of similar queries' selections
+Recommended budget:  3,923 tokens
+Expected coverage:   93.3% of similar queries' selections
 Estimated cost:      $0.0118  (claude-sonnet-5)
 Confidence:          MEDIUM  (5 similar queries)
 
 Similar past queries:
-  "budget selection"      → 2,935 tokens · 64 nodes
-  "budget selection heap" → 1,469 tokens · 35 nodes
-  "budget selection heap" → 2,454 tokens · 52 nodes
-  "budget selection heap" → 3,928 tokens · 85 nodes
-  "budget selection heap" → 5,884 tokens · 119 nodes
+  "budget selection"      → 2,948 tokens · 62 nodes
+  "budget selection heap" → 1,477 tokens · 36 nodes
+  "budget selection heap" → 2,453 tokens · 60 nodes
+  "budget selection heap" → 3,923 tokens · 75 nodes
+  "budget selection heap" → 5,882 tokens · 102 nodes
 
 Run with recommended budget:
-  slurp "budget selection" --graph graph.json --budget 3928
+  slurp "budget selection" --graph graph.json --budget 3923
 ```
 
 And on PrismaStats, after twelve queries at `--budget 3000` — `auth flow` alone and
 followed by `callback`, `cookie`, `guard`, `jwt`, `login`, `logout`, `middleware`,
 `redirect`, `session`, `signup` and `token`:
 
-<!-- example: advisor-auth · slurp v1.2.0 · slurp advisor "auth flow" --graph graph.json -->
+<!-- example: advisor-auth · slurp v1.4.0 · slurp advisor "auth flow" --graph graph.json -->
 ```
 ╭────────────────────────────────── Budget Advisor — "auth flow" ──────────────────────────────────╮
 │ Based on 12 similar past queries                                                                 │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 
-Recommended budget:  2,948 tokens
+Recommended budget:  2,946 tokens
 Expected coverage:   100.0% of similar queries' selections
 Estimated cost:      $0.0088  (claude-sonnet-5)
 Confidence:          HIGH  (12 similar queries)
 
 Similar past queries:
-  "auth flow"          → 2,947 tokens · 73 nodes
-  "auth flow callback" → 2,941 tokens · 72 nodes
-  "auth flow cookie"   → 2,948 tokens · 71 nodes
-  "auth flow guard"    → 2,948 tokens · 71 nodes
-  "auth flow jwt"      → 2,947 tokens · 73 nodes
+  "auth flow"          → 2,946 tokens · 97 nodes
+  "auth flow callback" → 2,946 tokens · 85 nodes
+  "auth flow cookie"   → 2,943 tokens · 97 nodes
+  "auth flow guard"    → 2,943 tokens · 97 nodes
+  "auth flow jwt"      → 2,947 tokens · 98 nodes
   … and 7 more
 
 Run with recommended budget:
-  slurp "auth flow" --graph graph.json --budget 2948
+  slurp "auth flow" --graph graph.json --budget 2946
 ```
 
 | Flag | Default | Description |
@@ -698,16 +700,16 @@ that continue the investigation. No API key, no network.
 slurp explain "recalcularPlayerStats" --graph graph.json --no-llm
 ```
 
-Real output with v1.2.0 on PrismaStats's graphify graph:
+Real output with v1.4.0 on PrismaStats's graphify graph:
 
-<!-- example: explain-structural · slurp v1.2.0 · slurp explain "recalcularPlayerStats" --graph graph.json --no-llm -->
+<!-- example: explain-structural · slurp v1.4.0 · slurp explain "recalcularPlayerStats" --graph graph.json --no-llm -->
 ```
 ╭──────────────────────────── slurp explain — recalcularPlayerStats() ─────────────────────────────╮
-│ code · lib/supabase/admin-actions.ts · score: 0.910                                              │
+│ code · lib/supabase/admin-actions.ts · score: 1.000                                              │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 
 EXPLANATION
-recalcularPlayerStats() is a code node defined in lib/supabase/admin-actions.ts:1140. Leaf — focused, with a small surface. It is called by 3 places in the project, chiefly deleteMatchEventAdmin(), insertMatchEventAdmin(), insertSubstitutionEventAdmin(). It depends on createAdminClient(). Relevance to your query: 0.910.
+recalcularPlayerStats() is a code node defined in lib/supabase/admin-actions.ts:1140. Leaf — focused, with a small surface. It is called by 3 places in the project, chiefly deleteMatchEventAdmin(), insertMatchEventAdmin(), insertSubstitutionEventAdmin(). It depends on createAdminClient(). Relevance to your query: 1.000.
 
 CONTEXT
 Part of:     admin-actions.ts
@@ -777,16 +779,16 @@ If none are present, slurp uses the **structural** explanation — a determinist
 built from the graph alone. It is always produced first, so a missing SDK, an absent API key,
 or an unreachable endpoint degrades to it rather than failing.
 
-Real output with v1.2.0, with nothing listening on the endpoint:
+Real output with v1.4.0, with nothing listening on the endpoint:
 
-<!-- example: explain-fallback · slurp v1.2.0 · slurp explain "recalcularPlayerStats" --graph graph.json --provider openai-compatible --endpoint http://localhost:1234/v1 -->
+<!-- example: explain-fallback · slurp v1.4.0 · slurp explain "recalcularPlayerStats" --graph graph.json --provider openai-compatible --endpoint http://localhost:1234/v1 -->
 ```
 ╭──────────────────────────── slurp explain — recalcularPlayerStats() ─────────────────────────────╮
-│ code · lib/supabase/admin-actions.ts · score: 0.910                                              │
+│ code · lib/supabase/admin-actions.ts · score: 1.000                                              │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 
 EXPLANATION
-recalcularPlayerStats() is a code node defined in lib/supabase/admin-actions.ts:1140. Leaf — focused, with a small surface. It is called by 3 places in the project, chiefly deleteMatchEventAdmin(), insertMatchEventAdmin(), insertSubstitutionEventAdmin(). It depends on createAdminClient(). Relevance to your query: 0.910.
+recalcularPlayerStats() is a code node defined in lib/supabase/admin-actions.ts:1140. Leaf — focused, with a small surface. It is called by 3 places in the project, chiefly deleteMatchEventAdmin(), insertMatchEventAdmin(), insertSubstitutionEventAdmin(). It depends on createAdminClient(). Relevance to your query: 1.000.
 
 CONTEXT
 Part of:     admin-actions.ts
@@ -1148,23 +1150,23 @@ exactly the shape of something you have not looked at yet.
 slurp "player stats" --graph graph.json --budget 4000 --suggest
 ```
 
-The end of the output, real, with v1.2.0 on PrismaStats's graphify graph:
+The end of the output, real, with v1.4.0 on PrismaStats's graphify graph:
 
-<!-- example: suggest · slurp v1.2.0 · slurp "player stats" --graph graph.json --budget 4000 --suggest -->
+<!-- example: suggest · slurp v1.4.0 · slurp "player stats" --graph graph.json --budget 4000 --suggest -->
 ```
 SUGGESTED QUERIES
-  slurp "recalcularPlayerStats page route"  — drill down into what surrounds recalcularPlayerStats
-  slurp "page props client"                 — explore the connected area the budget left out
-  slurp explain 'Badge'                     — high-risk dependency — 16 nodes depend on it
+  slurp "page props client"     — explore the connected area the budget left out
+  slurp explain 'createClient'  — high-risk dependency — 36 nodes depend on it
 ```
 
-Three kinds of suggestion, each fired only when the graph supports it:
+Three kinds of suggestion, each fired only when the graph supports it (above, the drill-down
+does not):
 
 | Kind | Fires when | Reads as |
 |---|---|---|
-| **Drill down** | the subgraph's most relevant node has neighbours that were left out | `drill down into what surrounds recalcularPlayerStats` |
+| **Drill down** | the subgraph's most relevant node has neighbours that were left out | `drill down into what surrounds NODE` |
 | **Sibling exploration** | a themed cluster sits on the frontier | `explore the connected area the budget left out` |
-| **Risk exploration** | a frontier node has six or more dependants | `high-risk dependency — 16 nodes depend on it` |
+| **Risk exploration** | a frontier node has six or more dependants | `high-risk dependency — N nodes depend on it` |
 
 | Flag | Default | Description |
 |---|---|---|
@@ -1180,7 +1182,8 @@ neighbourhood the list is simply empty.
 
 The same graph and query always give the same suggestions. The risk suggestion names the
 frontier node with the most dependants; on a tie, a definition comes before the file node
-that holds it (`Badge` before `badge.tsx` above, 16 each), then the smallest node id.
+that holds it (in v1.2.0's answer to this query, `Badge` before `badge.tsx`, 16 each), then
+the smallest node id.
 Until v1.2.0 a tie went to whichever node a set happened to yield first, which changed
 from one process to the next.
 
@@ -1210,14 +1213,14 @@ Real output, after an MCP client sent two `slurp_query` calls to
 `slurp serve --graph graph.json` on slurp's own graph — `auth flow` at budget 4000 and
 `mcp server` at 2000:
 
-<!-- example: session · slurp v1.3.0 · slurp session --last 2, after two slurp_query calls over slurp serve -->
+<!-- example: session · slurp v1.4.0 · slurp session --last 2, after two slurp_query calls over slurp serve -->
 ```
                    MCP Session Log — last 2 (.slurp/session.log)                    
 ┏━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━━┳━━━━━━━┓
 ┃ Time                ┃ Tool        ┃ Asked      ┃ Budget ┃ Nodes ┃ Tokens ┃ Graph ┃
 ┡━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━━╇━━━━━━━┩
-│ 2026-11-26T09:47:23 │ slurp_query │ auth flow  │  4,000 │    83 │  3,925 │ fresh │
-│ 2026-11-26T09:47:23 │ slurp_query │ mcp server │  2,000 │    43 │  1,967 │ fresh │
+│ 2026-11-27T22:23:33 │ slurp_query │ auth flow  │  4,000 │    83 │  3,925 │ fresh │
+│ 2026-11-27T22:23:33 │ slurp_query │ mcp server │  2,000 │    33 │  1,955 │ fresh │
 └─────────────────────┴─────────────┴────────────┴────────┴───────┴────────┴───────┘
 ```
 
@@ -1876,6 +1879,8 @@ Pass a custom path with `--ignore-file path/to/.slurpignore`.
 
 **TF-IDF without scikit-learn.** Hand-rolled TF-IDF with smoothed IDF (`log((N+1)/(df+1)) + 1`) and cosine similarity. The tokenizer splits camelCase and snake_case, so `authenticate_user` scores on both `authenticate` and `user`. The `score_nodes()` interface is backend-agnostic — swap to real embeddings with `--backend openai` without touching any caller. (`--backend anthropic` is refused since v1.0.7, and `score_nodes(backend="anthropic")` raises a `ValueError` since v1.1.0: Anthropic offers no embedding model, and its docs point to Voyage AI.)
 
+**A ranking that reads paths and follows the query (v1.4).** The semantic part compares the query with a node's name and also with the terms of its file path and of the class or module that holds it (generic ones such as `src`, `lib` or `index` left out), at the name's weight. The structural part is a PageRank personalised on the query: a walk that restarts at the ten best production matches and follows `calls` and `contains` both ways, computed by local push so that it only touches their neighbourhood. A query that matches nothing keeps the global PageRank. Chosen on 1,525 questions from commit history and validated once on six projects it was not chosen on — see [Upgrading to v1.4.0](#upgrading-to-v140).
+
 **YAML serializer without PyYAML.** `_yaml_scalar()` renders Python primitives as valid YAML scalars using `json.dumps()` for strings that need quoting (JSON string literals are valid YAML 1.1). No PyYAML dependency.
 
 **`lru_cache` on the tiktoken encoder.** `tiktoken.get_encoding()` reads tokenizer data from disk on first call. Caching with `lru_cache(maxsize=8)` means repeated token-counting calls within a single run hit memory, not disk.
@@ -1925,6 +1930,84 @@ Pass a custom path with `--ignore-file path/to/.slurpignore`.
 - ✅ **v1.2.0** — Better selection, measured: test code and import nodes no longer take places in a subgraph (`--include-tests` / `--include-imports` let them back), and a node lends its neighbour boost to at most ten neighbours, so a hub's callers no longer fill the budget — recall at `--budget 4000` in markdown 0.867 → 0.967 on PrismaStats and 0.688 → 0.875 on slurp's own graph; risk bands in `slurp explain`, `slurp impact` and `slurp diff` count production callers only, with tests shown apart; `_is_test` follows each language's test-runner conventions; `scripts/retrieval.py` measures recall on a fixed tuning/held-out split of the questions
 - ✅ **v1.2.1** — Fixes: `slurp index --smart` no longer runs a full index on every run when `.slurpignore` excludes a whole file; every command that writes `graph.json` replaces it atomically, so the MCP server never loads half a graph; `slurp impact`'s AFFECTED FILES list counts the files its headline counts; `--suggest` gives the same suggestions in every run; `--inject-code` says when it cuts a block at 100 lines; `slurp index` treats graphs written by v1.3 as its own
 - ✅ **v1.3.0** — slurp over MCP with no intervention: the graph follows the working tree in the CLI and over MCP (a manifest in `graph.json`, checked before every answer in 0.4 ms, refreshed within 2 s, graphify's graphs left read-only); `slurp init` builds slurp's own graph, approves the server and its tools for Claude Code and tells the agent when to use them; `--watch` polls instead of depending on watchdog; the MCP server negotiates protocol revisions up to 2026-07-28; the session log records every call; measured with agents: 9 of 10 sessions called slurp unprompted, with no approval asked
+- ✅ **v1.4.0** — A better ranking, measured: the semantic score reads a node's path and scope as well as its name, and the structural score is a PageRank personalised on the query — recall at `--budget 4000` 0.543 → 0.674 on six held-out projects of a 1,525-question bank from commit history, with the same tokens; warm queries 1.4–3.2× faster on all but the smallest reference graph, the first query on a freshly loaded graph up to 1.54× slower; `slurp explain` finds a graphify function by its name; `slurp_query` tells the agent when to pass 16000–32000
+
+### Upgrading to v1.4.0
+
+v1.4.0 changes the order in which slurp ranks nodes, so the same budget holds more of what a
+question needs. On six open-source projects the ranking was not chosen on, recall at the
+default budget went from 0.543 to 0.674 with the same number of tokens. What changes if you
+already use slurp:
+
+- **A new ranking.** The semantic part of a node's score reads the terms of its file path and
+  of the class or module that holds it, at the weight of its name; until v1.3 it read the name
+  only. The structural part is a PageRank personalised on the query — a walk from the ten best
+  production matches along `calls` and `contains`, both ways — instead of one PageRank for the
+  whole graph; a query that matches nothing keeps the global one. Every answer changes: the
+  scores, the order and often the selection. In `--explain`, the *Structural* column now
+  depends on the query.
+- **How it was chosen and checked.** On a bank of 1,525 questions taken from the history of
+  14 open-source projects (a commit's subject as the question, the definitions it changed as
+  the answer, on the graph of its parent commit), with the release criterion fixed before
+  measuring. Variants were compared on 7 projects (recall 0.532 → 0.725), then the one
+  candidate was checked once on the other 6, in markdown at `--budget 4000`:
+
+  | Project | v1.3 | v1.4 |
+  |---|---|---|
+  | gin | 0.779 | 0.824 |
+  | click | 0.610 | 0.775 |
+  | ripgrep | 0.421 | 0.587 |
+  | excalidraw | 0.428 | 0.583 |
+  | commons-lang | 0.678 | 0.740 |
+  | prometheus | 0.344 | 0.535 |
+  | **Mean** | **0.543** | **0.674** |
+
+  The answers use the same ~98 % of the budget as before. Commit subjects are not an agent's
+  questions, so the criterion also required the two labelled sets of architecture questions not
+  to lose more than one question at 4000 in markdown: PrismaStats stays at 0.967 and slurp goes
+  from 0.875 to 0.938, with no question worse.
+- **What gets worse, on those labelled questions.** Outside the figure the criterion fixed:
+  - PrismaStats's MRR falls from 0.405 to 0.337: the first relevant node ranks lower on
+    average, though at 4000 no question finds fewer of its labelled nodes;
+  - in JSON at 4000, PrismaStats falls from 0.900 to 0.867 (the equivalent of half a question)
+    and slurp from 0.812 to 0.750 (one question);
+  - in markdown at 16000, slurp falls from 1.000 to 0.938 (one question).
+- **Faster from the second query on, slower on the first.** With the encoder loaded, on six
+  reference graphs measured beside v1.3 in the same session:
+  - warm queries (the median of 20) take 0.31–0.71× v1.3's time on hono, slurp, tokio,
+    prometheus and sqlalchemy (sqlalchemy, 59,518 nodes: 278 → 87 ms); on PrismaStats, the
+    smallest, 10.2 → 14.4 ms;
+  - the first query on a freshly loaded graph takes up to 1.54× (hono: 41.9 → 64.4 ms; tokio
+    1.41×, prometheus 0.99×); the new ranking builds once per graph the terms of every name
+    and path and the walk's adjacency, which is what makes every later query faster. The
+    criterion allowed 1.5× on that first query; the author's rule, fixed before measuring
+    again, accepts up to 1.67× on it alone when warm queries and the first query after an MCP
+    refresh stay within their limits on all six graphs, and they do;
+  - the first `slurp_query` after the MCP server refreshes the graph takes 1.03–1.45× v1.3's.
+- **The budget costs fewer nodes, with the same output.** Once the budget is nearly full,
+  a node that cannot fit any more is told apart by a lower bound on its cost instead of being
+  tokenized. The answers to all 1,556 bank and labelled questions are byte for byte those of
+  the v1.4 ranking without it (markdown with `cl100k_base` and `o200k_base`; JSON, YAML and
+  other encodings cost every node as before).
+- **`slurp explain` finds a graphify function by its name.** graphify labels functions
+  `recalcularPlayerStats()` and Python methods `.save()`, and the name never matched that
+  label: relevance chose. On PrismaStats's graphify graph, `explain` by name found the function
+  for 85.5 % of the 337 functions whose name no other node has with v1.3, and 65.0 % with the
+  new ranking alone; now 100 %. Labels are compared as written, then without that decoration,
+  the same case first (so `get` finds `get`, not one of eight `GET` handlers). A node id still
+  wins over every label, so a function named like its module's id — PrismaStats's `middleware`
+  in `middleware.ts` — resolves to the module; a name shared by a function `X()` and a type or
+  variable `X` resolves to `X`.
+- **`slurp_query` says when to ask for more budget.** Its description, its `budget` parameter
+  and the server's instructions now say that the default answers architecture questions and
+  that pinning down one specific function in a large project takes 16000–32000; they used to
+  suggest 8000–12000 for broad architecture questions. See [Choosing a budget](#choosing-a-budget).
+- Nothing else changes: the same commands, flags, MCP tools and `graph.json`.
+
+Measurement records, in Spanish:
+[design](https://github.com/CarlosVallejoRuiz/slurp/blob/main/docs/design/orden-v1.4.md),
+[validation](https://github.com/CarlosVallejoRuiz/slurp/blob/main/docs/design/orden-v1.4/resultados/validacion.md),
+[latency](https://github.com/CarlosVallejoRuiz/slurp/blob/main/docs/design/orden-v1.4/resultados/latencia-optimizada.md).
 
 ### Upgrading to v1.3.0
 

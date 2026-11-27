@@ -133,10 +133,10 @@ the project's server and before each tool call; answer "don't ask again", or add
 ### How it works internally
 
 The figures below come from a real `slurp_query("auth flow", budget=4000)` call to
-`slurp serve` on PrismaStats with v1.2.0, and the saving from `slurp benchmark` on the
+`slurp serve` on PrismaStats with v1.4.0, and the saving from `slurp benchmark` on the
 same graph:
 
-<!-- example: usage-diagram · slurp v1.2.0 · slurp_query("auth flow", budget=4000) over slurp serve; the saving from slurp benchmark -->
+<!-- example: usage-diagram · slurp v1.4.0 · slurp_query("auth flow", budget=4000) over slurp serve; the saving from slurp benchmark -->
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                                                         │
@@ -160,14 +160,14 @@ same graph:
                        ▼
 ┌─────────────────────────────────────────────────────────┐
 │   Slurp scores all 2111 graph nodes,                    │
-│   selects the 96 most relevant in 3,927 tokens          │
+│   selects the 119 most relevant in 3,928 tokens         │
 │   (96.7% fewer tokens than injecting the full graph)    │
 └──────────────────────┬──────────────────────────────────┘
                        │
                        ▼
 ┌─────────────────────────────────────────────────────────┐
-│   Returns to Claude: createAdminClient(), AuthResult,   │
-│   lib/auth/actions.ts, requireAdmin() and the rest,     │
+│   Returns to Claude: actions.ts, route.ts, GET(),       │
+│   inviteUserAction() and the rest,                      │
 │   with their relationships and scores                   │
 └──────────────────────┬──────────────────────────────────┘
                        │
@@ -222,28 +222,26 @@ slurp "auth flow" --backend openai
 slurp "auth flow" --ignore-file .slurpignore
 ```
 
-**`--explain` on PrismaStats** — real output with v1.2.0 of `slurp "auth flow" --explain`;
+**`--explain` on PrismaStats** — real output with v1.4.0 of `slurp "auth flow" --explain`;
 the score breakdown prints after the subgraph, first and last rows shown:
 
-<!-- example: usage-explain · slurp v1.2.0 · slurp "auth flow" --explain -->
+<!-- example: usage-explain · slurp v1.4.0 · slurp "auth flow" --explain -->
 ```
                                           Score Breakdown
-┏━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━┓
-┃ Rank  ┃ Label                 ┃  Final ┃ Structural ┃ Semantic ┃ Type    ┃ File                  ┃
-┡━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━┩
-│ 1     │ createAdminClient()   │ 0.7000 │     1.0000 │   0.0000 │ code    │ lib/supabase/admin.ts │
-│ 2     │ AuthResult            │ 0.6918 │     0.0147 │   0.6431 │ code    │ lib/auth/actions.ts   │
-│ 3     │ lib/auth/actions.ts   │ 0.6911 │     0.0132 │   0.6431 │ code    │ AGENTS.md             │
-│ 4     │ requireAdmin()        │ 0.4338 │     0.3345 │   0.0000 │ code    │ lib/supabase/admin-a… │
-│ 5     │ Supabase (PostgreSQL  │ 0.3921 │     0.0156 │   0.6431 │ concept │ docs/documento-tecni… │
-│       │ + Auth + Storage +    │        │            │          │         │                       │
-│       │ RLS)                  │        │            │          │         │                       │
-│ 6     │ createClient()        │ 0.3691 │     0.1728 │   0.0000 │ code    │ lib/supabase/server.… │
-│ 7     │ cn()                  │ 0.3527 │     0.1318 │   0.0000 │ code    │ lib/utils.ts          │
-│ 8     │ computedHash          │ 0.3523 │     0.1308 │   0.0000 │ code    │ skills-lock.json      │
+┏━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Rank  ┃ Label                 ┃  Final ┃ Structural ┃ Semantic ┃ Type     ┃ File                 ┃
+┡━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━┩
+│ 1     │ actions.ts            │ 1.0000 │     1.0000 │   0.5708 │ code     │ lib/auth/actions.ts  │
+│ 2     │ route.ts              │ 0.7432 │     0.2518 │   0.5708 │ code     │ app/auth/callback/r… │
+│ 3     │ GET()                 │ 0.7280 │     0.2140 │   0.5708 │ code     │ app/auth/callback/r… │
+│ 4     │ inviteUserAction()    │ 0.7276 │     0.2129 │   0.5708 │ code     │ lib/auth/actions.ts  │
+│ 5     │ resetPasswordAction() │ 0.7271 │     0.2116 │   0.5708 │ code     │ lib/auth/actions.ts  │
+│ 6     │ forgotPasswordAction… │ 0.7271 │     0.2116 │   0.5708 │ code     │ lib/auth/actions.ts  │
+│ 7     │ loginAction()         │ 0.7271 │     0.2116 │   0.5708 │ code     │ lib/auth/actions.ts  │
+│ 8     │ AuthResult            │ 0.7271 │     0.2115 │   0.5708 │ code     │ lib/auth/actions.ts  │
 …
-│ 96    │ page.tsx              │ 0.3053 │     0.0132 │   0.0000 │ code    │ app/dashboard/pizarr… │
-└───────┴───────────────────────┴────────┴────────────┴──────────┴─────────┴───────────────────────┘
+│ 119   │ page.tsx              │ 0.3000 │     0.0000 │   0.0000 │ code     │ app/login/page.tsx   │
+└───────┴───────────────────────┴────────┴────────────┴──────────┴──────────┴──────────────────────┘
 ```
 
 **Main flags:**
@@ -296,34 +294,34 @@ slurp audit
 slurp audit --top-nodes 20
 ```
 
-Real output with v1.2.0 on PrismaStats, after three queries at `--budget 4000`
+Real output with v1.4.0 on PrismaStats, after three queries at `--budget 4000`
 (`auth flow`, `prisma schema validation`, `database pool connection`):
 
-<!-- example: usage-audit · slurp v1.2.0 · slurp audit, after three queries at --budget 4000 on PrismaStats -->
+<!-- example: usage-audit · slurp v1.4.0 · slurp audit, after three queries at --budget 4000 on PrismaStats -->
 ```
                        Query History (last 3 of 3)
 ┏━━━━━━┳━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━┳━━━━━━━━┓
 ┃ #    ┃ Timestamp           ┃ Query                    ┃ Nodes ┃ Tokens ┃
 ┡━━━━━━╇━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━╇━━━━━━━━┩
-│ 1    │ 2026-11-25T20:24:15 │ auth flow                │    96 │  3,927 │
-│ 2    │ 2026-11-25T20:24:15 │ prisma schema validation │   108 │  3,924 │
-│ 3    │ 2026-11-25T20:24:15 │ database pool connection │   104 │  3,927 │
+│ 1    │ 2026-11-27T22:23:39 │ auth flow                │   119 │  3,928 │
+│ 2    │ 2026-11-27T22:23:39 │ prisma schema validation │    98 │  3,928 │
+│ 3    │ 2026-11-27T22:23:39 │ database pool connection │   123 │  3,928 │
 └──────┴─────────────────────┴──────────────────────────┴───────┴────────┘
-                   Top 10 Most Selected Nodes
-┏━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┓
-┃ Rank  ┃ Node                                ┃ Times Selected ┃
-┡━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━┩
-│ 1     │ supabase_admin_createadminclient    │              3 │
-│ 2     │ supabase_admin_actions_requireadmin │              3 │
-│ 3     │ supabase_server_createclient        │              3 │
-│ 4     │ lib_utils_cn                        │              3 │
-│ 5     │ skills_lock_seo_computedhash        │              3 │
-│ 6     │ skills_lock_seo_source              │              3 │
-│ 7     │ skills_lock_seo_sourcetype          │              3 │
-│ 8     │ ndarray                             │              3 │
-│ 9     │ supabase_server                     │              3 │
-│ 10    │ supabase_admin                      │              3 │
-└───────┴─────────────────────────────────────┴────────────────┘
+                       Top 10 Most Selected Nodes
+┏━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┓
+┃ Rank  ┃ Node                                         ┃ Times Selected ┃
+┡━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━┩
+│ 1     │ supabase_admin_createadminclient             │              2 │
+│ 2     │ supabase_admin_actions                       │              2 │
+│ 3     │ supabase_admin_actions_requireadmin          │              2 │
+│ 4     │ supabase_dashboard_actions                   │              2 │
+│ 5     │ supabase_cantera_actions_getclubid           │              2 │
+│ 6     │ supabase_reports_actions                     │              2 │
+│ 7     │ mis_partidos_route_requirestarterplus        │              2 │
+│ 8     │ favoritos_route_resolveclubid                │              2 │
+│ 9     │ supabase_cantera_actions_getjugadorescantera │              2 │
+│ 10    │ supabase_admin_actions_getligas              │              2 │
+└───────┴──────────────────────────────────────────────┴────────────────┘
 ```
 
 Every query is recorded in `.slurp/audit.jsonl` (append-only). Useful for understanding which parts of the codebase the AI agent visits most.
@@ -364,21 +362,21 @@ slurp export "auth flow" --format chatgpt
 slurp export "auth flow" --format claudemd --output context.md
 ```
 
-**`--format claudemd` output** — real, v1.2.0, on PrismaStats, first nodes shown:
+**`--format claudemd` output** — real, v1.4.0, on PrismaStats, first nodes shown:
 
-<!-- example: usage-export · slurp v1.2.0 · slurp export "auth flow" --format claudemd -->
+<!-- example: usage-export · slurp v1.4.0 · slurp export "auth flow" --format claudemd -->
 ```markdown
 ## Codebase Context
 
-<!-- slurp-graph · query: "auth flow" | nodes: 97/2111 | tokens: 3,927/4,000 | coverage: 4.6% -->
+<!-- slurp-graph · query: "auth flow" | nodes: 119/2111 | tokens: 3,928/4,000 | coverage: 5.6% -->
 
 ## Relevant Nodes
 
-### createAdminClient() · score: 0.70
-→ File: lib/supabase/admin.ts
-
-### AuthResult · score: 0.69
+### actions.ts · score: 1.00
 → File: lib/auth/actions.ts
+
+### route.ts · score: 0.74
+→ File: app/auth/callback/route.ts
 
 …
 ```

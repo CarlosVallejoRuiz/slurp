@@ -197,4 +197,14 @@ etiqueta única se pide `explain` con su nombre sin paréntesis:
   `recalcular`).
 - En los grafos de `slurp index` las etiquetas no llevan `()` y la coincidencia exacta funciona.
 
-No lo cubren el criterio de §6 ni la regla de latencia. Queda para decidir antes de publicar.
+No lo cubren el criterio de §6 ni la regla de latencia.
+
+**Arreglado en la v1.4.0** (decisión del autor, `aaebf8f`):
+
+- las etiquetas se comparan tal cual y luego sin `()` final ni `.` inicial, con las mismas
+  mayúsculas primero;
+- PrismaStats graphify: 337 de 337 funciones cuyo nombre no comparte ningún otro nodo
+  (v1.3: 288; v1.4 sin el arreglo: 219);
+- PrismaStats `slurp index`: 431 de 432. `get` vuelve a resolverse (antes ganaba uno de ocho
+  `GET`); `middleware` resuelve al módulo `middleware`, cuyo id coincide con el nombre: un id
+  gana a toda etiqueta, por diseño.

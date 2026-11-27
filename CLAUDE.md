@@ -404,6 +404,13 @@ uv sync --extra rust            # solo una
     mensaje), como pide la especificación 2025-11-25, para que el modelo pueda corregirse.
     Un nombre de herramienta desconocido sigue siendo `-32602`, y con versiones anteriores
     todo queda como arriba. Ver `docs/design/mcp-autonomo.md` §6 (decisión 10).
+  - **`find_node()` compara etiquetas tal cual y luego sin la decoración de graphify** (v1.4):
+    sin `()` final ni `.` inicial (`recalcularPlayerStats()`, `.save()`), y en cada paso las
+    mismas mayúsculas primero (`get` frente a ocho `GET`). Hasta la v1.3 el nombre de una
+    función de graphify nunca coincidía y decidía la relevancia (PrismaStats graphify: 85,5 %
+    con la v1.3, 65,0 % con el orden de la v1.4, 100 % ahora). Un id gana a toda etiqueta, así
+    que `middleware` (función de `middleware.ts`) resuelve al módulo. Lo vigila
+    `TestExplainFindsFunctionsByName`.
   - **`find_node()` no falla con un nodo inexistente**: cae a la puntuación por
     relevancia y devuelve el mejor candidato. `slurp_explain` solo da `isError`
     con el grafo vacío. Es comportamiento preexistente, no un defecto nuevo.
@@ -749,8 +756,9 @@ por debajo de la carpeta que abre el editor (`~/Desktop/Slurp/`). Todos los coma
 de este documento (`uv run pytest`, `ruff check`, `uv build`, `git`) se ejecutan
 desde `~/Desktop/Slurp/slurp/`, que es donde vive este CLAUDE.md.
 
-**Estado actual:** v1.3.0 · 3082 tests · `ruff check .` limpio. Medición con agentes de la
-v1.3: `docs/design/mcp-autonomo/resultados/conclusiones.md`. #21 (docstrings como
+**Estado actual:** v1.4.0 · 3218 tests · `ruff check .` limpio. Orden de la v1.4: diseño,
+regla de decisión y resultados en `docs/design/orden-v1.4.md` y `docs/design/orden-v1.4/resultados/`.
+Medición con agentes de la v1.3: `docs/design/mcp-autonomo/resultados/conclusiones.md`. #21 (docstrings como
 descripción) vive en la rama `v1.2-21-docstrings` (2722 tests), sin fusionar: se retoma con
 BM25 en la v1.3 (ver "Resultados de v1.2").
 
@@ -842,6 +850,7 @@ No va en el paquete; `tests/test_latency_script.py` lo mantiene ejecutable.
 ├── scripts/retrieval.py       ← recall/MRR por grupo (ajuste/validación), formato y presupuesto
 ├── scripts/readme_examples.py ← reejecuta las salidas de ejemplo de README y USAGE (no va en el paquete)
 ├── docs/design/mcp-autonomo.md ← diseño aprobado de la v1.3 (#76, #77)
+├── docs/design/orden-v1.4.md  ← diseño, criterio y regla de decisión del orden de la v1.4
 ├── docs/design/mcp-autonomo/  ← verificación, medición con agentes (preparada) y sus scripts
 ├── README.md
 ├── USAGE.md
@@ -965,12 +974,24 @@ def detect_format(data: dict) -> str:
 
 Dado el grafo y una query string, puntúa cada nodo por relevancia.
 
-**Señales combinadas:**
-- **Structural (40%):** PageRank implementado con power-iteration puro (sin numpy)
-- **Semantic (60%):** TF-IDF manual con tokenización mejorada: separa camelCase, snake_case, normaliza a minúsculas
+**Señales combinadas (v1.4):**
+- **Structural (40%):** PageRank **personalizado en la consulta** (`_structural`): reinicia en las
+  10 mejores coincidencias léxicas de producción (tests e imports nunca siembran), recorre
+  `calls` y `contains` en los dos sentidos, empuje local con ε = 1e-4, orden LIFO fijo. Sin
+  coincidencia léxica → el PageRank global de siempre (power-iteration pura, sin numpy). Los
+  nodos que el paseo no alcanza quedan en el orden del global (peso 1e-6); tope 1,0.
+- **Semantic (60%):** TF-IDF manual sobre el nombre **y** los términos de la ruta del fichero y
+  del ámbito (id sin el último segmento), al peso del nombre (`_PATH_WEIGHT`), quitando los
+  genéricos (`_GENERIC_PATH`: `src`, `lib`, `index`, extensiones…). Hasta la v1.3 solo el nombre.
 - **Boost +0.3** para nodos con `file_type == "code"` (clamped a 1.0)
+- Tokens, postings y listas del paseo se cachean por grafo (weakref + recuentos de nodos y
+  aristas); `clear_pagerank_cache()` los limpia todos. Es lo que hace la primera consulta en frío
+  más lenta que en la v1.3 (hono 1,54×) y las siguientes más rápidas (0,31–0,71× en los grafos
+  medianos y grandes).
+- Elegido en el banco de 1.525 preguntas y validado una vez (recall a 4000 md 0,543 → 0,674);
+  regla de latencia con excepción en frío: `docs/design/orden-v1.4.md`.
 
-**Score final:** `score = min(1.0, 0.4 * pagerank_normalized + 0.6 * tfidf_similarity + code_boost)`
+**Score final:** `score = min(1.0, 0.4 * structural + 0.6 * semantic + code_boost)`
 
 **Decisiones de implementación:**
 - `_pagerank()` — power-iteration puro, ~20 líneas, sin numpy. Converge en O(iter × edges)
@@ -1035,6 +1056,18 @@ relaciones: `--budget 8000` daba 19k–42k tokens reales.
   `set` cuando la selección es pequeña y el orden de las relaciones cambiaba entre
   procesos (aleatorización de hashes).
 - Coste medido: +3–7 ms de mediana por query en caliente (PrismaStats, slurp).
+- **Un nodo que no cabe se salta sin tokenizarlo** (v1.4, `_cost_floor`). Con el presupuesto
+  casi lleno el bucle seguía hasta vaciar la cola y costeaba cada candidato (tokio: 6.096 de
+  6.197 nodos costeados no cabían, 40 de 58 ms). Ahora el texto markdown del nodo se corta
+  donde el tokenizador siempre corta (`_split_node_text`: antes de un espacio tras un no-espacio,
+  tras un salto de línea ante un no-espacio; en o200k, nunca ante `/`), la puntuación y la línea
+  del fichero se cuentan una vez (`_part_cost_cache`) y si la cota supera el hueco el nodo se
+  salta. La cota nunca supera el coste real y un nodo saltado nunca se selecciona: la salida es
+  idéntica byte a byte (1.556 preguntas). Solo cl100k_base y o200k_base con el patrón fijado
+  en `_SPLIT_PATTERNS` (si tiktoken lo cambia, el atajo se apaga y lo avisa un test), y solo
+  markdown. Un texto con un token especial no se corta (contarlo lanza y debe seguir
+  lanzando). `TestNodesThatCannotFit` compara con y sin atajo. Tokenizar en lote no servía:
+  `encode_batch` es 4× más lento con estos textos.
 - **Presupuesto por defecto: 4000 en CLI y MCP, revisado en v1.1.0 (#62) y sin
   cambios.** `slurp eval --retrieval`, PrismaStats `slurp index` (15 preguntas) y slurp
   (16): en markdown el recall es plano de 4000 a 8000 (0,867 / 0,688); 12000 da 1,000
