@@ -12,6 +12,8 @@
   - la regla pasa su criterio, pero solo por la censura, así que no se recomienda;
   - el corte por relevancia no es elegible;
   - el 4000 se mantiene.
+  - El autor aceptó la recomendación y descartó la comprobación con un LLM (ver «Decisiones del
+    autor tras los resultados»).
 - **Lo único medido hasta ahora:**
   - tamaños con `slurp index`;
   - los filtros de commits;
@@ -37,6 +39,17 @@
     ella.
   - Se ajusta solo en el grupo de derivación.
 - **Sin cambios en el código de slurp** hasta ver los resultados.
+
+## Decisiones del autor tras los resultados (2026-11-27)
+
+- **Se acepta la recomendación de `resultados/conclusiones.md`:** ni regla de presupuesto por
+  tamaño ni corte por relevancia. El presupuesto por defecto sigue en 4000.
+- **La comprobación con un LLM se descarta** y no se lanza (§5). Los motivos, abajo.
+- **La guía de presupuesto de `slurp_query` se corrige según el estudio** (#99): las preguntas
+  de arquitectura se resuelven con el valor por defecto, y localizar una función concreta en un
+  proyecto grande pide 16000–32000.
+- **Lo siguiente es mejorar el orden de los resultados** (diseño de la v1.4,
+  `docs/design/orden-v1.4.md`), con el banco de 1.525 preguntas de este estudio.
 
 ## La pregunta
 
@@ -635,8 +648,24 @@ Además se informa, sin que decida nada, del corte con techo 32000, es decir, de
 **Qué se comprobaría.** El recall es un sustituto. La pregunta es si, por encima de B*, la
 calidad de la respuesta de un modelo deja de mejorar.
 
-**Decisión del autor: sí, solo si se acepta una regla, con `claude -p` y su suscripción.** Se
-prepara al final de la fase 2 y no se lanza sin avisarle. No decide nada: confirma o pone en duda
+**Descartada por el autor el 2026-11-27, sin lanzarse.** Se preparó (`llm_check.py prepare`
+dejó 240 prompts en `~/slurp-bench/llm/` sin llamar a `claude`). Se descarta por cuatro motivos:
+
+- **No hay nada que confirmar.** La comprobación estaba condicionada a que se aceptara una regla.
+  La regla pasó su criterio, pero solo por la censura: equivale a «32000 a partir de unos 800
+  candidatos», igual que una constante de 32000. Y la recomendación, aceptada, es no
+  implementarla.
+- **Tal como estaba diseñada, no podía distinguir lo que quería medir.** Con B\* de 24000–32000,
+  2·B\* y 4·B\* se redondean los dos a 64000 en hono, tokio y sqlalchemy.
+- **El coste es alto para lo que aportaría.** Son unos 9,4 M tokens de entrada en `cl100k`, unos
+  14,7 M de Anthropic, más el juez, contra la suscripción del autor.
+- **La alternativa propuesta (4000 / 16000 / 32000, unos 3,1 M tokens) no se aprueba.** El
+  estudio ya deja claro que la palanca es el orden, no el presupuesto.
+
+Lo que sigue es el diseño original, que se conserva como registro.
+
+**Decisión inicial del autor: sí, solo si se acepta una regla, con `claude -p` y su
+suscripción.** Se prepara al final de la fase 2 y no se lanza sin avisarle. No decide nada: confirma o pone en duda
 el sustituto. Además de la nota del juez, se informa de una medida sin LLM: la fracción de
 definiciones relevantes que la respuesta nombra.
 
