@@ -76,6 +76,46 @@
   empates exactos se ordenan por el PageRank global con un peso de 1e-6, para no dejarlos al
   orden de los ids. No cambia ningún otro orden.
 
+## Regla de decisión tras la latencia (autor, 2026-11-27), fijada antes de volver a medir
+
+La implementación (rama `v1.4-orden`) cumple el recall y en caliente, pero no la latencia en
+frío en hono ni en tokio (`orden-v1.4/resultados/latencia.md`). El autor pide optimizar
+`budget.py` sin cambiar la salida y fija esta regla antes de medir.
+
+**Condición previa: la salida no cambia.** Sobre las 1.556 preguntas (las 1.525 del banco y las
+31 etiquetadas), la selección, los tokens y el texto son idénticos byte a byte antes y después de
+la optimización. Un test lo vigila sobre una muestra.
+
+**Tres casos de latencia, todos con el método corregido:**
+
+- **En frío:** un proceso nuevo por grafo y versión, con el codificador de tokens precargado, y
+  la primera consulta sobre el grafo recién cargado. Es la mediana de 3 ejecuciones.
+- **En caliente:** la mediana de 20 consultas, tras una de calentamiento.
+- **Tras un refresco del servidor MCP:** sobre una copia del proyecto con el grafo propio de
+  slurp, en un proceso en marcha que ya ha respondido. Se edita un fichero fuente, el servidor
+  refresca (con `GraphState.prepare`, que cambia el grafo y vacía sus cachés como en
+  producción) y se mide la primera llamada a `slurp_query` sobre el grafo nuevo.
+  - Se mide solo la consulta, sin el refresco, que es el mismo en las dos versiones porque el
+    indexador no cambia. Es la medida más estricta. El tiempo total (refresco más consulta) se
+    informa aparte.
+  - Es la mediana de 3 ediciones por grafo.
+  - Su límite es 1,5 × la v1.3 medida igual, porque es la primera consulta sobre un grafo recién
+    cargado, la misma condición que el límite en frío de §6.
+
+**La v1.3 de referencia** sale del tag `v1.3.0`, con `git archive`, y se mide en la misma sesión.
+
+**Regla:**
+
+1. **Si cumple los límites originales, se fusiona.** Los límites son:
+   - en frío y en caliente, los de §6;
+   - tras un refresco, 1,5 × la v1.3.
+2. **Si no, se acepta una excepción solo para la primera consulta en frío**, con dos condiciones:
+   - que no pase de 1,67 × la v1.3 medida con el método corregido;
+   - que en caliente y tras un refresco cumpla los límites en los seis grafos.
+
+   La excepción y su motivo se documentan aquí y en las notas de la versión.
+3. **Si tampoco cumple eso, no se fusiona** y se para.
+
 ## Por qué
 
 El estudio del presupuesto óptimo (`docs/design/presupuesto-optimo/resultados/conclusiones.md`)
