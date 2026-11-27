@@ -213,6 +213,121 @@ class TestFindNode:
         with pytest.raises(SlurpExplainError, match="No node matches"):
             find_node(graph, "definitely-absent", {})
 
+    def test_a_graphify_function_label_matches_its_bare_name(self):
+        # graphify writes "recalcularPlayerStats()"; relevance preferred a script
+        # whose path shares a word with the name (v1.4, README explain example).
+        G = nx.DiGraph()
+        G.add_node("admin_actions_recalcularplayerstats", label="recalcularPlayerStats()",
+                   source_file="lib/supabase/admin-actions.ts")
+        G.add_node("recalcular_todos_los_clubs", label="recalcular-todos-los-clubs.ts",
+                   source_file="scripts/recalcular-todos-los-clubs.ts")
+        scores = {"recalcular_todos_los_clubs": 1.0, "admin_actions_recalcularplayerstats": 0.9}
+        for asked in ("recalcularPlayerStats", "recalcularPlayerStats()", "recalcularplayerstats"):
+            assert find_node(G, asked, scores) == "admin_actions_recalcularplayerstats"
+
+    def test_a_graphify_method_label_matches_without_its_dot(self):
+        # The real graphify 0.8.33 graph: ".save()" is Store.save, "main()" a function.
+        from slurp.loader import load_graph
+        G = load_graph(Path(__file__).parent / "fixtures" / "graphify_project"
+                       / "graphify-out" / "graph.json")
+        best_is_a_module = {"lib_util": 1.0, "app": 0.9}
+        assert find_node(G, "save", best_is_a_module) == "lib_util_store_save"
+        assert find_node(G, ".save()", best_is_a_module) == "lib_util_store_save"
+        assert find_node(G, "main", best_is_a_module) == "app_main"
+        assert find_node(G, "send()", best_is_a_module) == "lib_client_send"
+
+    def test_the_same_case_wins_over_another_case(self):
+        # PrismaStats: a helper `get` beside eight route handlers named GET.
+        G = nx.DiGraph()
+        for i in range(8):
+            G.add_node(f"app.api.r{i}.route.GET", label="GET", type="function")
+        G.add_node("app.api.upload.route.parseCSV.get", label="get", type="function")
+        handlers_first = {f"app.api.r{i}.route.GET": 0.9 for i in range(8)}
+        assert find_node(G, "get", handlers_first) == "app.api.upload.route.parseCSV.get"
+        assert find_node(G, "GET", handlers_first) == "app.api.r0.route.GET"
+
+    def test_a_label_as_written_beats_an_undecorated_one(self):
+        G = nx.DiGraph()
+        G.add_node("foo_module", label="foo")
+        G.add_node("foo_function", label="foo()")
+        assert find_node(G, "foo", {"foo_function": 1.0}) == "foo_module"
+
+    def test_a_node_id_still_beats_every_label(self):
+        # PrismaStats: the module middleware.ts has the id "middleware", and a
+        # function in it is labelled "middleware". The id wins (documented).
+        G = nx.DiGraph()
+        G.add_node("middleware", label="middleware.ts", type="module")
+        G.add_node("middleware.middleware", label="middleware", type="function")
+        assert find_node(G, "middleware", {"middleware.middleware": 1.0}) == "middleware"
+
+
+def _graphify_style(G: nx.DiGraph) -> nx.DiGraph:
+    """slurp's graph written the way graphify writes one: ids without dots, functions
+    labelled "name()", methods ".name()", no node types and no import nodes."""
+    import re
+
+    def gid(n: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "_", n.lower())
+
+    out = nx.DiGraph()
+    for n, attrs in G.nodes(data=True):
+        if attrs.get("type") == "import":
+            continue
+        new = {k: v for k, v in attrs.items() if k != "type"}
+        if attrs.get("type") == "function":
+            parent = n.rsplit(".", 1)[0]
+            method = parent in G and G.nodes[parent].get("type") == "class"
+            new["label"] = f"{'.' if method else ''}{attrs['label']}()"
+        out.add_node(gid(n), **new)
+    for u, v, attrs in G.edges(data=True):
+        if gid(u) in out and gid(v) in out:
+            out.add_edge(gid(u), gid(v), **attrs)
+    return out
+
+
+class TestExplainFindsFunctionsByName:
+    """Regression (v1.4): `slurp explain NAME` resolves to the function named NAME.
+
+    Measured before the fix on PrismaStats's graphify graph: 288 of 340 function
+    names resolved with v1.3, 219 with v1.4's ranking; 340 after it. Checked here on
+    a sample of slurp's own functions, in its `slurp index` graph and written the
+    graphify way. Names shared by two nodes, or equal to a node id, are ambiguous by
+    design and stay out of the sample.
+    """
+
+    @pytest.fixture(scope="class")
+    def slurp_index(self):
+        from slurp.indexer import index_project
+        from slurp.loader import build_graph
+        return build_graph(index_project(Path(__file__).resolve().parent.parent / "slurp"))
+
+    @staticmethod
+    def _sample(G: nx.DiGraph, every: int = 8) -> list[tuple[str, str]]:
+        from collections import Counter
+
+        def bare(label: str) -> str:
+            return label.rstrip("()").lstrip(".")
+        names = Counter(bare(str(a.get("label", n))).lower() for n, a in G.nodes(data=True))
+        cases = [(n, bare(a["label"])) for n, a in sorted(G.nodes(data=True))
+                 if str(a.get("label", "")).endswith("()") or a.get("type") == "function"]
+        cases = [(n, name) for n, name in cases if names[name.lower()] == 1 and name not in G]
+        return cases[::every]
+
+    def _misses(self, G: nx.DiGraph) -> list[tuple[str, str]]:
+        from slurp.scorer import score_nodes
+        sample = self._sample(G)
+        assert len(sample) >= 60
+        return [(n, name, got) for n, name in sample
+                if (got := find_node(G, name, score_nodes(G, name))) != n]
+
+    def test_slurp_index_graph(self, slurp_index):
+        assert self._misses(slurp_index) == []
+
+    def test_graphify_style_graph(self, slurp_index):
+        G = _graphify_style(slurp_index)
+        assert any(str(a["label"]).startswith(".") for _, a in G.nodes(data=True))
+        assert self._misses(G) == []
+
 
 class TestExplainNodeFallback:
     def test_no_config_uses_structural(self, graph, scores):

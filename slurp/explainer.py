@@ -304,14 +304,20 @@ def resolve_config(
 # Graph reading
 # ---------------------------------------------------------------------------
 
+def _bare(name: str) -> str:
+    """A name without graphify's decoration: no trailing "()", no leading "."."""
+    return name.strip().rstrip("()").lstrip(".")
+
+
 def find_node(G: nx.DiGraph, query: str, scores: dict[str, float] | None = None) -> str:
     """Resolve a query to the node it most likely names.
 
     An exact node id or label match wins outright — asking about a node by name
-    should never be beaten by relevance scoring, even when it is a test.
-    Otherwise the highest-scoring node is used, skipping the tests and import
-    nodes a query leaves out (see _graphutils._left_out) unless nothing else
-    scored.
+    should never be beaten by relevance scoring, even when it is a test. Labels
+    are compared as written, then without graphify's decoration ("save()",
+    ".save()"), each time with the same case first. Otherwise the
+    highest-scoring node is used, skipping the tests and import nodes a query
+    leaves out (see _graphutils._left_out) unless nothing else scored.
 
     Args:
         G: The graph.
@@ -330,11 +336,30 @@ def find_node(G: nx.DiGraph, query: str, scores: dict[str, float] | None = None)
     if query in G:
         return query
 
-    normalized = query.strip().rstrip("()").lower()
-    exact = [n for n in G.nodes if str(_label(G, n)).lower() == normalized]
-    if exact:
-        return sorted(exact, key=lambda n: (-(scores or {}).get(n, 0.0), n))[0]
+    # DECISION (v1.4): graphify labels a function "recalcularPlayerStats()" and a
+    # Python method ".save()", so until v1.3 a function's name never matched its
+    # label there and relevance chose: right for 85 % of PrismaStats's graphify
+    # functions with v1.3's ranking, 64 % with v1.4's path terms. Same case goes
+    # first so `get` finds get, not one of eight GET handlers. A node *id* still
+    # wins over every label (an id is what a caller copies from the output), so a
+    # function named like a module's id resolves to the module.
+    asked = query.strip().rstrip("()")
+    labels = {n: str(_label(G, n)) for n in G.nodes}
+    for undecorated in (False, True):
+        want, names = asked, labels
+        if undecorated:
+            want = _bare(asked)
+            if not want:
+                break
+            names = {n: _bare(label) for n, label in labels.items()}
+        for any_case in (False, True):
+            key = want.lower() if any_case else want
+            exact = [n for n, name in names.items()
+                     if (name.lower() if any_case else name) == key]
+            if exact:
+                return sorted(exact, key=lambda n: (-(scores or {}).get(n, 0.0), n))[0]
 
+    normalized = asked.lower()
     suffix = [n for n in G.nodes if str(n).lower().endswith(f".{normalized}")]
     if suffix:
         return sorted(suffix, key=lambda n: (-(scores or {}).get(n, 0.0), n))[0]
