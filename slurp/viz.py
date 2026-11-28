@@ -639,6 +639,9 @@ var ve = new vis.DataSet(RE.map(function(e){
   return {
     from:e.from, to:e.to,
     label:"",
+    // A JSX usage (renders) is drawn dashed; hovering any edge names its relation.
+    dashes: e.label === "renders",
+    title: e.label,
     arrows:{to:{enabled:true,scaleFactor:0.42}},
     color:{color:"rgba(148,163,184,0.25)",highlight:"#f97316",hover:"#f97316",opacity:1},
     smooth:{type:"continuous"},

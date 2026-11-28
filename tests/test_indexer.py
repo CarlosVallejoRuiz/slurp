@@ -3756,6 +3756,124 @@ class TestTSComponentWrappers:
         assert nodes["index.Excalidraw"]["type"] == "function"
 
 
+_JSX_PROJECT = {
+    "components/badge.tsx": (
+        "export function Badge() { return <span>b</span>; }\n"
+        "export function Row() { return <li />; }\n"),
+    "components/dialog.tsx": "export function Root() { return <div />; }\n",
+    "components/chart.tsx": (
+        "export default function Chart() { return <svg />; }\n"
+        "export function Scatter() { return <svg />; }\n"),
+    "components/button.tsx": (
+        'import * as React from "react";\n'
+        "export const Button = React.forwardRef((props, ref) => {\n"
+        "  return <button ref={ref} {...props} />;\n});\n"),
+    "components/excalidraw.tsx": (
+        'import React from "react";\n'
+        "function ExcalidrawBase(props) { return <canvas />; }\n"
+        "export const Excalidraw = React.memo(ExcalidrawBase);\n"),
+    "app/page.tsx": (
+        'import { Badge, Row } from "../components/badge";\n'
+        'import * as Dialog from "../components/dialog";\n'
+        'import Chart from "../components/chart";\n'
+        'import { Button } from "../components/button";\n'
+        'import { Icon } from "@ui/icons";\n'
+        'import { lazy } from "react";\n'
+        'import dynamic from "next/dynamic";\n'
+        'const LazyChart = lazy(() => import("../components/chart").then((m) => m.Scatter));\n'
+        'const Later = dynamic(() => import("../components/chart"));\n'
+        "function Local() { return <p />; }\n"
+        "export function Page({ icon = Badge }) {\n"
+        "  Row();\n"
+        "  return (\n"
+        "    <main>\n"
+        "      <Local />\n"
+        "      <Badge>hi</Badge>\n"
+        "      <Row />\n"
+        "      <Dialog.Root open />\n"
+        "      <Chart />\n"
+        "      <Button />\n"
+        "      <Icon />\n"
+        "      <LazyChart />\n"
+        "      <Later />\n"
+        "      <Unknown />\n"
+        "      <div><span /></div>\n"
+        "    </main>\n"
+        "  );\n"
+        "}\n"),
+    "app/tree.tsx": "export function Tree() { return <ul><Tree /></ul>; }\n",
+}
+
+
+class TestTSRenderEdges:
+    """v1.5 (#87): a JSX usage of a project component is a `renders` edge, on both
+    branches, with the same certainty rule as calls (docs/design/jsx-v1.5.md)."""
+
+    BOTH = pytest.mark.parametrize("tree_sitter", [True, False], ids=["treesitter", "regex"])
+
+    def _graph(self, tmp_path, monkeypatch, tree_sitter, files=None):
+        if tree_sitter and not _TREE_SITTER_AVAILABLE:
+            pytest.skip("requires the 'ts' extra")
+        monkeypatch.setattr(indexer_mod, "_TREE_SITTER_AVAILABLE", tree_sitter)
+        for rel, text in (files or _JSX_PROJECT).items():
+            path = tmp_path / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        return indexer_mod.index_project(tmp_path)
+
+    @staticmethod
+    def _edges(graph, relation):
+        return {(e["source"], e["target"]) for e in graph["links"] if e["relation"] == relation}
+
+    @BOTH
+    def test_every_certain_usage_and_nothing_else(self, tmp_path, monkeypatch, tree_sitter):
+        renders = self._edges(self._graph(tmp_path, monkeypatch, tree_sitter), "renders")
+        assert renders == {
+            ("app.page.Page", "app.page.Local"),                  # same file
+            ("app.page.Page", "components.badge.Badge"),          # named import
+            ("app.page.Page", "components.dialog.Root"),          # namespace member
+            ("app.page.Page", "components.chart.Chart"),          # default, same name
+            ("app.page.Page", "components.button.Button"),        # forwardRef node
+            ("app.page.Page", "components.chart.Scatter"),        # lazy(...).then(m => m.X)
+            ("components.excalidraw.Excalidraw",
+             "components.excalidraw.ExcalidrawBase"),             # memo(Y)
+        }
+        # Not here: <Icon> (external package), <Unknown>, <div>, icon={Badge}
+        # (a reference), <Tree> inside Tree (itself), <Later> (dynamic default whose
+        # binding name, Later, names no symbol of chart).
+
+    @BOTH
+    def test_a_pair_keeps_its_calls_edge(self, tmp_path, monkeypatch, tree_sitter):
+        # Page calls Row() and renders <Row />: one edge per pair, calls first.
+        graph = self._graph(tmp_path, monkeypatch, tree_sitter)
+        assert ("app.page.Page", "components.badge.Row") in self._edges(graph, "calls")
+        assert ("app.page.Page", "components.badge.Row") not in self._edges(graph, "renders")
+        pairs = [(e["source"], e["target"]) for e in graph["links"]]
+        assert len(pairs) == len(set(pairs))
+
+    @BOTH
+    def test_a_nested_component_keeps_contains(self, tmp_path, monkeypatch, tree_sitter):
+        graph = self._graph(tmp_path, monkeypatch, tree_sitter, files={
+            "list.tsx": ("export function List() {\n"
+                         "  function Item() { return <li />; }\n"
+                         "  return <ul><Item /></ul>;\n}\n")})
+        pairs = [(e["source"], e["target"]) for e in graph["links"]]
+        assert len(pairs) == len(set(pairs))
+        assert not self._edges(graph, "renders") & {("list.List", "list.List.Item")}
+
+    @BOTH
+    def test_no_renders_edge_points_at_an_import_or_keeps_a_private_key(
+        self, tmp_path, monkeypatch, tree_sitter
+    ):
+        graph = self._graph(tmp_path, monkeypatch, tree_sitter)
+        imports = {n["id"] for n in graph["nodes"] if n.get("type") == "import"}
+        ids = {n["id"] for n in graph["nodes"]}
+        for e in graph["links"]:
+            assert not any(k.startswith("_") for k in e)
+            if e["relation"] == "renders":
+                assert e["target"] not in imports and e["target"] in ids and e["source"] in ids
+
+
 class TestTSModulePathResolution:
     """_ts_resolve_module_path — specifier to dotted module id."""
 

@@ -199,10 +199,21 @@ uv sync --extra rust            # solo una
       un id declarado dos veces en un fichero no es destino de ninguna llamada. Medido en
       `docs/design/jsx-v1.5/resultados/rama-regex.md`: mal atribuidas 20 → 0 (PrismaStats)
       y 100 → 0 (excalidraw).
-    - **JSX no es una llamada** (medido en v1.2.1, #81; sin arreglar): `<Badge />` no genera
-      edge `calls`, solo `Badge()`. En un proyecto React casi todos los componentes salen
-      LOW en explain e impact con un grafo de `slurp index`: PrismaStats, 530 de 536 nodos
-      de `.tsx` (sin imports ni tests); su grafo de graphify da 16 dependientes a `Badge()`.
+    - **JSX es `renders`** (v1.5, #87, diseño y banco en `docs/design/jsx-v1.5.md`): un uso
+      `<Badge />` de un componente del proyecto es una arista `renders` desde la función que
+      lo renderiza (la misma pila de ámbitos que las llamadas): local, importado (con
+      nombre, default si el símbolo se llama como el binding, `<Ns.X>` con `import * as
+      Ns`), `React.lazy`/`next/dynamic` (`lazy(() => import(...))`, `.then(m => m.X)`) y
+      `memo(Y)` (X renders Y). Nada para minúsculas, librerías, props (`icon={Badge}`),
+      nombres desconocidos ni la propia función. tree-sitter en `_TSCallVisitor`
+      (`_visit_jsx_element`), regex en `_ts_regex_render_edges`; las pendientes cruzan
+      ficheros con `_pending_symbol` (y `_ts_pending_module` las de `lazy`) y las resuelve
+      `_resolve_ts_cross_file_calls` **después** de todas las `calls`. **Una arista por
+      par**: gana la primera (contains > calls > renders); `_assemble_graph` deduplica por
+      par y el resolutor salta todo par ya ocupado. El resolutor de Python deja pasar intacta
+      una arista que no es `calls` (antes le quitaba `_pending_symbol`, y una `renders`
+      pendiente habría llegado vacía al de TS). Hasta la v1.4 el JSX no hacía arista: 530 de
+      536 nodos de `.tsx` de PrismaStats salían LOW.
   - **Go** (regex-primario, sin gramática): los métodos se **anidan bajo su
     receiver** — `pkg.Struct.Method`, no `pkg.Method`. Antes el receiver se
     descartaba en un grupo no-capturador de `_GO_FUNC_RE`.
@@ -1001,7 +1012,7 @@ Dado el grafo y una query string, puntúa cada nodo por relevancia.
 **Señales combinadas (v1.4):**
 - **Structural (40%):** PageRank **personalizado en la consulta** (`_structural`): reinicia en las
   10 mejores coincidencias léxicas de producción (tests e imports nunca siembran), recorre
-  `calls` y `contains` en los dos sentidos, empuje local con ε = 1e-4, orden LIFO fijo. Sin
+  `calls`, `renders` (v1.5, `_WALKED_LIKE_CALLS`) y `contains` en los dos sentidos, empuje local con ε = 1e-4, orden LIFO fijo. Sin
   coincidencia léxica → el PageRank global de siempre (power-iteration pura, sin numpy). Los
   nodos que el paseo no alcanza quedan en el orden del global (peso 1e-6); tope 1,0.
 - **Semantic (60%):** TF-IDF manual sobre el nombre **y** los términos de la ruta del fichero y

@@ -136,12 +136,19 @@ class _GraphText:
         return self._counts[key]
 
 
+# Relations the personalised walk follows like a call. `renders` (v1.5, #87) is a
+# JSX usage of a component: the bank measured it walked like this (docs/design/
+# jsx-v1.5/resultados/banco.md).
+_WALKED_LIKE_CALLS = frozenset({"calls", "renders"})
+
+
 def _walk_lists(G: nx.DiGraph) -> dict[str, list[tuple[str, float]]]:
-    """Transition lists: calls forward 1 and backward _PPR_BACK, contains both ways 1."""
+    """Transition lists: calls and renders forward 1 and backward _PPR_BACK, contains
+    both ways 1."""
     nb: dict[str, dict[str, float]] = {n: {} for n in G.nodes}
     for u, v, d in G.edges(data=True):
         rel = d.get("relation")
-        if rel == "calls":
+        if rel in _WALKED_LIKE_CALLS:
             nb[u][v] = nb[u].get(v, 0.0) + 1.0
             if _PPR_BACK > 0:
                 nb[v][u] = nb[v].get(u, 0.0) + _PPR_BACK

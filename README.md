@@ -825,10 +825,11 @@ Force it with `--no-llm` to get an offline, zero-cost explanation.
 > The risk is only as good as the graph's call edges. `slurp index` extracts them, across
 > files, for Python, TypeScript/JavaScript, Go, Java and Rust — on PrismaStats's `slurp
 > index` graph `createAdminClient` has 97 production callers and reads `HIGH` — and the
-> other eleven languages read `UNKNOWN`, not `LOW`. One gap: a React component rendered as
-> JSX (`<Badge />`) gets no `calls` edge, so most components read `LOW` in a `slurp index`
-> graph (530 of 536 in PrismaStats's `.tsx` files, imports and tests aside); PrismaStats's
-> graphify graph gives `Badge()` 16 dependants.
+> other eleven languages read `UNKNOWN`, not `LOW`. A React component rendered as JSX
+> (`<Badge />`) gets a `renders` edge since v1.5, and the pages that render it count as its
+> dependants: on PrismaStats's `slurp index` graph, `Button` has 32 and reads `HIGH`.
+> Until v1.4 JSX made no edge, and 530 of the 536 nodes in PrismaStats's `.tsx` files read
+> `LOW`.
 
 ---
 
@@ -1430,6 +1431,17 @@ anything else, use [`.slurpignore`](#slurpignore).
 > | Cross-file | ✅ | ✅ | ✅ | ✅ | ✅ |
 > | Parser | stdlib `ast` | tree-sitter, with a regex fallback | regex | tree-sitter, with a regex fallback | tree-sitter, with a regex fallback |
 >
+> **React components: `renders`** (v1.5). A JSX usage of a component of the project,
+> `<Badge />`, is a `renders` edge from the function that renders it: a component defined
+> in the same file or imported from another (named, default when the symbol is named like
+> the binding, or `<Dialog.Root />` through `import * as Dialog`), and one loaded with
+> `React.lazy` or `next/dynamic`. Lower-case tags (`<div>`), components of libraries and a
+> component passed as a prop (`icon={Badge}`) make none. A component wrapped in React's
+> `memo` or `forwardRef` (`const Button = React.forwardRef(...)`) is a node, so its
+> renderers count too. One edge per pair: a component that is also called as a function
+> keeps `calls`. `renders` counts wherever `calls` does — dependants and risk in
+> `explain`, `impact` and `diff`, and the ranking's walk.
+>
 > **Return type propagation**: `srv := NewServer()` followed by `srv.Start()` now
 > generates a call edge for Go, Rust, Java and TypeScript. The return type must be
 > declared and must name a type defined in the project — an inferred TypeScript
@@ -1664,7 +1676,8 @@ annotations/attributes (`@Service`, `[HttpGet]`) plus access modifiers, Rust
 lifetimes and `pub` visibility, Ruby class methods and accessors, PHP magic
 methods (`__get`, `__call`), Kotlin `data`/`sealed`/`suspend` and extension
 receivers, Scala `case` classes and `implicit`, Swift computed properties and
-`async`. Relationships become typed edges — `extends`, `implements` (including
+`async`. Relationships become typed edges — `calls`, `renders` (a JSX usage of a
+component), `extends`, `implements` (including
 Rust's `impl Trait for Type`), `with` (Scala), `conforms_to` (Swift), and
 `mixin` for Ruby's `include`/`extend`/`prepend` and PHP's trait `use`, Elixir's
 `use`/`import`/`alias`/`require`, and PowerShell's `requires`.
@@ -1882,7 +1895,7 @@ Pass a custom path with `--ignore-file path/to/.slurpignore`.
 
 **TF-IDF without scikit-learn.** Hand-rolled TF-IDF with smoothed IDF (`log((N+1)/(df+1)) + 1`) and cosine similarity. The tokenizer splits camelCase and snake_case, so `authenticate_user` scores on both `authenticate` and `user`. The `score_nodes()` interface is backend-agnostic — swap to real embeddings with `--backend openai` without touching any caller. (`--backend anthropic` is refused since v1.0.7, and `score_nodes(backend="anthropic")` raises a `ValueError` since v1.1.0: Anthropic offers no embedding model, and its docs point to Voyage AI.)
 
-**A ranking that reads paths and follows the query (v1.4).** The semantic part compares the query with a node's name and also with the terms of its file path and of the class or module that holds it (generic ones such as `src`, `lib` or `index` left out), at the name's weight. The structural part is a PageRank personalised on the query: a walk that restarts at the ten best production matches and follows `calls` and `contains` both ways, computed by local push so that it only touches their neighbourhood. A query that matches nothing keeps the global PageRank. Chosen on 1,525 questions from commit history and validated once on six projects it was not chosen on — see [Upgrading to v1.4.0](#upgrading-to-v140).
+**A ranking that reads paths and follows the query (v1.4).** The semantic part compares the query with a node's name and also with the terms of its file path and of the class or module that holds it (generic ones such as `src`, `lib` or `index` left out), at the name's weight. The structural part is a PageRank personalised on the query: a walk that restarts at the ten best production matches and follows `calls` (and, since v1.5, `renders`) and `contains` both ways, computed by local push so that it only touches their neighbourhood. A query that matches nothing keeps the global PageRank. Chosen on 1,525 questions from commit history and validated once on six projects it was not chosen on — see [Upgrading to v1.4.0](#upgrading-to-v140).
 
 **YAML serializer without PyYAML.** `_yaml_scalar()` renders Python primitives as valid YAML scalars using `json.dumps()` for strings that need quoting (JSON string literals are valid YAML 1.1). No PyYAML dependency.
 

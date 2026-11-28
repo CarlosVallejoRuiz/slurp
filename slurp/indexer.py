@@ -1002,6 +1002,9 @@ _TS_COMPONENT_WRAPPERS = frozenset({"memo", "forwardRef"})
 # function's), and the module a lazily loaded component comes from.
 _TS_WRAPPED = "_ts_wrapped"
 _TS_PENDING_MODULE = "_ts_pending_module"
+# A JSX element named in upper case is a component; lower case is an intrinsic
+# element (<div>), never a project symbol.
+_TS_COMPONENT_NAME = re.compile(r"[A-Z][\w$]*")
 
 
 def _ts_import_labels(records: list[dict]) -> dict[str, str]:
@@ -1337,6 +1340,12 @@ class _TSCallVisitor(_BaseVisitor):
         self.imports = imports or {}
         # Import node id -> module, to tell React's memo/forwardRef/lazy apart.
         self._labels = _ts_import_labels(records or [])
+        # `const X = lazy(() => import("./x"))`: local -> (module path, symbol).
+        self.lazy: dict[str, tuple[str, str]] = {}
+        # JSX usages, kept apart so they follow the calls edges: one edge per pair,
+        # and the first emitted wins (contains, then calls, then renders).
+        self.render_edges: list[dict] = []
+        self._render_seen: set[tuple] = set()
         self.bases: dict[str, list[str]] = {}
         self.module_id = file_id
         self._kinds: list[str] = ["module"]
@@ -1501,6 +1510,14 @@ class _TSCallVisitor(_BaseVisitor):
                 self._pop()
                 self._locals.pop()
                 return
+            if wrapped is not None and wrapped[0] == "alias" and nid in self.symbols:
+                # `const Excalidraw = React.memo(ExcalidrawBase)` renders its argument.
+                self._resolve_render_name(wrapped[1], nid)
+            lazy = _ts_lazy_component(value, self.imports, self._labels, self._text)
+            if lazy is not None:
+                module = _ts_resolve_module_path(lazy[0], self.rel_path)
+                if module:
+                    self.lazy[name] = (module, lazy[1])
 
         # `const handler = () => {...}` is emitted as a function node by
         # _TSVisitor, so its body belongs to that node, not the enclosing one.
@@ -1538,6 +1555,58 @@ class _TSCallVisitor(_BaseVisitor):
         if resolved is not None:
             self._add(resolved[0], resolved[1])
         self._recurse(node)
+
+    # -- JSX (v1.5, #87) ----------------------------------------------------
+
+    def _visit_jsx_element(self, node) -> None:
+        name = node.child_by_field_name("name")
+        if name is not None:
+            if name.type == "identifier":
+                self._resolve_render_name(self._text(name), self._parent)
+            elif name.type == "member_expression":
+                # <Dialog.Root /> with `import * as Dialog`: the property is the symbol.
+                obj, prop = name.child_by_field_name("object"), name.child_by_field_name("property")
+                if obj is not None and prop is not None and obj.type == "identifier":
+                    bound = self.imports.get(self._text(obj))
+                    if bound is not None and bound[1] == "*":
+                        self._add_render(self._parent, bound[0], symbol=self._text(prop))
+            # jsx_namespace_name (<svg:rect>) and fragments: intrinsic, nothing to resolve.
+        self._recurse(node)
+
+    visit_jsx_opening_element = _visit_jsx_element
+    visit_jsx_self_closing_element = _visit_jsx_element
+
+    def _resolve_render_name(self, name: str, caller: str) -> None:
+        """An upper-case name used as a component, resolved like a call or not at all."""
+        if not _TS_COMPONENT_NAME.fullmatch(name):
+            return                      # <div>, <svg>: intrinsic elements
+        local = self._lookup_name(name)
+        if local is not None:
+            if local != caller:
+                self._add_render(caller, local)
+            return
+        bound = self.imports.get(name)
+        if bound is not None:
+            if bound[1] != "*":
+                self._add_render(caller, bound[0], symbol=bound[1])
+            return
+        lazy = self.lazy.get(name)
+        if lazy is not None:
+            self._add_render(caller, self.module_id, module=lazy[0],
+                             symbol=name if lazy[1] == "default" else lazy[1])
+
+    def _add_render(self, caller: str, target: str, symbol: str | None = None,
+                    module: str | None = None) -> None:
+        key = (caller, target, symbol, module)
+        if key in self._render_seen:
+            return
+        self._render_seen.add(key)
+        edge = {"source": caller, "target": target, "relation": "renders"}
+        if symbol is not None:
+            edge[_PENDING_SYMBOL] = symbol
+        if module is not None:
+            edge[_TS_PENDING_MODULE] = module
+        self.render_edges.append(edge)
 
     def visit_new_expression(self, node) -> None:
         target = self._class_from_new(node)
@@ -1785,6 +1854,7 @@ def _ts_regex_call_edges(
     # than threaded through _index_typescript_regex, whose two-value signature
     # several callers already depend on.
     bindings: dict[str, tuple[str, str]] = {}
+    modules: dict[str, str] = {}    # local binding -> module specifier
     for match in _TS_IMPORT_CLAUSE_RE.finditer(source):
         if match.group(1):          # `import type ...` erases at compile time
             continue
@@ -1795,6 +1865,7 @@ def _ts_regex_call_edges(
             local: (f"{file_id}.import_{safe}", exported)
             for local, exported in clause_bindings.items()
         })
+        modules.update({local: module_path for local in clause_bindings})
 
     clean = _ts_blank_noise(source)
 
@@ -1909,7 +1980,100 @@ def _ts_regex_call_edges(
             # `import * as db` + `db.f()`: the property names the symbol.
             _add(enclosing[0], imported[0], prop)
 
+    edges.extend(_ts_regex_render_edges(source, clean, nodes, file_id, symbols, bindings,
+                                        modules, _enclosing))
     return edges
+
+
+# `<Name` or `<Ns.Name` where a JSX element can open: not after an identifier, `.`,
+# `)` or `]` (generic arguments, comparisons on expressions), and followed by what
+# can follow an element name.
+_TS_JSX_OPEN_RE = re.compile(
+    r"(?<![\w$.\])])<([A-Za-z_$][\w$]*)(?:\.([A-Za-z_$][\w$]*))?(?=[\s/>])"
+)
+_TS_LAZY_RE = re.compile(
+    r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:([A-Za-z_$][\w$]*)\s*\.\s*)?"
+    r"(lazy|dynamic)\s*\(\s*\(\s*\)\s*=>\s*import\s*\(\s*(['\"])([^'\"]+)\4\s*\)"
+    r"(?:\s*\.then\s*\(\s*\(?\s*([A-Za-z_$][\w$]*)\s*\)?\s*=>\s*\6\s*\.\s*"
+    r"([A-Za-z_$][\w$]*)\s*\))?"
+)
+_TS_MEMO_ALIAS_RE = re.compile(
+    r"(?m)^[ \t]*(?:export\s+)?(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*"
+    r"(?:[A-Za-z_$][\w$]*\s*\.\s*)?memo\s*\(\s*([A-Za-z_$][\w$]*)\s*[,)]"
+)
+
+
+def _ts_regex_render_edges(source: str, clean: str, nodes: list[dict], file_id: str,
+                           symbols: dict[str, str], bindings: dict[str, tuple[str, str]],
+                           modules: dict[str, str], enclosing) -> list[dict]:
+    """`renders` edges for the regex branch: the tree-sitter rules, on the same tables
+    and bodies as the regex calls (see _TSCallVisitor._resolve_render_name)."""
+    rel = Path(str(nodes[0].get("source_file", ""))) if nodes else Path(file_id)
+    lazy: dict[str, tuple[str, str]] = {}
+    for m in _TS_LAZY_RE.finditer(source):
+        local, owner, loader, _q, spec, _p, prop = m.groups()
+        if loader == "lazy":
+            ok = (owner is not None and modules.get(owner) == "react"
+                  and bindings[owner][1] in ("default", "*")) or \
+                 (owner is None and modules.get("lazy") == "react" and bindings["lazy"][1] == "lazy")
+        else:
+            ok = owner is None and modules.get("dynamic") == "next/dynamic" and \
+                bindings["dynamic"][1] == "default"
+        module = _ts_resolve_module_path(spec, rel) if ok else None
+        if module:
+            lazy[local] = (module, prop or "default")
+
+    out: list[dict] = []
+    seen: set[tuple] = set()
+
+    def render(caller: str, target: str, symbol: str | None = None,
+               module: str | None = None) -> None:
+        key = (caller, target, symbol, module)
+        if key in seen:
+            return
+        seen.add(key)
+        edge = {"source": caller, "target": target, "relation": "renders"}
+        if symbol is not None:
+            edge[_PENDING_SYMBOL] = symbol
+        if module is not None:
+            edge[_TS_PENDING_MODULE] = module
+        out.append(edge)
+
+    def by_name(name: str, caller: str) -> None:
+        if not _TS_COMPONENT_NAME.fullmatch(name):
+            return
+        local = f"{file_id}.{name}"
+        if symbols.get(local) in ("function", "class"):
+            if local != caller:
+                render(caller, local)
+            return
+        bound = bindings.get(name)
+        if bound is not None:
+            if bound[1] != "*":
+                render(caller, bound[0], symbol=bound[1])
+            return
+        if name in lazy:
+            module, symbol = lazy[name]
+            render(caller, file_id, symbol=name if symbol == "default" else symbol, module=module)
+
+    # `const Excalidraw = React.memo(ExcalidrawBase)`: the node renders its argument.
+    for m in _TS_MEMO_ALIAS_RE.finditer(clean):
+        node_id = f"{file_id}.{m.group(1)}"
+        if symbols.get(node_id) == "function":
+            by_name(m.group(2), node_id)
+
+    for m in _TS_JSX_OPEN_RE.finditer(clean):
+        where = enclosing(m.start())
+        if where is None:
+            continue        # outside every body the regex delimits: a gap, never a guess
+        head, member = m.group(1), m.group(2)
+        if member is None:
+            by_name(head, where[0])
+            continue
+        bound = bindings.get(head)
+        if bound is not None and bound[1] == "*":
+            render(where[0], bound[0], symbol=member)
+    return out
 
 def _parse_ts_tree(source_bytes: bytes, is_tsx: bool = False):
     """Parse TypeScript source with tree-sitter.
@@ -1977,7 +2141,7 @@ def index_typescript(path: Path, root: Path | None = None) -> tuple[list[dict], 
             calls.visit(tree.root_node)
             known = {fid} | {n["id"] for n in visitor.nodes}
             call_edges = [
-                e for e in calls.edges
+                e for e in calls.edges + calls.render_edges
                 if e["source"] in known and e["target"] in known
             ]
             return [module_node] + visitor.nodes, visitor.edges + call_edges
@@ -6675,7 +6839,9 @@ def _resolve_cross_file_calls(
 
     for edge in edges:
         if edge.get("relation") != "calls" or edge.get("target") not in import_ids:
-            resolved.append({k: v for k, v in edge.items() if k != _PENDING_SYMBOL})
+            # Not ours: a TypeScript `renders` edge keeps its pending key for the
+            # TS resolver (_assemble_graph drops every private key at the end).
+            resolved.append(edge)
             continue
         if edge["target"] not in python_imports:
             # A TypeScript pending edge. Leave it, pending key and all, for the
@@ -7325,8 +7491,15 @@ def _resolve_ts_cross_file_calls(
         if edge.get("relation") == "calls" and edge.get("target") not in import_ids:
             seen_calls.add((edge["source"], edge["target"]))
 
+    # JSX usages (v1.5): resolved after every call, so a pair that is also a call
+    # keeps `calls` (one edge per pair, docs/design/jsx-v1.5.md).
+    pending_renders: list[dict] = []
     for edge in edges:
-        clean = {k: v for k, v in edge.items() if k != _PENDING_SYMBOL}
+        if edge.get("relation") == "renders" and (
+                edge.get("target") in import_ids or _TS_PENDING_MODULE in edge):
+            pending_renders.append(edge)
+            continue
+        clean = {k: v for k, v in edge.items() if k not in (_PENDING_SYMBOL, _TS_PENDING_MODULE)}
         if edge.get("relation") != "calls" or edge.get("target") not in import_ids:
             resolved.append(clean)
             continue
@@ -7361,6 +7534,26 @@ def _resolve_ts_cross_file_calls(
         resolved.append(
             {"source": edge["source"], "target": target, "relation": "calls"}
         )
+
+    taken = {(e["source"], e["target"]) for e in resolved}
+    for edge in pending_renders:
+        symbol = edge.get(_PENDING_SYMBOL) or ""
+        module = edge.get(_TS_PENDING_MODULE)
+        if module is None:
+            node = imports.get(edge["target"])
+            if node is None:
+                continue                    # external package or type-only import
+            module = node[_TS_SOURCE_MODULE]
+            if symbol == "default":
+                candidates = node.get(_TS_IMPORTED_SYMBOLS) or []
+                symbol = candidates[0] if len(candidates) == 1 else ""
+        if not symbol or symbol == "*":
+            continue
+        target = _resolve_ts_symbol(module, symbol, ts_symbol_index, kinds)
+        if target is None or target == edge["source"] or (edge["source"], target) in taken:
+            continue
+        taken.add((edge["source"], target))
+        resolved.append({"source": edge["source"], "target": target, "relation": "renders"})
 
     return resolved
 
@@ -7627,7 +7820,7 @@ def _assemble_graph(
             # Two calls into the same module alias (`m.f()` and `m.g()`) share a
             # target import node, so the pending symbol is part of the identity
             # until cross-file resolution separates them.
-            key = (src, tgt, e.get(_PENDING_SYMBOL) or "")
+            key = (src, tgt, e.get(_PENDING_SYMBOL) or "", e.get(_TS_PENDING_MODULE) or "")
             if key not in seen_edges:
                 seen_edges.add(key)
                 filtered_edges.append(e)

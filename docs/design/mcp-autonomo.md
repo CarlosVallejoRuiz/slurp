@@ -527,7 +527,7 @@ instrucciones pasan a tener 1.260 caracteres. `alwaysLoad` sigue solo en `slurp_
 **slurp_query** (lleva `alwaysLoad`)
 
 ```
-Find where something lives in this codebase. Returns the functions, classes and modules most relevant to a plain-language description, with their files and the call/import relations between them, trimmed to a token budget. Call it first when starting a task or when you don't know which files are involved — it is cheaper than grepping and reading files speculatively. Describe behaviour ('where uploaded stats files are validated'), not a bare identifier: for one known symbol use slurp_explain; for exact text use grep. The default budget, 4000 tokens, answers architecture and orientation questions; to pin down the specific function to change in a large project, raise it to 16000–32000. Tests and import nodes are left out unless include_tests / include_imports. Reflects the current working tree, uncommitted edits included.
+Find where something lives in this codebase. Returns the functions, classes and modules most relevant to a plain-language description, with their files and the call, render (JSX) and import relations between them, trimmed to a token budget. Call it first when starting a task or when you don't know which files are involved — it is cheaper than grepping and reading files speculatively. Describe behaviour ('where uploaded stats files are validated'), not a bare identifier: for one known symbol use slurp_explain; for exact text use grep. The default budget, 4000 tokens, answers architecture and orientation questions; to pin down the specific function to change in a large project, raise it to 16000–32000. Tests and import nodes are left out unless include_tests / include_imports. Reflects the current working tree, uncommitted edits included.
 ```
 
 Parámetros:
@@ -556,7 +556,7 @@ Variante para graphify: la última frase pasa a ser
 **slurp_impact**
 
 ```
-Blast radius of editing a file, before you edit it. For each definition in the file: callers in other files (direct and transitive), affected files, risk level; plus which definitions only tests call and which nothing calls. Call it before modifying, deleting, renaming or changing the signature of code in a file. Pass the path relative to the project root; a unique suffix such as 'auth/session.ts' works. Risk is UNKNOWN, not LOW, for languages without a call graph — don't read that as safe.
+Blast radius of editing a file, before you edit it. For each definition in the file: callers in other files, the components that render it included (direct and transitive), affected files, risk level; plus which definitions only tests call and which nothing calls. Call it before modifying, deleting, renaming or changing the signature of code in a file. Pass the path relative to the project root; a unique suffix such as 'auth/session.ts' works. Risk is UNKNOWN, not LOW, for languages without a call graph — don't read that as safe.
 ```
 
 Parámetros:
@@ -566,7 +566,7 @@ Parámetros:
 **slurp_explain**
 
 ```
-Explain one function, class or module by name: the role it plays, who calls it (production callers and tests counted apart), what it calls, and how risky changing it is. Call it once you know which symbol you will change, or when a name from slurp_query needs context. Accepts a plain name ('createAdminClient') or a dotted id. An unknown name falls back to the closest match — check the name in the answer. Structural by default, no API cost; no_llm=false adds prose only if the user configured an LLM provider.
+Explain one function, class or module by name: the role it plays, who calls or renders it (production callers and tests counted apart), what it calls, and how risky changing it is. Call it once you know which symbol you will change, or when a name from slurp_query needs context. Accepts a plain name ('createAdminClient') or a dotted id. An unknown name falls back to the closest match — check the name in the answer. Structural by default, no API cost; no_llm=false adds prose only if the user configured an LLM provider.
 ```
 
 Parámetros:
