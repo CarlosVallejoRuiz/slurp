@@ -110,3 +110,11 @@ def test_every_module_imports_without_the_llm_packages():
                          cwd=_REPO, check=False)
     assert res.returncode == 0, res.stderr
 
+
+_WEBSITE = "https://imjuank.dev/slurp-web/"
+
+
+def test_the_readme_links_the_website_at_the_top():
+    top = (_REPO / "README.md").read_text(encoding="utf-8").splitlines()[:16]
+    assert any(f"]({_WEBSITE})" in line for line in top)
+

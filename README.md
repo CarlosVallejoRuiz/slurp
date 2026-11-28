@@ -11,6 +11,8 @@
 
 > *graphify builds the bowl. slurp serves exactly the noodles your LLM needs.*
 
+**Website:** [imjuank.dev/slurp-web](https://imjuank.dev/slurp-web/)
+
 A knowledge graph is a bowl of ramen — thousands of nodes tangled together. Your LLM doesn't need the whole bowl. Slurp scores every node against your query, then greedily selects the highest-relevance subgraph that fits within your token budget — and tells you exactly what it picked and why. Works standalone or as a companion to graphify.
 
 ---
