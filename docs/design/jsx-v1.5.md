@@ -4,8 +4,10 @@
 
 - **Propuesta del 2026-11-28, pendiente de aprobación.** No se ha cambiado slurp: todo lo medido
   sale de un prototipo fuera del paquete, en `docs/design/jsx-v1.5/`.
-- **El criterio del banco lo fijó el autor antes de medir** (sección 5). Este documento se
-  registra antes de ejecutar el banco; los resultados irán en `jsx-v1.5/resultados/`.
+- **El criterio del banco lo fijó el autor antes de medir** (sección 5); este documento se
+  registró antes de ejecutar el banco (`a6c9be6`).
+- **Resultado: W1 y W2 cumplen el criterio** (sección 6 y `jsx-v1.5/resultados/banco.md`). Faltan
+  dos decisiones del autor: la relación (`renders` o `calls`) y si entra W2 (sección 7).
 
 ## El problema
 
@@ -139,7 +141,17 @@ excalidraw 74, todas iguales.
 La reconstrucción de la parte TS que usa W2 reproduce exactamente el grafo guardado sin la regla
 (nodos y aristas, atributos incluidos) en PrismaStats, excalidraw, hono y prometheus.
 
-Las cifras de W2 en estos grafos y el banco: pendientes (sección 5).
+Con W2 (los componentes de `memo`/`forwardRef` como nodos):
+
+| | PrismaStats | excalidraw |
+|---|---|---|
+| Nodos nuevos | 56 | 48 |
+| Aristas `renders` | 337 | 501 |
+| Bandas (LOW / MEDIUM / HIGH) | 540 / 40 / 12, de 592 nodos | 787 / 95 / 20, de 902 |
+| Nodos nuevos por banda | 22 / 25 / 9 | 40 / 4 / 4 |
+| Los más dependidos | `Button` 32, `Badge` 17, `Input` 13, `Select*` 10 | `IconButton` 30, `Island` 11 |
+
+Sin W2, `Button` no existe como nodo: el componente con más usos de PrismaStats no tiene radio.
 
 ## 4. Qué proyectos del banco pueden cambiar
 
@@ -161,3 +173,38 @@ construcción; se comprueba que ningún grafo padre suyo tiene ficheros `.tsx`/`
   de `explain`, `impact`, `diff` y la sugerencia de riesgo, pero la consulta las ignora: ni paseo
   del PPR, ni impulso de vecino, ni aristas elegibles, ni salida de `slurp_query`. Entonces el
   recall es el de sin JSX por construcción.
+
+## 6. Resultado del banco (2026-11-28)
+
+Detalle en `jsx-v1.5/resultados/banco.md`. Recall a 4000 en markdown:
+
+| | W0 | W1 | W2 |
+|---|---|---|---|
+| Validación, media de 6 | 0,6741 | 0,6754 (+0,0013) | 0,6764 (+0,0024) |
+| Peor proyecto (de los 14) | — | −0,006 (prometheus) | 0,000 |
+| Derivación, media de 7 | 0,7249 | 0,7368 (+0,0119) | 0,7368 (+0,0119) |
+| PrismaStats (banco) | 0,527 | 0,610 | 0,610 |
+| PrismaStats etiquetado (15) | 0,967 | 0,967 | 0,933 (pierde `arch-02`) |
+
+- **Las dos variantes cumplen el criterio**, también en su lectura estricta: no hace falta separar
+  riesgo y orden.
+- W0 reproduce pregunta a pregunta las cifras de la v1.4 (0 discrepancias en 428 preguntas).
+- Lo que W2 pierde en el juego etiquetado es `arch-02`, una pregunta sin coincidencias léxicas con
+  el primer relevante en el puesto 870: los nodos nuevos mueven el PageRank global. El criterio
+  de la v1.4 para los juegos etiquetados (como mucho una pregunta) se seguiría cumpliendo.
+
+## 7. Decisiones que faltan
+
+1. **La relación.** Recomiendo `renders`, contada donde cuenta `calls` (también en el paseo del
+   PPR, que es como se ha medido W1/W2). `calls` daría el mismo orden salvo por el texto de la
+   salida, y perdería la posibilidad de separar riesgo y orden más adelante.
+2. **W2: componentes de `memo`/`forwardRef` como nodos.** Recomiendo que entre: es lo que da radio a
+   los componentes más usados (`Button`, `Input`, `IconButton`), cumple el criterio del banco y
+   mejora validación algo más que W1. Su coste: 56 nodos más en PrismaStats y una pregunta
+   etiquetada frágil perdida.
+3. **Los dos arreglos de la rama regex** (sección 2): recomiendo hacerlos antes, como commit aparte,
+   porque hoy ya producen aristas `calls` mal atribuidas a quien indexa sin el extra `ts`.
+
+**Fuera de alcance** (huecos documentados): `<Obj.Miembro>` sin namespace (251 usos en excalidraw:
+compuestos con `Object.assign` o propiedades estáticas), componentes pasados como prop, fábricas
+(`createToolButton`), otros envoltorios (`styled`, `observer`…), JSX en ficheros `.js`.

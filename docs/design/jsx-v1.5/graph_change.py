@@ -75,6 +75,28 @@ def measure(project: str) -> dict:
     out["graph"] = {"nodes": before.number_of_nodes(), "edges_before": before.number_of_edges(),
                     "edges_after": after.number_of_edges(),
                     "calls_before": sum(1 for *_, r in before.edges(data="relation") if r == "calls")}
+
+    # W2: React.memo / forwardRef components as nodes, then the JSX edges on that graph.
+    import w2
+    sources = {f: (repo / f).read_text(encoding="utf-8", errors="replace")
+               for f in w2.ts_files(data)}
+    g2 = w2.rebuild_ts(data, sources, True)
+    existing2 = {(e["source"], e["target"]) for e in g2["links"]}
+    e2, c2 = jsx.resolve([w2.jsx_file_w2(sources[f], f) for f in files], g2["nodes"], existing2)
+    after2 = build_graph({**g2, "links": g2["links"] + e2})
+    nodes2 = [n for n in after2.nodes
+              if str(after2.nodes[n].get("source_file", "")).endswith((".tsx", ".jsx"))
+              and not _is_import(after2, n) and not _is_test(after2, n)]
+    new = [n for n in nodes2 if n not in before]
+    moves2 = Counter((_risk_level(before, n), _risk_level(after2, n)) for n in nodes2
+                     if n in before and _risk_level(before, n) != _risk_level(after2, n))
+    top2 = sorted(((len(_split_callers(after2, n)[0]), n) for n in nodes2), reverse=True)[:12]
+    out["w2"] = {"new_nodes": len(g2["nodes"]) - len(data["nodes"]), "jsx_edges": len(e2),
+                 "by_case": c2, "nodes": len(nodes2),
+                 "bands_after": dict(Counter(_risk_level(after2, n) for n in nodes2)),
+                 "moves_existing": {f"{a}->{b}": c for (a, b), c in moves2.items()},
+                 "bands_new_nodes": dict(Counter(_risk_level(after2, n) for n in new)),
+                 "top_after": [[n, d] for d, n in top2]}
     return out
 
 
@@ -90,3 +112,8 @@ if __name__ == "__main__":
         print(f"   bands over {b['nodes']} nodes: before {b['before']} after {b['after']} "
               f"moves {b['moves']}")
         print(f"   unresolved (ts): {ts['unresolved_by_reason']} | files {ts['files_by_branch']}")
+        w = res["w2"]
+        print(f"   W2: +{w['new_nodes']} nodes, {w['jsx_edges']} JSX edges; bands over {w['nodes']} "
+              f"nodes {w['bands_after']}; existing moved {w['moves_existing']}; new nodes "
+              f"{w['bands_new_nodes']}")
+        print("   W2 top:", [(n.rsplit('.', 1)[-1], d) for n, d in w["top_after"][:8]])
