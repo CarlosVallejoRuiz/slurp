@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast
 import os
 import re
+from collections import Counter
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
@@ -1559,8 +1560,17 @@ def _ts_regex_call_edges(
         Deduplicated `calls` edges. Only names that match a definition in this
         file resolve; everything else is skipped.
     """
+    # DECISION: the regex parser emits an arrow const declared inside a function
+    # at file level, so two `const helper` in two functions share one id and one
+    # node (the first). A call to either would point at that one: wrong for the
+    # other (PrismaStats: getRendimientoData -> the getGolesFavor of
+    # getDashboardData). An id declared twice is ambiguous, and ambiguity is
+    # silence: it is no call target, and its bodies are not its own (a call in
+    # one goes to the enclosing definition, as for any undelimited body).
+    declared = Counter(n["id"] for n in nodes if n.get("type") in ("function", "class"))
     symbols = {
-        n["id"]: n["type"] for n in nodes if n.get("type") in ("function", "class")
+        n["id"]: n["type"] for n in nodes
+        if n.get("type") in ("function", "class") and declared[n["id"]] == 1
     }
     if not symbols:
         return []
@@ -1586,7 +1596,7 @@ def _ts_regex_call_edges(
     # smallest enclosing definition.
     spans: list[tuple[int, int, str, str | None]] = []
     for node in nodes:
-        if node.get("type") not in ("function", "class"):
+        if node.get("type") not in ("function", "class") or node["id"] not in symbols:
             continue
         nid = node["id"]
         owner = nid.rsplit(".", 1)[0]

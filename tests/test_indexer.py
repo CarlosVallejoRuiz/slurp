@@ -2961,6 +2961,23 @@ class TestTSCallEdges:
         assert calls == {("nosemi.a", "nosemi.wrap"), ("nosemi.b", "nosemi.unwrap")}
 
     @pytest.mark.parametrize("tree_sitter", [True, False], ids=["treesitter", "regex"])
+    def test_a_name_declared_twice_in_a_file_is_never_a_call_target(
+        self, tmp_path, monkeypatch, tree_sitter
+    ):
+        # The regex branch emits nested arrow consts at file level, so two
+        # `const helper` in two functions became one node, and `b` "called"
+        # the copy inside `a` (PrismaStats: getGolesFavor). Ambiguity: silence.
+        if tree_sitter and not _TREE_SITTER_AVAILABLE:
+            pytest.skip("requires the 'ts' extra")
+        source = ("export function a() {\n  const helper = (x) => x;\n  return helper(1);\n}\n"
+                  "export function b() {\n  const helper = (y) => y * 2;\n  return helper(2);\n}\n")
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter, monkeypatch=monkeypatch,
+                            name="twice.ts")
+        # tree-sitter nests each copy (a.helper, b.helper); the regex had one merged
+        # file-level node, so whichever copy it stands for, one edge was false.
+        assert not {edge for edge in calls if edge[1] == "twice.helper"}
+
+    @pytest.mark.parametrize("tree_sitter", [True, False], ids=["treesitter", "regex"])
     def test_this_method_call(self, tmp_path, monkeypatch, tree_sitter):
         if tree_sitter and not _TREE_SITTER_AVAILABLE:
             pytest.skip("requires the 'ts' extra")
