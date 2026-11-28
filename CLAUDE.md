@@ -811,18 +811,25 @@ Señal de que ha pasado: la suite reporta tests *skipped* donde antes había 0, 
 `uv run slurp` ejecuta una versión distinta de la del repo.
 
 **Publicación en PyPI** (v1.1.0, #63): `.github/workflows/publish.yml`, trusted
-publishing por OIDC, sin secrets. Se dispara con un push de tag `v*` o a mano
-(`workflow_dispatch`) con un tag existente: el fichero del workflow sale de la rama
-elegida (main) y el código del tag, así se publica un tag anterior al workflow
-(v1.0.7). Job `build`: comprueba que tag, `pyproject.toml` y `__init__.py` coinciden,
-`uv sync --locked --all-extras`, la suite, `uv build`, `dist/` como artefacto. Job
-`publish`: `environment: pypi`, `id-token: write`, `pypa/gh-action-pypi-publish`.
-Acciones fijadas por SHA con la versión en comentario; `tests/test_publish_workflow.py`
-lo vigila (pins, OIDC solo en publish, sin secrets, sin `${{ }}` dentro de un `run:`).
-El trusted publisher de PyPI aún no está configurado: 1.0.7, 1.1.0, 1.1.1, 1.2.0 y 1.2.1 se suben
-a mano con `uv publish` (el autor, con su clave), y el job `publish` falla con
-`invalid-publisher` (el `build` pasa en Linux y sus ficheros son idénticos a los locales). Mientras tanto, cada release se construye en `dist-X.Y.Z/` (ignorado) **desde un
-clon limpio del tag**, nunca desde el árbol de trabajo, y se sube con `uv publish` de esos
+publishing por OIDC, sin secrets. **Un push de tag `v*` solo construye** (desde 2026-11-28):
+el job `build` comprueba que tag, `pyproject.toml` y `__init__.py` coinciden,
+`uv sync --locked --all-extras`, la suite, `uv build`, la guarda del sdist y `dist/` como
+artefacto. El job `publish` lleva `if: github.event_name == 'workflow_dispatch'`: con un tag
+queda saltado, no arranca, no entra en el entorno `pypi` y no crea ningún despliegue. **Solo
+se publica a mano** ("Run workflow", `workflow_dispatch`, con un tag existente): el fichero
+del workflow sale de la rama elegida (main) y el código del tag, así se publica un tag
+anterior al workflow (v1.0.7). Job `publish`: `environment: pypi`, `id-token: write`,
+`pypa/gh-action-pypi-publish`. Acciones fijadas por SHA con la versión en comentario;
+`tests/test_publish_workflow.py` lo vigila (pins, OIDC solo en publish, `environment:` solo en
+publish, publish solo con `workflow_dispatch`, build sin `if`, sin secrets, sin `${{ }}` dentro
+de un `run:`).
+El trusted publisher de PyPI aún no está configurado: de la 1.0.7 a la 1.3.0 se subieron a mano
+con `uv publish` (el autor, con su clave), y la 1.4.0 se sube igual. Hasta la 1.4.0 el job `publish`
+corría con cada tag y fallaba con `invalid-publisher`, dejando un despliegue fallido en `pypi`
+y una cruz roja en el commit (el `build` pasaba en Linux y sus ficheros eran idénticos a los
+locales); por eso pasó a ejecutarse solo a mano. Cuando el publisher esté configurado: "Run
+workflow" con el tag. Mientras tanto, cada release se construye en `dist-X.Y.Z/` (ignorado)
+**desde un clon limpio del tag**, nunca desde el árbol de trabajo, y se sube con `uv publish` de esos
 dos ficheros. Los ficheros de la 1.0.7 en `dist/` no se tocan.
 
 **El sdist es una lista blanca** (v1.1.1): `only-include = ["slurp", "README.md",
@@ -845,7 +852,7 @@ No va en el paquete; `tests/test_latency_script.py` lo mantiene ejecutable.
 ```
 ~/Desktop/Slurp/slurp/         ← raíz del repo git — working directory
 ├── CLAUDE.md                  ← este fichero
-├── .github/workflows/publish.yml ← publicación en PyPI por OIDC
+├── .github/workflows/publish.yml ← build de cada tag; publicación en PyPI por OIDC, solo a mano
 ├── scripts/latency.py         ← reproduce las cifras de README › Performance (no va en el paquete)
 ├── scripts/retrieval.py       ← recall/MRR por grupo (ajuste/validación), formato y presupuesto
 ├── scripts/readme_examples.py ← reejecuta las salidas de ejemplo de README y USAGE (no va en el paquete)

@@ -60,6 +60,19 @@ def test_runs_on_release_tags_and_on_demand_for_an_existing_tag():
     assert re.search(r"tag:\s*\n(\s+\w.*\n)*?\s+required: true", dispatch)
 
 
+def test_a_tag_push_builds_but_never_publishes_or_deploys():
+    # Until PyPI's trusted publisher is configured, publishing on every tag
+    # failed with invalid-publisher and left a failed deployment in `pypi`
+    # (v1.1.0 to v1.4.0). A tag push runs build only; publish runs by hand.
+    publish, build = _job("publish"), _job("build")
+    job_level_if = re.compile(r"^    if:\s*(.+?)\s*$", re.M)
+    assert job_level_if.findall(publish) == ["github.event_name == 'workflow_dispatch'"]
+    assert job_level_if.findall(build) == []
+    # Only a job in an environment creates a deployment, and only publish has one.
+    assert _text().count("environment:") == 1
+    assert "environment:" in publish
+
+
 def test_only_the_publish_job_can_mint_an_oidc_token():
     assert _text().count("id-token: write") == 1
     publish = _job("publish")

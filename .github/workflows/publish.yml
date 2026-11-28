@@ -3,11 +3,19 @@
 # environment of CarlosVallejoRuiz/slurp.
 #
 # Two ways in:
-# - pushing a tag v* publishes that tag;
-# - "Run workflow" (workflow_dispatch) publishes an existing tag given as input.
-#   The workflow file comes from the branch picked in "Use workflow from"
-#   (main), the code from the tag, so a tag made before this file existed
-#   (v1.0.7) can still be published.
+# - pushing a tag v* builds and tests that tag and keeps dist/ as an artifact.
+#   It does not publish: the publish job is skipped, so it never starts, never
+#   enters the `pypi` environment and creates no deployment;
+# - "Run workflow" (workflow_dispatch) builds an existing tag given as input and
+#   publishes it. The workflow file comes from the branch picked in "Use
+#   workflow from" (main), the code from the tag, so a tag made before this file
+#   existed (v1.0.7) can still be published.
+#
+# DECISION: publishing only on demand. The trusted publisher is not configured
+# on PyPI yet and releases are uploaded by hand (uv publish); publishing on
+# every tag failed with invalid-publisher (v1.1.0 to v1.4.0), leaving a failed
+# deployment in `pypi` and a red cross on the release commit each time. Once
+# the publisher is configured, run this workflow by hand with the tag.
 #
 # Actions are pinned to a commit SHA; the comment names the release it is.
 
@@ -111,6 +119,8 @@ jobs:
   publish:
     name: Publish ${{ inputs.tag || github.ref_name }} to PyPI
     needs: build
+    # Only by hand: a tag push skips this job (see DECISION above).
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     environment:
       name: pypi
