@@ -118,3 +118,6 @@ def test_the_readme_links_the_website_at_the_top():
     top = (_REPO / "README.md").read_text(encoding="utf-8").splitlines()[:16]
     assert any(f"]({_WEBSITE})" in line for line in top)
 
+
+def test_the_homepage_is_the_website_with_its_trailing_slash():
+    assert _project()["urls"]["Homepage"] == _WEBSITE

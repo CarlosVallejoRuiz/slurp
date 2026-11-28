@@ -91,7 +91,7 @@ all-languages = [
 ]
 
 [project.urls]
-Homepage = "https://imjuank.dev/slurp-web"
+Homepage = "https://imjuank.dev/slurp-web/"
 Repository = "https://github.com/CarlosVallejoRuiz/slurp"
 Documentation = "https://github.com/CarlosVallejoRuiz/slurp/blob/main/USAGE.md"
 Issues = "https://github.com/CarlosVallejoRuiz/slurp/issues"
