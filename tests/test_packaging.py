@@ -72,3 +72,41 @@ def test_the_release_build_refuses_an_sdist_with_anything_else():
     text = _WORKFLOW.read_text(encoding="utf-8")
     assert "tar -tzf" in text and "unexpected file in the sdist" in text
     assert "|LICENSE|" in text  # the guard lets the license through
+
+
+# ---------------------------------------------------------------------------
+# Dependencies (v1.5, #23 and #44)
+# ---------------------------------------------------------------------------
+
+def _requirement_names(specs: list[str]) -> set[str]:
+    import re
+    return {re.split(r"[<>=!~;\[ ]", s, maxsplit=1)[0].strip().lower() for s in specs}
+
+
+def test_anthropic_is_an_extra_like_openai_not_a_dependency():
+    # Only `slurp explain` with the anthropic provider needs it; everything else
+    # (index, query, structural explain, impact, the MCP server) runs without.
+    project = _project()
+    assert "anthropic" not in _requirement_names(project["dependencies"])
+    extras = project["optional-dependencies"]
+    assert _requirement_names(extras["llm-anthropic"]) == {"anthropic"}
+    assert _requirement_names(extras["llm-openai"]) == {"openai"}
+
+
+def test_pathspec_is_gone_nothing_imports_it():
+    assert "pathspec" not in _requirement_names(_project()["dependencies"])
+    for path in (_REPO / "slurp").rglob("*.py"):
+        assert "pathspec" not in path.read_text(encoding="utf-8"), path
+
+
+def test_every_module_imports_without_the_llm_packages():
+    # A clean install has neither anthropic nor openai: no module may import
+    # them at load time (they are imported where a provider is called).
+    import sys
+    modules = sorted(p.stem for p in (_REPO / "slurp").glob("*.py") if p.stem != "__main__")
+    code = ("import sys; sys.modules['anthropic'] = None; sys.modules['openai'] = None\n"
+            + "".join(f"import slurp.{m}\n" for m in modules))
+    res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                         cwd=_REPO, check=False)
+    assert res.returncode == 0, res.stderr
+

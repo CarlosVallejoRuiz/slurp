@@ -779,8 +779,9 @@ def _call_anthropic(prompt: str, config: LLMConfig) -> str:
         import anthropic
     except ImportError:
         raise SlurpExplainError(
-            "The anthropic provider requires the anthropic package.\n"
-            "Install it with: pip install anthropic"
+            "The anthropic provider needs the anthropic package, which is the "
+            "llm-anthropic extra since slurp 1.5.\n"
+            'Install it with: pip install "slurp-graph[llm-anthropic]"'
         ) from None
     _require(
         bool(config.api_key),
@@ -824,8 +825,9 @@ def _call_openai(prompt: str, config: LLMConfig) -> str:
         import openai
     except ImportError:
         raise SlurpExplainError(
-            "The openai provider requires the openai package.\n"
-            "Install it with: pip install openai"
+            "The openai provider needs the openai package, which is the "
+            "llm-openai extra.\n"
+            'Install it with: pip install "slurp-graph[llm-openai]"'
         ) from None
     _require(
         bool(config.api_key),

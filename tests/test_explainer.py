@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import stat
 from pathlib import Path
 
@@ -407,7 +408,9 @@ class TestCallLLM:
             return real(name, *args, **kwargs)
 
         monkeypatch.setattr(builtins, "__import__", blocked)
-        with pytest.raises(SlurpExplainError, match="pip install anthropic"):
+        # anthropic is the llm-anthropic extra since v1.5, as openai is llm-openai.
+        with pytest.raises(SlurpExplainError,
+                           match=re.escape('pip install "slurp-graph[llm-anthropic]"')):
             _call_llm("hi", LLMConfig(provider="anthropic", api_key="k"))
 
     def test_missing_openai_sdk_message(self, monkeypatch):
@@ -420,7 +423,8 @@ class TestCallLLM:
             return real(name, *args, **kwargs)
 
         monkeypatch.setattr(builtins, "__import__", blocked)
-        with pytest.raises(SlurpExplainError, match="pip install openai"):
+        with pytest.raises(SlurpExplainError,
+                           match=re.escape('pip install "slurp-graph[llm-openai]"')):
             _call_llm("hi", LLMConfig(provider="openai", api_key="k"))
 
     def test_missing_anthropic_key_message(self, monkeypatch):

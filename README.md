@@ -201,6 +201,7 @@ client to know. Responses that triggered a reload carry `"graph_reloaded": true`
 | Python project (adds to `pyproject.toml`) | `uv add slurp-graph` |
 | Better TypeScript/TSX indexing | `pip install "slurp-graph[ts]"` |
 | `slurp explain` with OpenAI models | `pip install "slurp-graph[llm-openai]"` |
+| `slurp explain` with Anthropic models | `pip install "slurp-graph[llm-anthropic]"` |
 
 **Requires Python 3.12+.** Don't have Python? [Install uv](https://docs.astral.sh/uv/) — it bundles a Python runtime and is the fastest path.
 
@@ -770,7 +771,7 @@ one exactly and you get it.
 
 | Provider | Detected via | Default model | Notes |
 |---|---|---|---|
-| `anthropic` | `ANTHROPIC_API_KEY` | `claude-sonnet-5` | Needs `pip install anthropic`. |
+| `anthropic` | `ANTHROPIC_API_KEY` | `claude-sonnet-5` | Needs the `llm-anthropic` extra (since v1.5): `pip install "slurp-graph[llm-anthropic]"`. |
 | `openai` | `OPENAI_API_KEY` | `gpt-4o-mini` | Needs the `llm-openai` extra: `pip install "slurp-graph[llm-openai]"`. |
 | `ollama` | server answering on `localhost:11434` | `llama3.2` | Fully local, no API key. |
 | `openai-compatible` | `SLURP_LLM_ENDPOINT` (+ optional `SLURP_LLM_API_KEY`) | `local-model` | LM Studio, Together, Groq, vLLM, anything speaking the OpenAI API. |

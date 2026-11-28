@@ -419,7 +419,7 @@ class TestCosineSimHelper:
 class TestEmbedOpenAIImport:
     def test_raises_import_error_if_not_installed(self):
         with patch.dict(sys.modules, {"openai": None}):
-            with pytest.raises(ImportError, match="pip install openai"):
+            with pytest.raises(ImportError, match=r'pip install "slurp-graph\[llm-openai\]"'):
                 _embed_openai(["hello"])
 
     def test_error_message_mentions_openai(self):

@@ -31,9 +31,11 @@ Slurp es una herramienta CLI open source de **token-budget-aware graph navigatio
 - **tiktoken** para conteo de tokens preciso (cl100k_base por defecto)
 - **rich** para CLI output con tablas, paneles y colores
 - **click** para CLI interface
-- **pathspec** para ignore patterns en `.slurpignore`
 - **watchdog** ya no: desde v1.3 `--watch` sondea el manifiesto (sin dependencia)
-- **anthropic** SDK (opcional en v1, para embeddings en v4)
+- **anthropic** y **openai**: extras `llm-anthropic` y `llm-openai` (solo `slurp explain` con
+  esos proveedores, y `--backend openai`), importados donde se usan; sin ellos todo lo demás
+  funciona. `anthropic` fue dependencia base hasta la 1.4 (#23); `pathspec` lo fue sin que nada
+  la importara (#44), y salió en la 1.5.
 - **tree-sitter** + gramáticas por lenguaje — **extras opcionales**, nunca requeridos
 - Tests con **pytest**, linting con **ruff**, formatting con **black**
 

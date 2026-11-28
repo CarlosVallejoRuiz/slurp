@@ -380,8 +380,9 @@ def _embed_openai(texts: list[str]) -> list[list[float]]:
         import openai
     except ImportError:
         raise ImportError(
-            "OpenAI backend requires the openai package.\n"
-            "Install it with: pip install openai"
+            "The openai backend needs the openai package, which is the llm-openai "
+            "extra.\n"
+            'Install it with: pip install "slurp-graph[llm-openai]"'
         )
     client = openai.OpenAI()
     response = client.embeddings.create(model="text-embedding-3-small", input=texts)

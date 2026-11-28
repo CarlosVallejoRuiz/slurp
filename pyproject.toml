@@ -21,10 +21,8 @@ classifiers = [
     "Environment :: Console",
 ]
 dependencies = [
-    "anthropic>=0.106.0",
     "click>=8.4.1",
     "networkx>=3.6.1",
-    "pathspec>=1.1.1",
     "rich>=15.0.0",
     "tiktoken>=0.13.0",
 ]
@@ -73,6 +71,9 @@ cpp = [
 ]
 llm-openai = [
     "openai>=1.0.0",
+]
+llm-anthropic = [
+    "anthropic>=0.106.0",
 ]
 all-languages = [
     "tree-sitter>=0.22.0",

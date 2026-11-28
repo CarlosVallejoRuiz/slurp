@@ -740,10 +740,8 @@ name = "slurp-graph"
 version = "1.4.0"
 source = { editable = "." }
 dependencies = [
-    { name = "anthropic" },
     { name = "click" },
     { name = "networkx" },
-    { name = "pathspec" },
     { name = "rich" },
     { name = "tiktoken" },
 ]
@@ -779,6 +777,9 @@ java = [
 kotlin = [
     { name = "tree-sitter" },
     { name = "tree-sitter-kotlin" },
+]
+llm-anthropic = [
+    { name = "anthropic" },
 ]
 llm-openai = [
     { name = "openai" },
@@ -817,11 +818,10 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "anthropic", specifier = ">=0.106.0" },
+    { name = "anthropic", marker = "extra == 'llm-anthropic'", specifier = ">=0.106.0" },
     { name = "click", specifier = ">=8.4.1" },
     { name = "networkx", specifier = ">=3.6.1" },
     { name = "openai", marker = "extra == 'llm-openai'", specifier = ">=1.0.0" },
-    { name = "pathspec", specifier = ">=1.1.1" },
     { name = "rich", specifier = ">=15.0.0" },
     { name = "tiktoken", specifier = ">=0.13.0" },
     { name = "tree-sitter", marker = "extra == 'all-languages'", specifier = ">=0.22.0" },
@@ -858,7 +858,7 @@ requires-dist = [
     { name = "tree-sitter-typescript", marker = "extra == 'all-languages'", specifier = ">=0.23.0" },
     { name = "tree-sitter-typescript", marker = "extra == 'ts'", specifier = ">=0.23.0" },
 ]
-provides-extras = ["ts", "java", "rust", "csharp", "ruby", "php", "kotlin", "scala", "swift", "cpp", "llm-openai", "all-languages"]
+provides-extras = ["ts", "java", "rust", "csharp", "ruby", "php", "kotlin", "scala", "swift", "cpp", "llm-openai", "llm-anthropic", "all-languages"]
 
 [package.metadata.requires-dev]
 dev = [
