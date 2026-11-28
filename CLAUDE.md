@@ -556,6 +556,12 @@ uv sync --extra rust            # solo una
     `built_at_commit` quedan para grafos sin manifiesto (≤ 1.2), cuya reescritura ya lo
     lleva. Cierra el caso `util.ts`/`util.js` de la v1.2.1 y la limitación de
     `.slurpignore`. `TestSmartEquivalence` corre cada escenario por los dos caminos (104).
+  - **Actualizar desde la 1.4 no pide nada** (v1.5): el grafo que la 1.4 escribió lleva
+    `slurp_version` 1.4.0, así que la primera consulta por CLI o por MCP lo reindexa entero.
+    Antes de responder gana las aristas `renders` y los nodos de `memo`/`forwardRef`.
+    - Un grafo de graphify de un proyecto React no se toca.
+    - Lo fijan los tests de actualización de `tests/test_renders.py`; parchean `__version__`
+      a 1.5.0 hasta la subida de versión.
   - **Propiedad** (`graphfile.graph_kind`): con manifiesto → propio; claves exactas de ≤ 1.2
     → se adopta si el 90 % de sus `source_file` existe bajo el padre de `graphify-out/` (o el
     directorio del grafo, ampliación del diseño), con un índice completo que escribe el

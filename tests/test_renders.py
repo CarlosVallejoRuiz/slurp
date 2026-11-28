@@ -4,17 +4,25 @@ The indexer's side (which JSX becomes an edge, on both branches) lives in
 test_indexer.py: TestTSRenderEdges and TestTSComponentWrappers.
 """
 
+import io
+import json
+import os
+import time
 from pathlib import Path
 
 import networkx as nx
 import pytest
+from click.testing import CliRunner
 
 from slurp import indexer as indexer_mod
-from slurp import scorer
+from slurp import manifest, scorer
+from slurp.cli import cli
 from slurp.explainer import _risk_level, explain_node, format_explanation
 from slurp.formatter import format_subgraph
 from slurp.impact import analyze_impact
 from slurp.loader import build_graph
+from slurp.mcp import GraphState, _handle
+from slurp.refresh import META_KEY
 from slurp.viz import build_html
 
 
@@ -59,11 +67,7 @@ _BUTTON = ('import * as React from "react";\n'
            "  return <button ref={ref} {...props} />;\n});\n")
 
 
-@pytest.fixture(params=[True, False], ids=["treesitter", "regex"])
-def button_graph(request, tmp_path, monkeypatch):
-    if request.param and not indexer_mod._TREE_SITTER_AVAILABLE:
-        pytest.skip("requires the 'ts' extra")
-    monkeypatch.setattr(indexer_mod, "_TREE_SITTER_AVAILABLE", request.param)
+def _write_button_project(root: Path) -> None:
     files = {"components/ui/button.tsx": _BUTTON}
     for i in range(6):
         files[f"app/p{i}/page.tsx"] = (
@@ -73,9 +77,17 @@ def button_graph(request, tmp_path, monkeypatch):
         'import { Button } from "../components/ui/button";\n'
         "export function renderIt() { return <Button />; }\n")
     for rel, text in files.items():
-        path = tmp_path / rel
+        path = root / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
+
+
+@pytest.fixture(params=[True, False], ids=["treesitter", "regex"])
+def button_graph(request, tmp_path, monkeypatch):
+    if request.param and not indexer_mod._TREE_SITTER_AVAILABLE:
+        pytest.skip("requires the 'ts' extra")
+    monkeypatch.setattr(indexer_mod, "_TREE_SITTER_AVAILABLE", request.param)
+    _write_button_project(tmp_path)
     return build_graph(indexer_mod.index_project(tmp_path))
 
 
@@ -106,3 +118,80 @@ def test_tool_descriptions_name_the_render_relation():
     assert "render" in _QUERY_HEAD
     assert "renders it" in _EXPLAIN_TOOL_DEFINITION["description"]
     assert "render it" in _IMPACT_TOOL_DEFINITION["description"]
+
+
+# ---------------------------------------------------------------------------
+# Upgrading: a graph v1.4 wrote has no renders edge and no memo/forwardRef node
+# ---------------------------------------------------------------------------
+
+_BUTTON_ID = "components.ui.button.Button"
+
+
+def _age(root: Path, seconds: float = 60) -> None:
+    past = time.time() - seconds
+    for dirpath, dirnames, filenames in os.walk(root):
+        for name in filenames + dirnames:
+            os.utime(Path(dirpath) / name, (past, past), follow_symlinks=False)
+        os.utime(dirpath, (past, past))
+
+
+@pytest.fixture
+def v14_graph(tmp_path, monkeypatch) -> Path:
+    """graphify-out/graph.json as `slurp index` 1.4.0 wrote it, read by slurp 1.5.0."""
+    monkeypatch.setattr(manifest, "__version__", "1.5.0")   # until the release bump
+    root = tmp_path / "proj"
+    _write_button_project(root)
+    res = CliRunner().invoke(cli, ["index", str(root), "--ignore-file",
+                                   str(root / ".slurpignore")])
+    assert res.exit_code == 0, res.output
+    graph = root / "graphify-out" / "graph.json"
+    data = json.loads(graph.read_text(encoding="utf-8"))
+    data["nodes"] = [n for n in data["nodes"] if n["id"] != _BUTTON_ID]
+    data["links"] = [e for e in data["links"] if e["relation"] != "renders"
+                     and _BUTTON_ID not in (e["source"], e["target"])]
+    data["slurp"]["slurp_version"] = "1.4.0"
+    graph.write_text(json.dumps(data), encoding="utf-8")
+    _age(root)
+    return graph
+
+
+def _on_disk(graph: Path) -> dict:
+    return json.loads(graph.read_text(encoding="utf-8"))
+
+
+def _rebuilt_by_this_slurp(graph: Path) -> None:
+    data = _on_disk(graph)
+    assert data["slurp"]["slurp_version"] == "1.5.0"
+    assert _BUTTON_ID in {n["id"] for n in data["nodes"]}
+    assert sum(1 for e in data["links"] if e["relation"] == "renders") == 7
+
+
+def test_a_query_rebuilds_a_v14_graph_before_answering(v14_graph):
+    res = CliRunner().invoke(cli, ["button", "--graph", str(v14_graph), "--no-audit"])
+    assert res.exit_code == 0, res.output
+    assert "⚠" not in res.stderr
+    assert "renders" in res.stdout
+    _rebuilt_by_this_slurp(v14_graph)
+
+
+def test_the_mcp_server_rebuilds_a_v14_graph_before_answering(v14_graph):
+    state = GraphState(v14_graph)
+    msg = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+           "params": {"name": "slurp_explain", "arguments": {"node_name": "Button"}}}
+    out = io.StringIO()
+    _handle(msg, state.graph, out, session_log=False, state=state)
+    result = json.loads(out.getvalue())["result"]
+    assert result["_meta"][META_KEY]["status"] == "refreshed"
+    assert "6 production callers, 1 in tests" in result["content"][0]["text"]
+    _rebuilt_by_this_slurp(v14_graph)
+
+
+def test_a_graphify_graph_of_a_react_project_is_never_rebuilt(v14_graph):
+    data = _on_disk(v14_graph)
+    del data["slurp"], data["built_at_commit"]
+    data.update({"directed": True, "multigraph": False, "graph": {}})
+    v14_graph.write_text(json.dumps(data), encoding="utf-8")
+    before = v14_graph.read_bytes()
+    res = CliRunner().invoke(cli, ["button", "--graph", str(v14_graph), "--no-audit"])
+    assert res.exit_code == 0, res.output
+    assert v14_graph.read_bytes() == before
