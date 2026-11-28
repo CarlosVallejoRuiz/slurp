@@ -3685,6 +3685,77 @@ class TestTSCrossFileCallResolution:
         assert node[indexer_mod._TS_SOURCE_MODULE] == "lib.admin"
 
 
+class TestTSComponentWrappers:
+    """v1.5 (#87, W2): a component wrapped in React.memo / forwardRef is a node.
+
+    Until v1.4 `const Button = React.forwardRef(...)` was no node at all (only
+    arrow and function values are), so the most used components of a shadcn/ui
+    project (Button, Input, Label) had nothing a usage could point at.
+    """
+
+    BOTH = pytest.mark.parametrize("tree_sitter", [True, False], ids=["treesitter", "regex"])
+
+    def _index(self, tmp_path, source, *, tree_sitter, monkeypatch, name="button.tsx"):
+        if tree_sitter and not _TREE_SITTER_AVAILABLE:
+            pytest.skip("requires the 'ts' extra")
+        monkeypatch.setattr(indexer_mod, "_TREE_SITTER_AVAILABLE", tree_sitter)
+        f = tmp_path / name
+        f.write_text(source, encoding="utf-8")
+        nodes, edges = indexer_mod.index_typescript(f, tmp_path)
+        return ({n["id"]: n for n in nodes},
+                {(e["source"], e["target"], e["relation"]) for e in edges})
+
+    @BOTH
+    def test_react_forward_ref_is_a_component_node(self, tmp_path, monkeypatch, tree_sitter):
+        source = ('import * as React from "react";\n'
+                  'function cn(...xs) { return xs.join(" "); }\n'
+                  "const Button = React.forwardRef<HTMLButtonElement, Props>(\n"
+                  "  ({ className, ...props }, ref) => {\n"
+                  "    return <button className={cn(className)} ref={ref} {...props} />;\n"
+                  "  }\n);\n"
+                  "export { Button };\n")
+        nodes, edges = self._index(tmp_path, source, tree_sitter=tree_sitter,
+                                   monkeypatch=monkeypatch)
+        assert nodes["button.Button"]["type"] == "function"
+        assert nodes["button.Button"]["source_location"] == "L3"
+        assert ("button", "button.Button", "contains") in edges
+        # The wrapped function is the component's body: its calls are Button's.
+        assert ("button.Button", "button.cn", "calls") in edges
+
+    @BOTH
+    def test_named_memo_and_nested_wrappers_are_nodes(self, tmp_path, monkeypatch, tree_sitter):
+        source = ('import { memo, forwardRef } from "react";\n'
+                  "function track(x) { return x; }\n"
+                  "export const Card = memo(function Card(props) {\n"
+                  "  return track(props);\n});\n"
+                  "export const Field = memo(forwardRef((props, ref) => {\n"
+                  "  return track(ref);\n}));\n")
+        nodes, edges = self._index(tmp_path, source, tree_sitter=tree_sitter,
+                                   monkeypatch=monkeypatch, name="card.tsx")
+        assert nodes["card.Card"]["type"] == "function"
+        assert nodes["card.Field"]["type"] == "function"
+        assert ("card.Card", "card.track", "calls") in edges
+        assert ("card.Field", "card.track", "calls") in edges
+
+    @BOTH
+    def test_a_memo_that_is_not_reacts_makes_no_node(self, tmp_path, monkeypatch, tree_sitter):
+        # hono ships its own memo; only React's is known to return the component.
+        source = ('import { memo } from "./jsx";\n'
+                  "export const Card = memo((props) => props.children);\n")
+        nodes, _ = self._index(tmp_path, source, tree_sitter=tree_sitter,
+                               monkeypatch=monkeypatch, name="card.tsx")
+        assert "card.Card" not in nodes
+
+    @BOTH
+    def test_memo_of_an_identifier_is_a_node(self, tmp_path, monkeypatch, tree_sitter):
+        source = ('import React from "react";\n'
+                  "function ExcalidrawBase(props) { return null; }\n"
+                  "export const Excalidraw = React.memo(ExcalidrawBase, areEqual);\n")
+        nodes, _ = self._index(tmp_path, source, tree_sitter=tree_sitter,
+                               monkeypatch=monkeypatch, name="index.tsx")
+        assert nodes["index.Excalidraw"]["type"] == "function"
+
+
 class TestTSModulePathResolution:
     """_ts_resolve_module_path — specifier to dotted module id."""
 

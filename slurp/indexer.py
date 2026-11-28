@@ -788,6 +788,17 @@ def _index_typescript_regex(
             continue
         _add(m.group(1), "function", _lineno(source, m.start()))
 
+    # Components wrapped in React's memo / forwardRef (see _TS_COMPONENT_WRAPPERS).
+    react_bindings = _ts_regex_react_bindings(source)
+    for m in _TS_WRAPPED_RE.finditer(source):
+        if any(start <= m.start() < end for start, end in class_spans):
+            continue
+        owner, wrapper = m.group(2), m.group(3)
+        if (owner and react_bindings.get(owner) in ("default", "*")) or \
+                (not owner and react_bindings.get(wrapper) in _TS_COMPONENT_WRAPPERS):
+            _add(m.group(1), "function", _lineno(source, m.start()))
+            nodes[-1][_TS_WRAPPED] = True
+
     for m in _TS_IMPORT_CLAUSE_RE.finditer(source):
         type_only, clause, module_path = m.group(1), m.group(2), m.group(3)
         safe = module_path.rsplit("/", 1)[-1].replace("-", "_").replace(".", "_")
@@ -978,6 +989,178 @@ _TS_SOURCE_MODULE = "_source_module"
 _TS_IMPORT_KIND = "_import_type"
 
 
+# --- React components (v1.5, #87, docs/design/jsx-v1.5.md) ------------------
+#
+# DECISION: a component wrapped in React.memo or React.forwardRef is the const
+# that receives the wrapper's result, so that const is a node and the wrapped
+# function is its body. Until v1.4 only arrow and function values were nodes, so
+# the most used components of a shadcn/ui project (Button, Input, Label: all
+# forwardRef) had nothing a usage could point at. Only React's wrappers count —
+# hono ships a `memo` of its own, and an unknown wrapper may return anything.
+_TS_COMPONENT_WRAPPERS = frozenset({"memo", "forwardRef"})
+# Private keys: a wrapper const found by the regex branch (its body is the wrapped
+# function's), and the module a lazily loaded component comes from.
+_TS_WRAPPED = "_ts_wrapped"
+_TS_PENDING_MODULE = "_ts_pending_module"
+
+
+def _ts_import_labels(records: list[dict]) -> dict[str, str]:
+    """Import node id -> the module it names, for the records emitted so far."""
+    return {r["id"]: str(r.get("label", "")) for r in records if r.get("type") == "import"}
+
+
+def _ts_react_callee(callee, imports: dict, labels: dict, text, names) -> bool:
+    """`name(...)` imported from react (aliases included), or `React.name(...)`."""
+    if callee is None:
+        return False
+    if callee.type == "identifier":
+        bound = imports.get(text(callee))
+        return bound is not None and bound[1] in names and labels.get(bound[0]) == "react"
+    if callee.type == "member_expression":
+        obj, prop = callee.child_by_field_name("object"), callee.child_by_field_name("property")
+        if obj is None or prop is None or obj.type != "identifier" or text(prop) not in names:
+            return False
+        bound = imports.get(text(obj))
+        return bound is not None and bound[1] in ("default", "*") and \
+            labels.get(bound[0]) == "react"
+    return False
+
+
+def _ts_first_argument(call):
+    args = call.child_by_field_name("arguments")
+    return next((c for c in (args.children if args else [])
+                 if c.type not in ("(", ")", ",", "comment")), None)
+
+
+def _ts_unwrap_component(value, imports: dict, labels: dict, text):
+    """("inline", function node) for `memo(fn)`, `forwardRef(fn)`, `memo(forwardRef(fn))`;
+    ("alias", name) for `memo(Name)`; None for anything else."""
+    depth = 0
+    while value is not None and value.type == "call_expression" and depth < 3:
+        if not _ts_react_callee(value.child_by_field_name("function"), imports, labels, text,
+                                _TS_COMPONENT_WRAPPERS):
+            return None
+        first = _ts_first_argument(value)
+        if first is None:
+            return None
+        if first.type in ("arrow_function", "function", "function_expression"):
+            return ("inline", first)
+        if first.type == "identifier":
+            return ("alias", text(first))
+        value, depth = first, depth + 1
+    return None
+
+
+def _ts_dynamic_import(arrow, text) -> tuple[str, str] | None:
+    """`() => import("spec")` -> (spec, "default"); `.then(m => m.X)` -> (spec, "X")."""
+    if arrow is None or arrow.type != "arrow_function":
+        return None
+    body = arrow.child_by_field_name("body")
+
+    def spec_of(call) -> str | None:
+        if call is None or call.type != "call_expression":
+            return None
+        fn = call.child_by_field_name("function")
+        if fn is None or fn.type != "import":
+            return None
+        args = call.child_by_field_name("arguments")
+        strings = [c for c in (args.children if args else []) if c.type == "string"]
+        return text(strings[0]).strip("'\"") if len(strings) == 1 else None
+
+    direct = spec_of(body)
+    if direct is not None:
+        return (direct, "default")
+    if body is None or body.type != "call_expression":
+        return None
+    fn = body.child_by_field_name("function")
+    if fn is None or fn.type != "member_expression" or \
+            text(fn.child_by_field_name("property")) != "then":
+        return None
+    spec = spec_of(fn.child_by_field_name("object"))
+    callback = _ts_first_argument(body)
+    if spec is None or callback is None or callback.type != "arrow_function":
+        return None
+    params = callback.child_by_field_name("parameter") or \
+        callback.child_by_field_name("parameters")
+    param = text(params).strip("() ")
+    picked = callback.child_by_field_name("body")
+    if not re.fullmatch(r"[A-Za-z_$][\w$]*", param) or picked is None or \
+            picked.type != "member_expression" or \
+            text(picked.child_by_field_name("object")) != param:
+        return None
+    return (spec, text(picked.child_by_field_name("property")))
+
+
+def _ts_lazy_component(value, imports: dict, labels: dict, text) -> tuple[str, str] | None:
+    """(specifier, symbol) for `lazy(() => import(...))` from react, `React.lazy(...)`, or
+    `dynamic(() => import(...))` from next/dynamic; None otherwise."""
+    if value is None or value.type != "call_expression":
+        return None
+    callee = value.child_by_field_name("function")
+    ok = _ts_react_callee(callee, imports, labels, text, {"lazy"})
+    if not ok and callee is not None and callee.type == "identifier":
+        bound = imports.get(text(callee))
+        ok = bound is not None and bound[1] == "default" and labels.get(bound[0]) == "next/dynamic"
+    return _ts_dynamic_import(_ts_first_argument(value), text) if ok else None
+
+
+# `const X = memo(` / `const X = React.forwardRef<…>(` at the start of a line.
+_TS_WRAPPED_RE = re.compile(
+    r"(?m)^[ \t]*(?:export\s+)?(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*"
+    r"(?:([A-Za-z_$][\w$]*)\s*\.\s*)?(memo|forwardRef)\s*[(<]"
+)
+_TS_WRAPPER_CALL_RE = re.compile(r"(?:[A-Za-z_$][\w$]*\s*\.\s*)?(?:memo|forwardRef)\s*(?=[(<])")
+
+
+def _ts_regex_react_bindings(source: str) -> dict[str, str]:
+    """Local name -> exported name, for every binding imported from "react"."""
+    out: dict[str, str] = {}
+    for m in _TS_IMPORT_CLAUSE_RE.finditer(source):
+        if not m.group(1) and m.group(3) == "react":
+            out.update(_ts_parse_clause_text(m.group(2))[1])
+    return out
+
+
+def _ts_wrapped_body_span(source: str, start: int) -> tuple[int, int] | None:
+    """Body of the function a `memo(...)`/`forwardRef(...)` const wraps.
+
+    Looked for from the wrapper's argument, because `forwardRef<A, B>(({ a }, ref) =>`
+    opens with a destructured parameter too.
+    """
+    m = re.compile(r"\s*=\s*").match(source, start)
+    if m is None:
+        return None
+    i, n = m.end(), len(source)
+
+    def skip_ws(k: int) -> int:
+        while k < n and source[k].isspace():
+            k += 1
+        return k
+
+    for _ in range(3):
+        call = _TS_WRAPPER_CALL_RE.match(source, i)
+        if call is None:
+            return None
+        i = call.end()
+        if source[i] == "<":
+            close = _match_close(source, i, "<", ">")
+            if close is None:
+                return None
+            i = skip_ws(close + 1)
+        if i >= n or source[i] != "(":
+            return None
+        i = skip_ws(i + 1)
+        if _TS_WRAPPER_CALL_RE.match(source, i) is None:
+            break
+    if source.startswith("async", i):
+        i = skip_ws(i + 5)
+    if source.startswith("function", i):
+        i = skip_ws(i + 8)
+        while i < n and (source[i].isalnum() or source[i] in "_$"):
+            i += 1
+    return _ts_body_span(source, i)
+
+
 def _ts_return_name(declared: str) -> str:
     """Bare class name a `: Type` return annotation names, or "".
 
@@ -1039,13 +1222,20 @@ class _TSVisitor(_BaseVisitor):
         self._recurse(node)
 
     def visit_lexical_declaration(self, node) -> None:
+        labels: dict[str, str] | None = None
         for child in node.children:
             if child.type == "variable_declarator":
                 name_node = child.child_by_field_name("name")
                 val_node = child.child_by_field_name("value")
-                if name_node and val_node and val_node.type in ("arrow_function", "function"):
-                    name = name_node.text.decode("utf-8")
-                    self._emit(name, "function", child.start_point[0] + 1)
+                if not name_node or not val_node:
+                    continue
+                if val_node.type in ("arrow_function", "function"):
+                    self._emit(name_node.text.decode("utf-8"), "function", child.start_point[0] + 1)
+                elif val_node.type == "call_expression":
+                    labels = labels if labels is not None else _ts_import_labels(self.nodes)
+                    if _ts_unwrap_component(val_node, self.imports, labels, self._text):
+                        self._emit(name_node.text.decode("utf-8"), "function",
+                                   child.start_point[0] + 1)
 
     def visit_import_statement(self, node) -> None:
         source_child = node.child_by_field_name("source")
@@ -1139,11 +1329,14 @@ class _TSCallVisitor(_BaseVisitor):
         file_id: str,
         symbols: dict[str, str],
         imports: dict[str, tuple[str, str]] | None = None,
+        records: list[dict] | None = None,
     ) -> None:
         super().__init__(rel_path, file_id)
         self.symbols = symbols
         # Local binding -> (import node id, exported name), from _TSVisitor.
         self.imports = imports or {}
+        # Import node id -> module, to tell React's memo/forwardRef/lazy apart.
+        self._labels = _ts_import_labels(records or [])
         self.bases: dict[str, list[str]] = {}
         self.module_id = file_id
         self._kinds: list[str] = ["module"]
@@ -1295,6 +1488,19 @@ class _TSCallVisitor(_BaseVisitor):
         name_node = node.child_by_field_name("name")
         value = node.child_by_field_name("value")
         name = self._text(name_node) if name_node is not None else ""
+
+        # `const Button = React.forwardRef((props, ref) => ...)`: the wrapped
+        # function is the body of the Button node _TSVisitor emitted.
+        if name and value is not None and value.type == "call_expression":
+            nid = f"{self._parent}.{name}"
+            wrapped = _ts_unwrap_component(value, self.imports, self._labels, self._text)
+            if wrapped is not None and wrapped[0] == "inline" and nid in self.symbols:
+                self._locals.append({})
+                self._push(nid, "function")
+                self._recurse(wrapped[1])
+                self._pop()
+                self._locals.pop()
+                return
 
         # `const handler = () => {...}` is emitted as a function node by
         # _TSVisitor, so its body belongs to that node, not the enclosing one.
@@ -1607,7 +1813,8 @@ def _ts_regex_call_edges(
         start = _ts_decl_offset(clean, int(location[1:]), node["label"])
         if start is None:
             continue
-        span = _ts_body_span(clean, start)
+        span = (_ts_wrapped_body_span(clean, start) if node.get(_TS_WRAPPED)
+                else _ts_body_span(clean, start))
         if span is not None and span[1] > span[0]:
             spans.append((span[0], span[1], nid, class_id))
 
@@ -1762,7 +1969,7 @@ def index_typescript(path: Path, root: Path | None = None) -> tuple[list[dict], 
                 for n in visitor.nodes
                 if n.get("type") in ("function", "class")
             }
-            calls = _TSCallVisitor(rel, fid, symbols, visitor.imports)
+            calls = _TSCallVisitor(rel, fid, symbols, visitor.imports, visitor.nodes)
             calls.returns = {
                 n["label"]: n["return_type"] for n in visitor.nodes
                 if n.get("return_type") and n.get("type") == "function"

@@ -184,6 +184,21 @@ uv sync --extra rust            # solo una
       guiones igual que `_file_id` (`admin-actions` → `admin_actions`).
     - `import type {...}` y los `type X` en línea se ignoran: no existen en
       runtime, no pueden llamarse.
+    - **Componentes de `memo`/`forwardRef` son nodos** (v1.5, #87, W2): `const X = W(fn)`
+      con `W` = `memo`/`forwardRef` importado de `"react"` (alias incluidos) o
+      `React.memo`/`React.forwardRef` con `React` de `"react"`, y `fn` una función o otro
+      envoltorio → nodo función `X`, y `fn` es su ámbito (sus llamadas son de `X`).
+      `memo(Y)` → nodo `X`. Un `memo` que no sea de React (hono trae el suyo) no cuenta.
+      Rama regex: `_TS_WRAPPED_RE` + `_ts_wrapped_body_span`, que busca el cuerpo desde el
+      argumento del envoltorio (`forwardRef<A, B>(({ a }, ref) =>` abre con un parámetro
+      desestructurado). Hasta la v1.4 los shadcn/ui (`Button`, `Input`…) no eran nodos.
+    - **Rama regex: cuerpos y líneas** (v1.5): el blanqueo conserva los saltos de línea
+      (`_blank_keeping_lines`, también en Java); `_ts_decl_offset` exige el nombre como
+      palabra en su línea o no hay cuerpo; `_ts_body_span` cierra los parámetros antes de
+      buscar el cuerpo y reconoce `=> ( … )` y las expresiones hasta `;` o salto de línea;
+      un id declarado dos veces en un fichero no es destino de ninguna llamada. Medido en
+      `docs/design/jsx-v1.5/resultados/rama-regex.md`: mal atribuidas 20 → 0 (PrismaStats)
+      y 100 → 0 (excalidraw).
     - **JSX no es una llamada** (medido en v1.2.1, #81; sin arreglar): `<Badge />` no genera
       edge `calls`, solo `Badge()`. En un proyecto React casi todos los componentes salen
       LOW en explain e impact con un grafo de `slurp index`: PrismaStats, 530 de 536 nodos
