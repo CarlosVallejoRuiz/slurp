@@ -1412,51 +1412,136 @@ _TS_DECL_KEYWORDS = frozenset({"function", "class", "interface", "new", "return"
                                "in", "of", "as", "extends", "implements"})
 
 
+def _blank_keeping_lines(match: re.Match) -> str:
+    """A blanked comment or literal: spaces, but every line break kept.
+
+    DECISION: declarations are found again by their line number in the blanked
+    text (_ts_decl_offset), so blanking must not move any line. Until v1.4 a
+    multi-line comment or template turned into one line of spaces, every
+    declaration below it was looked up lines too low, and a function took the
+    body — and the calls — of the one further down (PrismaStats: 197
+    declarations, 70 calls edges from them; excalidraw: 1,374 and 329).
+    """
+    return re.sub(r"[^\n]", " ", match.group(0))
+
+
 def _ts_blank_noise(source: str) -> str:
-    """Replace comments and string literals with spaces, preserving offsets."""
-    return _TS_NOISE_RE.sub(lambda m: " " * len(m.group(0)), source)
+    """Replace comments and string literals with spaces, preserving offsets and lines."""
+    return _TS_NOISE_RE.sub(_blank_keeping_lines, source)
+
+
+def _match_close(source: str, i: int, open_ch: str, close_ch: str) -> int | None:
+    """Index of the bracket closing the one at *i*, or None."""
+    depth = 0
+    for k in range(i, len(source)):
+        if source[k] == open_ch:
+            depth += 1
+        elif source[k] == close_ch:
+            depth -= 1
+            if depth == 0:
+                return k
+    return None
+
+
+def _expression_end(source: str, start: int) -> int:
+    """Where an arrow's expression body ends: `;`, or a line break outside brackets."""
+    depth = 0
+    for k in range(start, len(source)):
+        ch = source[k]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                return k
+            depth -= 1
+        elif depth == 0 and ch in ";\n":
+            return k
+    return len(source)
 
 
 def _ts_body_span(source: str, start: int) -> tuple[int, int] | None:
-    """Span of the body belonging to the declaration at offset *start*.
+    """Span of the body belonging to the declaration whose name ends at *start*.
 
-    DECISION: whichever of `{` or `;` comes first decides the shape. A brace
-    opens a block body and is matched to its closer; a semicolon means either a
-    concise arrow body (`const f = () => expr;`) or a bodyless signature
-    (`abstract load(id: string): unknown;`), and the span stops there. Scanning
-    for the next `{` unconditionally would hand an abstract signature the body
-    of whatever method follows it, and attribute that method's calls to the
-    wrong node.
+    DECISION: the parameter list is closed first, and only then is the body
+    looked for. Until v1.4 the first `{` after the name was the body, which in
+    `function Page({ title })` — how every React component is written — is the
+    destructured parameter: the real body was outside every span and its calls
+    were lost. After the parameters, whichever comes first decides the shape:
+    - `;`: a signature without a body (`abstract load(id: string): unknown;`),
+      so no span — handing it the next body would attribute that body's calls
+      to the wrong node;
+    - `{`: a block body, matched to its closer;
+    - `=>`: an arrow, whose body is a block, a parenthesised expression (the
+      usual JSX return) or an expression running to `;` or to a line break
+      outside brackets (code without semicolons must not run into the next
+      declaration).
     """
-    open_idx = source.find("{", start)
-    semi_idx = source.find(";", start)
-    if open_idx == -1 or (semi_idx != -1 and semi_idx < open_idx):
-        return (start, semi_idx) if semi_idx != -1 else None
-    depth = 0
-    for i in range(open_idx, len(source)):
-        ch = source[i]
+    n = len(source)
+
+    def skip_ws(i: int) -> int:
+        while i < n and source[i].isspace():
+            i += 1
+        return i
+
+    i = skip_ws(start)
+    if i < n and source[i] == "=" and source[i + 1:i + 2] not in (">", "="):
+        i = skip_ws(i + 1)
+        if source.startswith("async", i):
+            i = skip_ws(i + 5)
+        if source.startswith("function", i):
+            i = skip_ws(i + 8)
+            while i < n and (source[i].isalnum() or source[i] in "_$*"):
+                i += 1
+            i = skip_ws(i)
+    if i < n and source[i] == "<":
+        close = _match_close(source, i, "<", ">")
+        if close is None:
+            return None
+        i = skip_ws(close + 1)
+    if i < n and source[i] == "(":
+        close = _match_close(source, i, "(", ")")
+        if close is None:
+            return None
+        i = close + 1
+    elif i < n and (source[i].isalpha() or source[i] in "_$"):
+        while i < n and (source[i].isalnum() or source[i] in "_$"):
+            i += 1
+    for k in range(i, n):
+        ch = source[k]
+        if ch == ";":
+            return None
         if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return open_idx, i
+            close = _match_close(source, k, "{", "}")
+            return (k, close) if close is not None else None
+        if source.startswith("=>", k):
+            body = skip_ws(k + 2)
+            if body < n and source[body] == "{":
+                close = _match_close(source, body, "{", "}")
+                return (body, close) if close is not None else None
+            if body < n and source[body] == "(":
+                close = _match_close(source, body, "(", ")")
+                return (body, close) if close is not None else None
+            # From the arrow itself: the expression's first call must be inside.
+            return (k, _expression_end(source, body))
     return None
 
 
 def _ts_decl_offset(source: str, lineno: int, name: str) -> int | None:
-    """Offset of *name* on 1-based line *lineno*, the declaration's own line.
+    """Offset just past *name* on 1-based line *lineno*, the declaration's own line.
 
     Anchoring on the recorded declaration line rather than the first textual
     match keeps two same-named members (an abstract signature and its concrete
-    override) from resolving to each other's body.
+    override) from resolving to each other's body. The name must stand as a
+    whole word on that line; otherwise there is no offset — until v1.4 the end
+    of the line was returned instead, and whatever body came next was taken.
     """
     lines = source.splitlines(keepends=True)
     if not 1 <= lineno <= len(lines):
         return None
-    offset = sum(len(line) for line in lines[: lineno - 1])
-    column = lines[lineno - 1].find(name)
-    return offset + column + len(name) if column != -1 else offset + len(lines[lineno - 1])
+    found = re.search(rf"(?<![\w$]){re.escape(name)}(?![\w$])", lines[lineno - 1])
+    if found is None:
+        return None
+    return sum(len(line) for line in lines[: lineno - 1]) + found.end()
 
 
 def _ts_regex_call_edges(
@@ -2802,8 +2887,13 @@ _JAVA_KEYWORDS = frozenset({
 
 
 def _java_blank_noise(source: str) -> str:
-    """Replace comments and literals with spaces, preserving every offset."""
-    return _JAVA_NOISE_RE.sub(lambda m: " " * len(m.group(0)), source)
+    """Replace comments and literals with spaces, preserving every offset and line.
+
+    Lines must stay put: method bodies are found by their declaration line
+    (_ts_decl_offset), and a Javadoc block turned into one line shifted every
+    declaration below it (see _blank_keeping_lines).
+    """
+    return _JAVA_NOISE_RE.sub(_blank_keeping_lines, source)
 
 
 def _java_regex_call_edges(

@@ -2894,6 +2894,72 @@ class TestTSCallEdges:
         calls = self._calls(tmp_path, source, tree_sitter=tree_sitter, monkeypatch=monkeypatch)
         assert ("payments.main", "payments.helper") in calls
 
+    # -- regex body detection (v1.5): both branches must agree -----------
+
+    @pytest.mark.parametrize("tree_sitter", [True, False], ids=["treesitter", "regex"])
+    def test_a_multiline_comment_does_not_shift_declarations(
+        self, tmp_path, monkeypatch, tree_sitter
+    ):
+        # Blanking turned the comment's line breaks into spaces, so every
+        # declaration below was looked up two lines too low: `draw` took the
+        # body of `audit` and both of its calls (two false edges).
+        if tree_sitter and not _TREE_SITTER_AVAILABLE:
+            pytest.skip("requires the 'ts' extra")
+        source = ("/*\n * Shared helpers.\n */\n"
+                  "export function render() {\n  return 1;\n}\n"
+                  "export function draw() {\n  return 2;\n}\n"
+                  "export function audit() {\n  log();\n  return render();\n}\n"
+                  "function log() {\n  return 3;\n}\n")
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter, monkeypatch=monkeypatch,
+                            name="shift.ts")
+        assert calls == {("shift.audit", "shift.log"), ("shift.audit", "shift.render")}
+
+    @pytest.mark.parametrize("tree_sitter", [True, False], ids=["treesitter", "regex"])
+    def test_a_multiline_template_does_not_shift_declarations(
+        self, tmp_path, monkeypatch, tree_sitter
+    ):
+        if tree_sitter and not _TREE_SITTER_AVAILABLE:
+            pytest.skip("requires the 'ts' extra")
+        source = ("const banner = `one\ntwo\nthree`;\n"
+                  "export function render() {\n  return 1;\n}\n"
+                  "export function draw() {\n  return 2;\n}\n"
+                  "export function audit() {\n  log();\n  return render();\n}\n"
+                  "function log() {\n  return 3;\n}\n")
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter, monkeypatch=monkeypatch,
+                            name="shift.ts")
+        assert calls == {("shift.audit", "shift.log"), ("shift.audit", "shift.render")}
+
+    @pytest.mark.parametrize("tree_sitter", [True, False], ids=["treesitter", "regex"])
+    def test_destructured_parameters_are_not_the_body(self, tmp_path, monkeypatch, tree_sitter):
+        # `function Page({ title })` is how a React component is written; the
+        # regex took the parameter's `{` for the body and lost every call.
+        if tree_sitter and not _TREE_SITTER_AVAILABLE:
+            pytest.skip("requires the 'ts' extra")
+        source = ("export function Page({ title, items }: Props) {\n"
+                  "  return <main>{format(title)}</main>;\n}\n"
+                  "export const Row = ({ id }: { id: string }) => (\n"
+                  "  <li>{format(id)}</li>\n);\n"
+                  "export const Cell = ({ v }) => format(v);\n"
+                  "function format(x) { return String(x); }\n")
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter, monkeypatch=monkeypatch,
+                            name="page.tsx")
+        assert calls == {("page.Page", "page.format"), ("page.Row", "page.format"),
+                         ("page.Cell", "page.format")}
+
+    @pytest.mark.parametrize("tree_sitter", [True, False], ids=["treesitter", "regex"])
+    def test_an_expression_body_without_semicolons_stops_at_its_line(
+        self, tmp_path, monkeypatch, tree_sitter
+    ):
+        # No-semicolon style: the concise body of `a` must not run into `b`.
+        if tree_sitter and not _TREE_SITTER_AVAILABLE:
+            pytest.skip("requires the 'ts' extra")
+        source = ("export const a = (x) => wrap(x)\n"
+                  "export function b() {\n  return unwrap(1)\n}\n"
+                  "function wrap(x) { return x }\nfunction unwrap(x) { return x }\n")
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter, monkeypatch=monkeypatch,
+                            name="nosemi.ts")
+        assert calls == {("nosemi.a", "nosemi.wrap"), ("nosemi.b", "nosemi.unwrap")}
+
     @pytest.mark.parametrize("tree_sitter", [True, False], ids=["treesitter", "regex"])
     def test_this_method_call(self, tmp_path, monkeypatch, tree_sitter):
         if tree_sitter and not _TREE_SITTER_AVAILABLE:
@@ -3925,6 +3991,23 @@ class TestJavaCallEdges:
         _, edges = self._index(tmp_path, source, tree_sitter=tree_sitter,
                                monkeypatch=monkeypatch, name=name)
         return {(e["source"], e["target"]) for e in edges if e["relation"] == "calls"}
+
+    @BOTH
+    def test_a_javadoc_block_does_not_shift_declarations(self, tmp_path, monkeypatch,
+                                                         tree_sitter):
+        # The same blanking defect as TypeScript's: a three-line Javadoc moved
+        # every method below it two lines, and `draw` took `audit`'s calls.
+        self._skip(tree_sitter)
+        source = ("package demo;\n\npublic class Shop {\n"
+                  "    /**\n     * Renders the page.\n     */\n"
+                  "    public int render() {\n        return 1;\n    }\n\n"
+                  "    public int draw() {\n        return 2;\n    }\n\n"
+                  "    public int audit() {\n        log();\n        return render();\n    }\n\n"
+                  "    private int log() {\n        return 3;\n    }\n}\n")
+        calls = self._calls(tmp_path, source, tree_sitter=tree_sitter,
+                            monkeypatch=monkeypatch, name="Shop.java")
+        assert calls == {("Shop.Shop.audit", "Shop.Shop.log"),
+                         ("Shop.Shop.audit", "Shop.Shop.render")}
 
     # -- the reference sample --------------------------------------------
 
