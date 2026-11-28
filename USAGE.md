@@ -459,12 +459,12 @@ slurp index . -o graphify-out/slurp-graph.json
 slurp index . --force
 ```
 
-**Example output on PrismaStats** (real output, v1.2.0; the paths are placeholders):
+**Example output on PrismaStats** (real output, v1.5.0; the paths are placeholders):
 
-<!-- example: index · slurp v1.2.0 · slurp index /path/to/prismastats -->
+<!-- example: index · slurp v1.5.0 · slurp index /path/to/prismastats -->
 ```
 Indexing /path/to/prismastats ...
-✓ 1582 nodes · 1852 edges · 185 files
+✓ 1638 nodes · 2284 edges · 185 files
   Parsers: Python (ast) · TypeScript (tree-sitter)
   Saved: /path/to/prismastats/graphify-out/graph.json
 

@@ -1391,12 +1391,14 @@ slurp index . --force                     # replace a graph another tool wrote
 > `slurp init` builds slurp's graph in `graphify-out/slurp-graph.json` by default when
 > graphify's is there.
 
-Real output, v1.2.0 on PrismaStats (the graph the retrieval figures use; the paths are placeholders):
+Real output, v1.5.0 on PrismaStats (the paths are placeholders). The retrieval figures in
+[Choosing a budget](#choosing-a-budget) use this project's v1.2.0 graph, 1,582 nodes and
+1,852 edges; v1.5's React components add 56 nodes and the `renders` edges:
 
-<!-- example: index · slurp v1.2.0 · slurp index /path/to/prismastats -->
+<!-- example: index · slurp v1.5.0 · slurp index /path/to/prismastats -->
 ```
 Indexing /path/to/prismastats ...
-✓ 1582 nodes · 1852 edges · 185 files
+✓ 1638 nodes · 2284 edges · 185 files
   Parsers: Python (ast) · TypeScript (tree-sitter)
   Saved: /path/to/prismastats/graphify-out/graph.json
 
@@ -1440,7 +1442,8 @@ anything else, use [`.slurpignore`](#slurpignore).
 > `memo` or `forwardRef` (`const Button = React.forwardRef(...)`) is a node, so its
 > renderers count too. One edge per pair: a component that is also called as a function
 > keeps `calls`. `renders` counts wherever `calls` does — dependants and risk in
-> `explain`, `impact` and `diff`, and the ranking's walk.
+> `explain`, `impact` and `diff`, and the ranking's walk. JSX in a `.js` file is read by
+> the regex fallback, with the same rules: the TypeScript grammar does not parse it.
 >
 > **Return type propagation**: `srv := NewServer()` followed by `srv.Start()` now
 > generates a call edge for Go, Rust, Java and TypeScript. The return type must be
@@ -1640,12 +1643,12 @@ query commands keep the graph current on their own (see
 Every tree-sitter language falls back to a regex parser when its grammar is not
 installed. The fallback extracts strictly less — it cannot nest inner classes or
 reach into method bodies — so `slurp index` always prints which parser it used.
-Real output, v1.2.0 on PrismaStats without the `ts` extra (with it, the same
-project indexes to 1582 nodes and 1852 edges):
+Real output, v1.5.0 on PrismaStats without the `ts` extra (with it, the same
+project indexes to 1638 nodes and 2284 edges):
 
-<!-- example: index-fallback · slurp v1.2.0 · slurp index /path/to/prismastats, in a virtualenv without the ts extra -->
+<!-- example: index-fallback · slurp v1.5.0 · slurp index /path/to/prismastats, in a virtualenv without the ts extra -->
 ```
-✓ 1521 nodes · 1562 edges · 185 files
+✓ 1577 nodes · 2113 edges · 185 files
   Parsers: Python (ast) · TypeScript (regex fallback)
   Install the 'ts' extra for full TypeScript support: uv sync --extra ts
 ```
@@ -1947,6 +1950,79 @@ Pass a custom path with `--ignore-file path/to/.slurpignore`.
 - ✅ **v1.2.1** — Fixes: `slurp index --smart` no longer runs a full index on every run when `.slurpignore` excludes a whole file; every command that writes `graph.json` replaces it atomically, so the MCP server never loads half a graph; `slurp impact`'s AFFECTED FILES list counts the files its headline counts; `--suggest` gives the same suggestions in every run; `--inject-code` says when it cuts a block at 100 lines; `slurp index` treats graphs written by v1.3 as its own
 - ✅ **v1.3.0** — slurp over MCP with no intervention: the graph follows the working tree in the CLI and over MCP (a manifest in `graph.json`, checked before every answer in 0.4 ms, refreshed within 2 s, graphify's graphs left read-only); `slurp init` builds slurp's own graph, approves the server and its tools for Claude Code and tells the agent when to use them; `--watch` polls instead of depending on watchdog; the MCP server negotiates protocol revisions up to 2026-07-28; the session log records every call; measured with agents: 9 of 10 sessions called slurp unprompted, with no approval asked
 - ✅ **v1.4.0** — A better ranking, measured: the semantic score reads a node's path and scope as well as its name, and the structural score is a PageRank personalised on the query — recall at `--budget 4000` 0.543 → 0.674 on six held-out projects of a 1,525-question bank from commit history, with the same tokens; warm queries 1.4–3.2× faster on all but the smallest reference graph, the first query on a freshly loaded graph up to 1.54× slower; `slurp explain` finds a graphify function by its name; `slurp_query` tells the agent when to pass 16000–32000
+- ✅ **v1.5.0** — React components have dependants: a JSX usage is a `renders` edge and components wrapped in React's `memo` or `forwardRef` are nodes — on PrismaStats, `Button` goes from no node to 32 production dependants and `HIGH`; recall at `--budget 4000` 0.674 → 0.677 on the six held-out projects of the bank, none lower; the TypeScript regex fallback no longer gives one function's calls to another; graphs from v1.4 are rebuilt before the first answer; `anthropic` becomes the `llm-anthropic` extra and `pathspec` goes
+
+### Upgrading to v1.5.0
+
+v1.5.0 gives React components the dependants they have. Until v1.4 a JSX usage, `<Badge />`,
+made no edge, so in a React project almost every component read `LOW` in `explain`, `impact`
+and `diff`. What changes if you already use slurp:
+
+- **JSX is a `renders` edge.** A component of the project rendered as JSX is a `renders` edge
+  from the function that renders it, under the call graph's rule: only what resolves with
+  certainty (see [`slurp index`](#slurp-index) for what is covered).
+  - On PrismaStats's `slurp index` graph, the nodes of its `.tsx` files (imports and tests left
+    out) read 530 `LOW`, 5 `MEDIUM` and 1 `HIGH` of 536 with v1.4. Now they read 540, 40 and 12
+    of 592, counting the new nodes.
+  - `Button` has 32 production dependants and reads `HIGH`, `Badge` 17 and `Input` 13. On
+    excalidraw, `IconButton` has 30.
+- **Components wrapped in React's `memo` or `forwardRef` are nodes.**
+  `const Button = React.forwardRef(...)` was no node, so the most used components of a
+  shadcn/ui project had nothing a usage could point at. The calls in their bodies are now
+  theirs, not their module's. PrismaStats gains 56 nodes and excalidraw 49.
+- **Your graph is rebuilt before the first answer.** A graph v1.4 wrote says so in its manifest,
+  so the first query, `explain`, `impact` or MCP call re-indexes it in full and then answers.
+  A graphify graph is never touched.
+  - `slurp diff` between a graph v1.4 wrote and one v1.5 writes shows the upgrade, not a change
+    of yours. On PrismaStats: 56 nodes and 448 edges added, 16 calls moved from the shadcn/ui
+    modules to their components, and a high impact.
+  - Compare graphs built by the same version.
+- **What it does to the ranking.** The personalised walk follows `renders` like `calls`. This
+  was checked on the 1,525-question bank, with every parent graph re-indexed by v1.5 and the
+  criterion fixed before measuring: the mean recall of the six validation projects at
+  `--budget 4000` in markdown may drop at most 0.01, and no project more than 0.03. Only the
+  projects with TypeScript move:
+
+  | Project | v1.4 | v1.5 |
+  |---|---|---|
+  | PrismaStats | 0.527 | 0.610 |
+  | hono | 0.891 | 0.893 |
+  | excalidraw | 0.583 | 0.599 |
+  | prometheus | 0.535 | 0.539 |
+  | **Validation mean (6)** | **0.674** | **0.677** |
+
+  - No project is lower. The ten projects without JSX give v1.4's figures question by
+    question.
+  - hono's gain comes from the regex fixes below, not from JSX.
+  - On the labelled architecture questions at 4000 in markdown, PrismaStats falls from 0.967
+    to 0.933 and slurp stays at 0.938. PrismaStats loses one question, arch-02, which shares no
+    word with its answer: the new nodes move the global PageRank enough to leave its module
+    out.
+- **The TypeScript regex fallback is fixed.** It indexes TypeScript without the `ts` extra, and
+  any file whose tree breaks (a `.js` file with JSX, or syntax the grammar does not know).
+  - Blanking a multi-line comment or template string moved every later declaration onto the
+    wrong line, so a function took the body and the calls of another.
+  - `function Page({ title })` lost its calls to the destructured parameter.
+  - A name declared twice in a file sent the calls of one copy to the other.
+  - Against tree-sitter, calls attributed to the wrong function went from 20 to 0 on
+    PrismaStats and from 100 to 0 on excalidraw. Java's fallback keeps its lines too.
+- **`anthropic` is no longer installed by default (#23).** Only `slurp explain` with the
+  anthropic provider needs it: `pip install "slurp-graph[llm-anthropic]"` (or
+  `uv tool install "slurp-graph[llm-anthropic]"`). Without it, `explain` answers with the
+  structural analysis and a note that names that command. `pathspec`, which nothing imported,
+  is gone too (#44).
+- **Indexing takes 3–4 % longer**: PrismaStats 0.33 → 0.35 s, excalidraw 1.82 → 1.88 s.
+- **Known gap, older than v1.5.** An `import type { X } from "./m"` written before
+  `import { Y } from "./m"` hides the value import, so neither calls nor renders from that file
+  reach `./m`. Write the value import first, or one import with `type` inline
+  (`import { Y, type X } from "./m"`).
+- Nothing else changes: the same commands, flags and MCP tools (their descriptions now name
+  `renders`), and `graph.json` with one more relation.
+
+Measurement records, in Spanish:
+[design](https://github.com/CarlosVallejoRuiz/slurp/blob/main/docs/design/jsx-v1.5.md),
+[bank](https://github.com/CarlosVallejoRuiz/slurp/blob/main/docs/design/jsx-v1.5/resultados/banco-real.md),
+[hand check](https://github.com/CarlosVallejoRuiz/slurp/blob/main/docs/design/jsx-v1.5/resultados/revision-manual.md).
 
 ### Upgrading to v1.4.0
 

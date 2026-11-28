@@ -560,8 +560,8 @@ uv sync --extra rust            # solo una
     `slurp_version` 1.4.0, así que la primera consulta por CLI o por MCP lo reindexa entero.
     Antes de responder gana las aristas `renders` y los nodos de `memo`/`forwardRef`.
     - Un grafo de graphify de un proyecto React no se toca.
-    - Lo fijan los tests de actualización de `tests/test_renders.py`; parchean `__version__`
-      a 1.5.0 hasta la subida de versión.
+    - Lo fijan los tests de actualización de `tests/test_renders.py`: convierten un grafo de
+      esta versión en el que escribió la 1.4.0.
   - **Propiedad** (`graphfile.graph_kind`): con manifiesto → propio; claves exactas de ≤ 1.2
     → se adopta si el 90 % de sus `source_file` existe bajo el padre de `graphify-out/` (o el
     directorio del grafo, ampliación del diseño), con un índice completo que escribe el
@@ -804,7 +804,9 @@ por debajo de la carpeta que abre el editor (`~/Desktop/Slurp/`). Todos los coma
 de este documento (`uv run pytest`, `ruff check`, `uv build`, `git`) se ejecutan
 desde `~/Desktop/Slurp/slurp/`, que es donde vive este CLAUDE.md.
 
-**Estado actual:** v1.4.0 · 3218 tests · `ruff check .` limpio. Orden de la v1.4: diseño,
+**Estado actual:** v1.5.0 · 3264 tests · `ruff check .` limpio. JSX como `renders` y los
+componentes de `memo`/`forwardRef` como nodos (#87): diseño, criterio y verificación en
+`docs/design/jsx-v1.5.md` y `docs/design/jsx-v1.5/resultados/`. Orden de la v1.4: diseño,
 regla de decisión y resultados en `docs/design/orden-v1.4.md` y `docs/design/orden-v1.4/resultados/`.
 Medición con agentes de la v1.3: `docs/design/mcp-autonomo/resultados/conclusiones.md`. #21 (docstrings como
 descripción) vive en la rama `v1.2-21-docstrings` (2722 tests), sin fusionar: se retoma con
@@ -872,7 +874,7 @@ anterior al workflow (v1.0.7). Job `publish`: `environment: pypi`, `id-token: wr
 publish, publish solo con `workflow_dispatch`, build sin `if`, sin secrets, sin `${{ }}` dentro
 de un `run:`).
 El trusted publisher de PyPI aún no está configurado: de la 1.0.7 a la 1.3.0 se subieron a mano
-con `uv publish` (el autor, con su clave), y la 1.4.0 se sube igual. Hasta la 1.4.0 el job `publish`
+con `uv publish` (el autor, con su clave), y la 1.4.0 y la 1.5.0 se suben igual. Hasta la 1.4.0 el job `publish`
 corría con cada tag y fallaba con `invalid-publisher`, dejando un despliegue fallido en `pypi`
 y una cruz roja en el commit (el `build` pasaba en Linux y sus ficheros eran idénticos a los
 locales); por eso pasó a ejecutarse solo a mano. Cuando el publisher esté configurado: "Run
@@ -906,6 +908,7 @@ No va en el paquete; `tests/test_latency_script.py` lo mantiene ejecutable.
 ├── scripts/readme_examples.py ← reejecuta las salidas de ejemplo de README y USAGE (no va en el paquete)
 ├── docs/design/mcp-autonomo.md ← diseño aprobado de la v1.3 (#76, #77)
 ├── docs/design/orden-v1.4.md  ← diseño, criterio y regla de decisión del orden de la v1.4
+├── docs/design/jsx-v1.5.md    ← diseño, criterio del banco y verificación de las aristas de JSX (#87)
 ├── docs/design/mcp-autonomo/  ← verificación, medición con agentes (preparada) y sus scripts
 ├── README.md
 ├── USAGE.md

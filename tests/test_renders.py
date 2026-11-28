@@ -15,7 +15,7 @@ import pytest
 from click.testing import CliRunner
 
 from slurp import indexer as indexer_mod
-from slurp import manifest, scorer
+from slurp import __version__, scorer
 from slurp.cli import cli
 from slurp.explainer import _risk_level, explain_node, format_explanation
 from slurp.formatter import format_subgraph
@@ -136,9 +136,8 @@ def _age(root: Path, seconds: float = 60) -> None:
 
 
 @pytest.fixture
-def v14_graph(tmp_path, monkeypatch) -> Path:
-    """graphify-out/graph.json as `slurp index` 1.4.0 wrote it, read by slurp 1.5.0."""
-    monkeypatch.setattr(manifest, "__version__", "1.5.0")   # until the release bump
+def v14_graph(tmp_path) -> Path:
+    """graphify-out/graph.json as `slurp index` 1.4.0 wrote it, read by this slurp."""
     root = tmp_path / "proj"
     _write_button_project(root)
     res = CliRunner().invoke(cli, ["index", str(root), "--ignore-file",
@@ -161,7 +160,7 @@ def _on_disk(graph: Path) -> dict:
 
 def _rebuilt_by_this_slurp(graph: Path) -> None:
     data = _on_disk(graph)
-    assert data["slurp"]["slurp_version"] == "1.5.0"
+    assert data["slurp"]["slurp_version"] == __version__
     assert _BUTTON_ID in {n["id"] for n in data["nodes"]}
     assert sum(1 for e in data["links"] if e["relation"] == "renders") == 7
 
