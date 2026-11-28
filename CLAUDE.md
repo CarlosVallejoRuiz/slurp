@@ -214,6 +214,20 @@ uv sync --extra rust            # solo una
       una arista que no es `calls` (antes le quitaba `_pending_symbol`, y una `renders`
       pendiente habría llegado vacía al de TS). Hasta la v1.4 el JSX no hacía arista: 530 de
       536 nodos de `.tsx` de PrismaStats salían LOW.
+      - Un `.js` con JSX da a la gramática de TypeScript un árbol con `ERROR` y se indexa
+        por la rama regex, que sí da `renders` y W2. El diseño decía «JSX en `.js`: no».
+      - Verificado sobre la implementación (`docs/design/jsx-v1.5/resultados/banco-real.md` y
+        `revision-manual.md`): el banco cumple el criterio (validación +0,0033, ningún
+        proyecto baja) y la revisión a mano da 45 de 45 casos correctos.
+    - **Defecto conocido, sin arreglar (anterior a la v1.5):** `import type { X } from "./m"`
+      escrito *antes* de `import { Y } from "./m"` hace perder el import de valores. Los dos
+      dan el mismo id de nodo import, `_assemble_graph` se queda con el primero, y el de tipos
+      no lleva símbolos ni `_TS_SOURCE_MODULE`.
+      - Resultado: ninguna `calls` ni `renders` hacia `./m` desde ese fichero, en las dos
+        ramas.
+      - En el otro orden, con `type` en línea o con dos imports de valores, funciona.
+      - En el HEAD del banco afecta a unos 47 ficheros de hono y 1 de PrismaStats.
+      - Arreglarlo cambia las `calls` y el grafo medido.
   - **Go** (regex-primario, sin gramática): los métodos se **anidan bajo su
     receiver** — `pkg.Struct.Method`, no `pkg.Method`. Antes el receiver se
     descartaba en un grupo no-capturador de `_GO_FUNC_RE`.

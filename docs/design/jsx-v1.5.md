@@ -2,12 +2,22 @@
 
 ## Estado
 
-- **Propuesta del 2026-11-28, pendiente de aprobación.** No se ha cambiado slurp: todo lo medido
-  sale de un prototipo fuera del paquete, en `docs/design/jsx-v1.5/`.
+- **Propuesta del 2026-11-28.** Las secciones 1 a 7 se escribieron sobre un prototipo fuera del
+  paquete, en `docs/design/jsx-v1.5/`.
 - **El criterio del banco lo fijó el autor antes de medir** (sección 5); este documento se
   registró antes de ejecutar el banco (`a6c9be6`).
-- **Resultado: W1 y W2 cumplen el criterio** (sección 6 y `jsx-v1.5/resultados/banco.md`). Faltan
-  dos decisiones del autor: la relación (`renders` o `calls`) y si entra W2 (sección 7).
+- **Resultado del prototipo: W1 y W2 cumplen el criterio** (sección 6 y
+  `jsx-v1.5/resultados/banco.md`).
+- **Decidido e implementado**, en este orden:
+  - la relación `renders`;
+  - W2 dentro;
+  - los arreglos de la rama regex antes que nada.
+
+  Commits: `55dad2f` y `7bafa0a` (rama regex), `c6b9378` (W2), `c210b1d` (`renders`).
+- **Verificado sobre la implementación** (sección 8):
+  - el banco cumple el criterio;
+  - 45 de 45 casos correctos en la revisión a mano;
+  - un defecto anterior encontrado, sin arreglar.
 
 ## El problema
 
@@ -83,7 +93,7 @@ solo si el nombre resuelve con certeza a un nodo función o clase del proyecto. 
 | Componentes de librerías (`lucide-react`, `recharts`…) | no | un *bare specifier* nunca resuelve (`_ts_resolve_module_path`) |
 | Nombre que no es local ni importado | no | global o inventado |
 | JSX fuera de toda función (`root.render(<App />)`) | tree-sitter: arista desde el módulo, como las llamadas de nivel de módulo; regex: no | |
-| JSX en ficheros `.js` | no | se parsean con la gramática de TypeScript, que no admite JSX: es otro asunto |
+| JSX en ficheros `.js` | no (**en la implementación: sí, por la rama regex**; sección 8) | se parsean con la gramática de TypeScript, que no admite JSX: es otro asunto |
 
 **W2: componentes envueltos en `memo`/`forwardRef`.** Hoy `const Button = React.forwardRef(...)`
 no es un nodo (solo lo son los valores flecha o `function`), así que un JSX que lo usa no tiene a
@@ -207,4 +217,36 @@ Detalle en `jsx-v1.5/resultados/banco.md`. Recall a 4000 en markdown:
 
 **Fuera de alcance** (huecos documentados): `<Obj.Miembro>` sin namespace (251 usos en excalidraw:
 compuestos con `Object.assign` o propiedades estáticas), componentes pasados como prop, fábricas
-(`createToolButton`), otros envoltorios (`styled`, `observer`…), JSX en ficheros `.js`.
+(`createToolButton`), otros envoltorios (`styled`, `observer`…), JSX en ficheros `.js` (en la
+implementación, cubierta por la rama regex; sección 8).
+
+## 8. Verificación de la implementación (2026-11-28)
+
+Detalle en `jsx-v1.5/resultados/banco-real.md` y `jsx-v1.5/resultados/revision-manual.md`.
+
+- **Banco con la implementación real.** Cada grafo padre se reindexa con `c210b1d`. Resultado:
+  - validación: 0,6741 → **0,6774 (+0,0033)**;
+  - ningún proyecto de los 14 baja;
+  - derivación: +0,0121;
+  - **cumple el criterio**;
+  - los diez proyectos sin JSX dan exactamente el recall de la v1.4;
+  - PrismaStats etiquetado: 0,967 → 0,933 (`arch-02`, como el prototipo); slurp sin cambios.
+- **Revisión a mano:** 30 de 30 aristas `renders` y 15 de 15 nodos W2 correctos (muestra con
+  semilla 87). Las bandas reales de PrismaStats son idénticas a las del prototipo. Las de
+  excalidraw suben dos nodos más, por aristas que el prototipo perdía.
+- **explain e impact** de `Button`, `Badge`, `Input` e `IconButton`: de LOW sin dependientes a
+  HIGH con 32, 17, 13 y 30 llamadores de producción.
+- **Diferencias con el prototipo** (todas comprobadas en el fuente):
+  - la v1.5 contiene todo lo del prototipo en el HEAD;
+  - gana 9 aristas que el prototipo perdía cuando un fichero importa del mismo módulo valores y
+    luego tipos;
+  - **la JSX de los `.js` sí entra:** un `.js` con JSX rompe el árbol de la gramática de
+    TypeScript, el fichero va por la rama regex y esa rama da `renders` y W2, con las mismas
+    reglas de certeza.
+- **Defecto anterior, sin arreglar:** un `import type { X } from "./m"` escrito antes de
+  `import { Y } from "./m"` hace perder el import de valores. Los dos tienen el mismo id de nodo
+  y gana el primero, que no lleva símbolos.
+  - No hay aristas `calls` ni `renders` hacia `./m` desde ese fichero, en las dos ramas.
+  - Ya pasaba en la v1.4 con las `calls`.
+  - En el HEAD del banco afecta a unos 47 ficheros de hono y 1 de PrismaStats.
+  - Arreglarlo cambia el grafo medido: decisión del autor.
